@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <title>The Suffering — Web</title>
+    <link rel="stylesheet" href="/src/app/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <header>
+          <h1>The Suffering <span>— Web</span></h1>
+          <button id="sidebar-toggle" title="Toggle level list" aria-label="Toggle level list">☰</button>
+        </header>
+        <div id="source">
+          <span id="source-label">No game data</span>
+          <span class="source-actions">
+            <button id="to-menu" class="link" hidden title="Back to the main menu">menu</button>
+            <button id="change-folder" class="link">change</button>
+          </span>
+        </div>
+        <nav id="levels"></nav>
+        <footer id="help">
+          <div><kbd>Click</kbd> look &nbsp; <kbd>WASD</kbd> move &nbsp; <kbd>Space</kbd>/<kbd>C</kbd> up/down</div>
+          <div><kbd>Shift</kbd> fast &nbsp; <kbd>Wheel</kbd> speed &nbsp; <kbd>F</kbd> flashlight</div>
+          <div><kbd>N</kbd> walk/fly &nbsp; <kbd>V</kbd> 1st/3rd person &nbsp; <kbd>Space</kbd> jump &nbsp; <kbd>C</kbd> crouch &nbsp; <kbd>R</kbd> respawn</div>
+          <div><kbd>G</kbd> fog &nbsp; <kbd>[</kbd>/<kbd>]</kbd> fog density &nbsp; <kbd>B</kbd> backfaces &nbsp; <kbd>Tab</kbd> list</div>
+        </footer>
+      </aside>
+
+      <main id="viewport">
+        <div id="hud">
+          <div id="stats"></div>
+          <div id="level-info"></div>
+        </div>
+        <div id="toast"></div>
+        <div id="hint">Click to look around</div>
+        <div id="loading" hidden>
+          <div class="spinner"></div>
+          <div id="loading-text">Loading…</div>
+        </div>
+      </main>
+
+      <section id="picker" hidden>
+        <div class="card">
+          <h2>The Suffering — Web</h2>
+          <p>This viewer runs entirely in your browser using your own copy of the game.</p>
+          <p class="muted">Select your <b>The Suffering</b> install folder (the folder containing <code>app/</code>, or <code>app/</code> itself). Files are read locally and never uploaded.</p>
+          <button id="pick-folder" class="primary">Select your The Suffering install folder</button>
+          <input id="folder-input" type="file" webkitdirectory multiple hidden />
+          <p id="picker-error" class="error" hidden></p>
+          <button id="pick-demo" class="link">or view the procedural demo scene</button>
+        </div>
+      </section>
+    </div>
+    <script type="module" src="/src/app/main.ts"></script>
+  </body>
+</html>

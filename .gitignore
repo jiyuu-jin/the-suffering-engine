@@ -1,0 +1,11 @@
+# Game data is never committed: users supply their own copy.
+/game/
+*.exe
+*.url
+
+# Dependencies and build output
+node_modules/
+dist/
+out/
+
+.DS_Store

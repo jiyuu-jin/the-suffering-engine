@@ -1,0 +1,28 @@
+{
+  "name": "the-suffering-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "dump": "tsx tools/dump.ts",
+    "bake": "tsx tools/bake.ts",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "smoke": "node tools/smoke.mjs",
+    "e2e:gamepad": "node tools/gamepad-e2e.mjs",
+    "check": "tsc --noEmit && npm test && npm run smoke",
+    "coverage": "tsx tools/coverage.ts"
+  },
+  "dependencies": {
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@types/three": "^0.186.0",
+    "@webgpu/types": "^0.1.74",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.2"
+  }
+}
