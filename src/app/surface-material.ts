@@ -22,6 +22,8 @@
 
 import * as THREE from 'three/webgpu';
 import {
+  Discard,
+  Fn,
   attribute,
   clamp,
   float,
@@ -62,8 +64,8 @@ import {
 } from '../formats/model';
 import { coverageMipmaps, decodeTexture } from '../formats/texture';
 import type { DecodedTexture } from '../formats/types';
-import { passAlphaRef, passDepthWrite, tintFactor } from '../formats/render-data';
-import { LEGACY_LIGHTING, additiveEffectColor, engineLightFactor, engineLightMaterial, engineShadowFactor, engineStages } from './engine-light';
+import { glowMarkAlphaRef, glowMarked, passAlphaRef, passDepthWrite, tintFactor } from '../formats/render-data';
+import { LEGACY_LIGHTING, additiveEffectColor, engineLightFactor, engineLightMaterial, engineStages, engineSurfaceFinish, enhancedShading, type EnhancedMaps } from './engine-light';
 
 /** Legacy look only (`?lighting=legacy`): gain applied to baked per-vertex lighting. */
 export const bakedGain = uniform(3.0);
@@ -101,6 +103,12 @@ export interface SurfaceMaterialOptions {
   /** Floor-layer splats (mesh has `splat0`/`splat1` weight attributes). */
   splat?: LandscapeSplat[];
   side?: THREE.Side;
+  /**
+   * Enhanced mode: generated maps of the base texture (normal / roughness / specular), sampled
+   * with the base layer's coordinates; part of the shared graph's structure. Ignored in Original
+   * mode (docs/enhanced.md "Extension points").
+   */
+  enhancedMaps?: EnhancedMaps;
 }
 
 export interface SurfaceMaterialResult {
@@ -468,7 +476,15 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
   const S = new SurfaceGraph();
   S.tok(`${blend}|${opts.vertexColors ? 'vc' : ''}`);
   // Engine passes: every layer is lit by the vertex lighting, or by its halved tint (unlit).
-  const light: N | null = LEGACY_LIGHTING ? null : lightFactor(opts.vertexColors);
+  // Enhanced mode: per-surface nodes from generated maps (part of the structure: tokens + slots).
+  let surface: unknown;
+  if (enhancedShading.surface && opts.enhancedMaps && (opts.enhancedMaps.normal || opts.enhancedMaps.roughness || opts.enhancedMaps.specular)) {
+    const coords = layerUv(layers[0], S);
+    const maps = opts.enhancedMaps;
+    S.tok(`em:${maps.normal ? 'n' : ''}${maps.roughness ? 'r' : ''}${maps.specular ? 's' : ''}`);
+    surface = enhancedShading.surface(maps, (t) => S.tex(t, coords), coords);
+  }
+  const light: N | null = LEGACY_LIGHTING ? null : surface ? engineLightFactor({ precomputed: opts.vertexColors, surface }) : lightFactor(opts.vertexColors);
   const samples = layers.map((l) => {
     const s = sampleLayer(l, src, missing, S);
     return s && light ? shadePass(l, s, light, S) : s;
@@ -490,7 +506,7 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
     // ONE); 1 for everything but faded characters (fx/body-parts.ts).
     if (unlit) node = gammaAdd ? vec4(additiveEffectColor(rgb, alpha.mul(materialOpacity)), alpha) : colour;
     // Lit: already shaded per pass; the projected-shadow receiver pass darkens the result.
-    else if (!LEGACY_LIGHTING) node = vec4(toLinear(toSrgb(rgb).mul(engineShadowFactor())), colour.a);
+    else if (!LEGACY_LIGHTING) node = vec4(engineSurfaceFinish(rgb, { precomputed: opts.vertexColors, surface }), colour.a);
     else node = colour;
     sharedGraphs.set(key, node);
   }
@@ -536,7 +552,67 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
     material.blendSrc = material.blendSrcAlpha = THREE.OneFactor;
   }
   material.name = opts.material?.key ?? opts.textureKey ?? 'untextured';
+  // Pixels this surface marks for the scene glow (src/app/scene-glow.ts, render-data.ts glowMarked).
+  if (!LEGACY_LIGHTING && glowMarked(layers)) material.userData.glowMark = glowMarkMaterial(layers, side, src, missing);
   return { material, missing, blend };
+}
+
+/** Mark materials of the scene glow, shared per (side) for the passes that need no alpha. */
+const plainMarks = new Map<THREE.Side, THREE.Material>();
+
+/**
+ * The scene-glow mark of a surface (docs/re/renderer.md §3.2): drawn after the scene over its
+ * depth (equal or nearer), it leaves the colour alone and writes alpha 1, the frame's glow mask,
+ * as the engine's flagged passes write stencil 1 that 0x49c030 turns into destination alpha.
+ * The first flagged layer's alpha test applies (additive > 32 / 255, cut-out > 200 / 255,
+ * other blends > 2 / 255; opaque: none).
+ */
+function glowMarkMaterial(layers: MaterialLayer[], side: THREE.Side, src: SurfaceTextureSource, missing: string[]): THREE.Material {
+  const fl = layers.find((l) => l.depthWrite) ?? layers[0];
+  const ref = glowMarkAlphaRef(fl.blend);
+  let m: SurfaceBasicMaterial | undefined;
+  if (ref === null) {
+    const hit = plainMarks.get(side);
+    if (hit) return hit;
+    m = new SurfaceBasicMaterial({ side });
+    m.colorNode = vec4(0, 0, 0, 1);
+    plainMarks.set(side, m);
+  } else {
+    const S = new SurfaceGraph();
+    S.tok(`mark|${ref}`);
+    const s = sampleLayer(fl, src, missing, S);
+    const key = S.key.join(',');
+    let node = sharedGraphs.get(key);
+    if (!node) {
+      const a: N = s ? s.a : float(1);
+      node = Fn(() => {
+        Discard(a.lessThanEqual(ref));
+        return vec4(0, 0, 0, 1);
+      })();
+      sharedGraphs.set(key, node);
+    }
+    m = new SurfaceBasicMaterial({ side });
+    m.surfaceSlots = S.slots;
+    m.colorNode = node;
+  }
+  m.fog = false;
+  m.depthWrite = false;
+  m.depthFunc = THREE.LessEqualDepth;
+  // Drawn again over the scene's own depth: the basic material's vertex shader does not land on
+  // exactly the depth the surface wrote (the mark failed the equal test nearly everywhere), so
+  // it is pulled a hair towards the camera.
+  m.polygonOffset = true;
+  m.polygonOffsetFactor = -1;
+  m.polygonOffsetUnits = -4;
+  m.blending = THREE.CustomBlending;
+  m.blendEquation = m.blendEquationAlpha = THREE.AddEquation;
+  // Colour kept (ZERO, ONE), alpha replaced (ONE, ZERO).
+  m.blendSrc = THREE.ZeroFactor;
+  m.blendDst = THREE.OneFactor;
+  m.blendSrcAlpha = THREE.OneFactor;
+  m.blendDstAlpha = THREE.ZeroFactor;
+  m.name = `glow-mark:${ref ?? 'opaque'}`;
+  return m;
 }
 
 // ---------------------------------------------------------------------------
@@ -658,7 +734,11 @@ export class SurfaceMaterialCache {
 
   dispose() {
     for (const t of this.gpu.values()) t?.dispose();
-    for (const m of this.materials.values()) m.dispose();
+    for (const m of this.materials.values()) {
+      const mark = m.userData.glowMark as THREE.Material | undefined;
+      if (mark && ![...plainMarks.values()].includes(mark)) mark.dispose();
+      m.dispose();
+    }
     this.missingTex?.dispose();
     this.gpu.clear();
     this.materials.clear();

@@ -1082,6 +1082,34 @@ Property reads look like `props->vt[2](propIndex, -1)`.
   means the player cannot close the door. In-game help: a door hint with a <Use> control placeholder.
 - **Damage hook**: when damaged by the Player, an unlocked closed door opens; `p44` selects what
   happens on a hit (0 lock, 1 unlock, 2 another action) [guess on the names].
+- **Moving part: p37** [verified, Suffering.rfl]. The post-create (vtable slot 3, 0x10132520)
+  keeps the switch's own model (engine +0x64 -> Switch +0xba). The post-load hook (slot 7, +0x1c:
+  0x101314d0 -> 0x101313b0) creates the p37 template at the saved placement (+0x4a) and the two
+  swap models through the engine's set-model (vt +0xb8, as the Phone does, 0x10015d30): the
+  switch wears the p37 model, the new object (handle at Switch +0xb8) the switch's own. The
+  motion (p55..p58) moves the switch object, so only the part turns or slides; the base stays.
+  **p32 / p33** are the base's material tables, open / closed: with p32 non-empty, state flag
+  0x100 (set by the post-create 0x101325cd and by the arrival 0x101314e0 -> 0x101317f8) makes the
+  think (0x10132e00) call 0x101308a0, which writes the table slot by slot into the object at
+  +0xb8, only when the list is as long as its model's table. So the breaker boxes' lamps change
+  when the lever comes to rest (7:557: red 7:1729 / 7:1419 closed, 7:1417 / 7:1730 green open).
+  Census (all 18 levels): 46 switches of 10 templates carry a p37, each a Breakable whose model is
+  the moving part: levers 7:3 on the 7:2 boxes (7:4 / 7:11, 1a 704a / 5e1d, 2, 3b, 4b, 5b) and on
+  12:603 (1a's chair switch 8588), lever 7:556 on the breaker boxes 7:557 / 7:492 (7:12 / 7:13 /
+  7:1420: 1b 6413 / 66bf / 7474 / 7476 / 7b5b, 3b 1bc7 / 2177, 4a, 4b, 5b, 8b, 10), buttons 7:5 /
+  7:644 / 7:1172 (7:6 / 7:1690 / 7:789: p57 0, they do not move), the 4b plunger 7:109 (7:141,
+  slides 0.26 along y: 7507 / 7d7c). No other switch, and no Mechanism, has a sub-part: the
+  Mechanism post-create (0x100c84f0) spawns its p42 template without a swap and no retail
+  Mechanism sets p42; their models are the moving part alone (8b's valve wheel 7:1287, cameras,
+  fans, doors). The light switches 7:5 (model 7:7) have no p37 and p57 = 0: nothing moves.
+  Port: `world/switch-part.ts`, `dynamic.ts buildSwitchWithPart` (the switch object draws and
+  collides with the part; the base is an object of its own with the p37 class's collision rule
+  and the instance's .ldu colours [port: the colours are the base model's]), `world.ts
+  switchPose` (base tables at rest; the use prompt looks at the base too). Before, the whole
+  switch model turned (the 1b basement breaker box tumbled 180° into the wall, its lever never
+  drawn). The base does not break (the p37 Breakable's health is not modelled) [port]. Checked in
+  headless Brave (before / after frames): 1b 66bf, 1a 704a and 8588, 8b's valve 2728. Tests:
+  `tests/switch-part.test.ts`.
 
 ### 11.2 Detector [strong]
 
@@ -1796,17 +1824,21 @@ whose own `p253` points back to `2:5`).
      s to the last counted one is not counted, a gap over p19 s starts the count again, nothing is
      counted while the NPC's AttackedByPlayer behaviour (type 0x7c) runs; at the p18th counted hit
      the dialog pays p22 once (flag 0x40: the kill then adds nothing more) and enters its state 4
-     (the update 0x1008dda0 then turns the NPC: Relay / FleeBehavior, §15.10 "Scripted protection"). Not counted while a
-     timer at the NPC's +0x536 runs [inferred: its meaning]. 11 dialogs pay -5: 1a 827a, 1c 7edc,
+     (the update 0x1008dda0 then fires p30 to the links: §15.10 "Scripted protection"). Not
+     counted while the NPC bleeds from a cut (0x10040d10 reads +0x536, the Part Cap component's
+     bleed rate, §15.16). 11 dialogs pay -5: 1a 827a, 1c 7edc,
      2 1c77 / 1c78, 3a 321b, 5b 2ac3 (p18 999: only the kill), 6b 1574, 8b 1820, 9 e6e (p18 1: the
-     first hit) / e6f, 10 94b [data]. The port had none of it [fixed: the reputation part; the
-     turn at p18 is still the port's immediate one, actors/behaviors.ts attackStartsFight].
+     first hit) / e6f, 10 94b [data]. The port had none of it [fixed: the reputation part, and the
+     warnings and the turn (director.ts dialogWarn / dialogTurn); the port's immediate turn at
+     the first hit is gone].
   4. *Ambient Creature killed by the player* (vt +0x90 0x100916f0, the PhysicalObject damage
      code's death call with the killer): += p26, -2 for every one of the 74 placed (the rats,
-     crows) [verified; fixed: the port read p166].
+     crows) [verified; fixed: the port read p166, and built them as decorations that took no
+     damage: §15.3 "Ambient Creature"].
   5. *Part Cap* (the Character p16 body-part reactions, 0x10119150): a part cut off by the
-     player from a body dead more than the cap's p4 (5) s: += p5 (-2) [verified]. The port has no
-     dismemberment: not applied [open].
+     player from a body dead more than the cap's p4 (5) s: += p5 (-2) [verified]. Dismemberment
+     is ported (§15.16) [fixed]; browser: 1a's corpse 7b36 (dead from the start) cut by a claw
+     blow: −2.
   Two Switches in 10 Docks (13a8 -> Sender 13ad -90, 13aa -> 13b1 +200) set up the endings
   [data: placement not checked]. Everything else is level logic: the census lists per level each
   sender, its amount, what fires it and where the chain starts (an NPC's p169, a Waypoint's
@@ -2106,7 +2138,8 @@ one-shot clips did). They take damage without fighting back (WaypointBehavior p3
 - Each strike clip's Arm windows come from its .adu events. Every frame of a window, the weapon
   shape on its bone (the bone's world matrix) is swept against the targets.
 - Targets are approximated by the actor's capsule (radius, bottom .. top) instead of skeleton
-  spheres [inferred stand-in].
+  spheres [inferred stand-in]; a dead body (struck only while it has Part Caps left, §15.16) is
+  tested on its leaf hit spheres.
 - The rules above apply: each target once per window, the wall check, p68 × p6 (× the NPC
   reputation scale), type p70, the player's team skipped, and p167 = 2 visions reflecting the
   blow.
@@ -2425,6 +2458,20 @@ with gravity, bounce and a shrink-away at the end of the BouncingObject lifetime
   - Run end: off, run time = p21 again; p22 counts down when set and at 0 the generator is
     destroyed. Destroyed with p5 set it destroys what it spawned (0x100b49e0: Particle Fountains
     through their Destroy p52, the rest removed); without p5 its spawns live on.
+  - p23 caps what it has alive [verified]: the spawn (0x100b52a0) is refused while p23 > 0 objects
+    it made still exist (handle list +0x5a, count +0x62); each think first drops the handles of
+    objects gone (0x100b61fa). A spawned Sound Effect with p1 set plays at creation (0x1012cc8c ->
+    Play 0x1012c9a0) and lives on (it destroys itself only in play mode 4 or when what it is
+    attached to goes), so it keeps its slot. 1a's lobby sparks `81f2` (3:2642: p7 0.1, endless,
+    p23 3; started by Detector `5bf8` on the way north to the lobby) keep one hum (Sound Effect
+    4:1159, play mode 1: 4:297 looping) and renew the two spark fountains as they burn out.
+    **Bug (user report, "the metal detector no longer goes off")**: the port had no cap, so from
+    the generator rule above (13b4507) the sparks started a new looping hum every 0.1 s, all 48
+    voices were taken within 5 s and every later sound of the same or lower priority was dropped,
+    among them the metal detector alarm (Sound Effect `8147`, 3:297, priority 85 like the hum).
+    Port: `world/fx.ts` (`Generator.live`, `Fx.spawn` returns whether its object still exists:
+    fountains, generators, BouncingObjects, Sound Effects; other spawned classes are not counted).
+    Tests: `tests/object-generator.test.ts`; playthrough step `1a.metal-detector` (`expect.heard`).
   - [inferred] Create also refuses a one-run endless generator (p21 0, p22 1) with p28 > 0 while
     the player is beyond p28 (returns -9); what the engine does with that is not traced, so the
     port creates it and lets the range test gate its spawns.
@@ -2540,6 +2587,14 @@ with gravity, bounce and a shrink-away at the end of the BouncingObject lifetime
     spawned (no cones, pools or broken remains: a shot lamp simply vanished), and the p43 pools
     were not drawn. `npx tsx tools/fixtures.ts` lists every fixture type per level with the look
     it starts in; tests: `tests/light-housing.test.ts`.
+  - **The glass needs the scene glow** [verified, docs/re/renderer.md §3.2]. The "on" tables'
+    glass and bulbs (7:1863 frosted glass × 0x8a8a75, 4:1374 bulb × 0xffd67e, the tubes 9:5742,
+    the emergency lamp's 9:5745) carry layer flag 4: their pixels are the glow mask of the
+    engine's HDR scene glow, which runs every frame by default. It adds them back about 3.4 ×,
+    blurred over up to 16 / 256 of the screen: a milky glass dome lit from within, a blown-out
+    bulb, a bright rim and a halo. Without it (the port before) the glass was a flat mid grey
+    behind the cage: "a cage with no glass" (user report). Port: `app/scene-glow.ts`,
+    `tests/scene-glow.test.ts`.
 - Lighting Effect [verified, docs/re/renderer.md §1.10]: a clock drives two waveform channels:
   p8 curve lerps the light colour p6 -> p7, p11 curve lerps the Point Light strength p9 -> p10
   (k = (sample + 1) / 2, sampled at fmod(t, duration); p1 = loop). A channel without a curve
@@ -3091,7 +3146,8 @@ the gather `0x425e50` keeps an object only when its class has bit 1).
   `moverPassObjectProviders` -> `MeshPart.moveSolid`). Their triangles carry
   `COLLISION_LAYER.decor`, which the plain queries (sight, shots, the use ray, decals) see and a
   `CharacterMotor`'s queries (`solid` plus its own layers) do not: neither the player nor NPCs
-  collide with them. Whether sight and shots see them is not decoded (kept as before). The
+  collide with them. Since §14.10 the collision world holds only the classes the lists name, so
+  Decorations collide with nothing (rays included) [inferred for rays]. The
   other classes of the lists are not applied class by class. Water Volume is in both lists
   (docs/levels.md; the port's NPC motors pass water). The p2 filter of Invisible Static Object
   is "engine object type 7" (`+0xe4`): the class category, 7 = Ground Enemy, every Character
@@ -3112,6 +3168,74 @@ anywhere would lift bodies in rooms under the terrain (1a node 811a, 3b 1eff, 8b
 port leaves it out [inferred]. `actor.ts groundGap` (the placement check) treats a surface just
 above the feet with nothing under them as the floor the feet are sunk in (9's c9c, 0.196 m under
 the terrain, was hidden as a drop-in), and passes Decorations as movers do.
+
+### 14.10 Object collision: the collision tree, not the drawn triangles
+
+**Bug (9 Lighthouse).** The guard bc9 stalled at (297.3, 113.7, 244.2) by the burial ground: his
+capsule met the alpha-tested leaves of Static Object 884 (template 23:153, model 23:142, texture
+23:56) 1.2..4.4 m up, 0.47 m west. Every escort leg from there failed, Waypoint e08 was never
+reached and 9 could not be left (docs/playthrough.md rows 9-12..9-15). The port collided with
+every drawn triangle of every placed object.
+
+**The collision model** [verified: loader SUFFERING.EXE 0x484020 -> 0x482d10 -> 0x481ea0; every
+type-7 entry of the 1a / 3a / 9 / 10 package sets parses to its last byte, test]. The .mdu type-7
+record is the model's collision model:
+- the bounding sphere and box (as model-spheres.ts read them), then u16 kind at 0x48: 0 sphere
+  tree, 1 box tree, 2 bone spheres; u16 node count at 0x4a (0: the record ends there, 76 bytes);
+  four u16 (+0xc0..+0xc6); the nodes.
+- A box node is u16 first child, u16 next sibling, a box (corner, three edge vectors), u16 n and
+  n face indices into the model's faces (54 + 2n bytes). A sphere node is first, next, centre and
+  radius (20 bytes). A node with no child is a leaf.
+- In 9's packages 1844 of 1847 box trees list no faces: a model collides as a handful of boxes.
+  The canopy 23:142 (328 cut-out faces) is one leaf box 2.2 x 5.9 x 14.5 m; its world box is
+  x 285.5..300, z 246.8..249, y 113.1..119, north of the guard's leg to node 97 (292.5, 241.75).
+  A building like 23:394 (4872 faces) is 87 leaf boxes, a cell door 9:2027 (bars) one slab.
+
+**Which geometry each query uses** [verified unless marked]:
+
+| tree | movers (0x41ee40 / 0x41c340 after the tree-tree narrow phase 0x428b30) | rays (per-object ray 0x4283c0) |
+|---|---|---|
+| box tree | each leaf box (12 triangles, 0x422ee0 -> 0x421e00); a leaf that lists faces is those faces (0x422f30) when the object's bounding radius is over 200 units (0x41f0ff) | leaf boxes; a leaf with faces is its faces (0x4276b0) |
+| sphere tree with nodes | its leaf spheres (0x41c56a -> 0x4220b0) | leaf spheres (0x426b38) |
+| sphere tree without nodes | nothing (0x41c52b) | the bounding sphere, then every face of the model (0x42693d -> collision interface +0x2c 0x424b20): the drawn faces |
+| box tree without nodes | nothing (0x41f0cf) | not traced |
+
+- Engine object `+0xc` bit 0 is not a collision setting: it is "model bound", set by 0x4582d0 the
+  first time vt+0x3c (get model) finds the model loaded. The ray tests the bounding sphere alone
+  until then. The movers' gather calls vt+0x3c(1) on what it collects and the renderer on what it
+  draws, so in play every object uses its tree.
+- **Alpha-tested foliage** has no rule of its own: what collides is what the designers put in
+  the tree. No retail tree lists a cut-out face.
+- Classes: a mover collides with the classes of its collide list (§14.9). Detector is touch-only,
+  Water Volume goes to the water component (docs/levels.md), Fire and Particle Fountain are touch
+  volumes, Collider is the mover's own proxy: none blocks. Light Housing, Mountable, Security
+  Monitor, Quest Item Pickup and Electric Shield are in the player's list only. Rays [inferred]:
+  the ray queries take the scene's class filter as their caller left it (not traced); the port
+  lets rays see what either list collides with. Decorations collide with nothing.
+- Sight: a character's line of sight (0x100c7270 with flags 0xa00 from 0x100e25ed) runs the scene
+  query 0x100c6630, which skips objects whose engine `+8` has bit 0x20000 (0x100c6c13, flag 0x800)
+  and Invisible Static Objects with p6 = 0 (flag 0x200). The instance loader (0x45a77f..0x45a7c4)
+  sets 0x20000 from template flag bit 10, or with instance flag 0x2000 from instance bit 0x1000000
+  [verified]. 1a: 385 Static Objects (pillars, railings, the cell fronts), the cell doors (Switch
+  9:2027), lamps; 9: 163 Static Objects with the burial-ground trees. The BouncingObject sweep
+  (0x100ceff0) passes 0x110 or 0, never 0x800: thrown things do not pass them [verified]; for
+  bullets the port keeps one rule with sight [inferred].
+
+**Port** (`src/formats/model-collision.ts`, `src/game/world/object-collision.ts`):
+- `parseLevel` with `collisionOf` builds `LevelData.collision`: the floor layers as drawn, and
+  each placed object of a colliding class as its tree (boxes, listed faces, spheres as an
+  80-face polyhedron around the sphere) at its placement and scale. Ray-only geometry (a sphere
+  tree without nodes: the drawn faces) has `COLLISION_LAYER.decor`, player-only classes
+  `player | decor`. Parts carry `sightPass` (template bit 10). Box triangles take the material of
+  the model's largest submesh for footsteps and impacts [inferred].
+- The renderer builds `collision` from those parts, and `drawn` from the drawn triangles: decals
+  lie on the drawn ones, the actors' draw occlusion looks at them with the old see-through rule
+  (WorldService.eyeThrough). WorldService.seeThrough (sight, shots) passes `sightPass` parts.
+- Dynamic objects (dynamic.ts) and the cranes' hung objects (skinned-props.ts) build their bodies
+  from the same trees. A placed object without a tree, or of a class no list names, has no body;
+  skinned props keep their drawn triangles for shots (§14.7).
+- 9: the collision world has 157 000 triangles against 249 000 drawn (most of it the Landscape).
+- Tests: `tests/object-collision.test.ts`.
 
 ## 15. NPCs, creatures and their behaviours (chapter 1)
 
@@ -3231,7 +3355,7 @@ free position of its group above the player for each drop [verified, §15.7.1]; 
 marked: class 0x36e88832, ctor 0x10091420, vtable 0x101544b0, init 0x10091930, update
 0x10091c90, map 0x10177be0, death 0x100916f0]. A PhysicalObject, not a Character:
 - **Properties.** GameObject p0 health (1 on every placed one), p3 invulnerable (8b's five rats).
-  p22: 0 leaves it still and inactive at start (engine state 0; 69 of 74), else it plays p24 and
+  p22: 0 leaves it still and inactive at start (engine state 0; 66 of 74), else it plays p24 and
   runs at once. **p24 is its one animation** (rat 10:789, crow 10:706: the run / flight loop),
   **p25 its speed** (m/s, × 2048 into its mover: rats 3..4, crows 6), **p28 are sounds**, played
   at the creature every p29 + U(0, 1) × (p30 − p29) s while at most p31 ambient sounds of any
@@ -3746,6 +3870,25 @@ p87 (10:955 / 10:87 / 10:88 / 10:958). After an attack, KillMelee waits p2..p3 s
 - ceiling 10:1880: 1–1.3 s;
 - headless 10:1418: 0.1–0.3 s.
 
+The wait is the generic KillMelee's (vtable code 0x1007c870..0x1007d080, shared by every
+KillMelee kind) [verified]: on its MeleeAttack child finishing it sets +0x30 = p2 + U(0, p3 - p2);
+the update (0x1007ce60) counts it down and only at its end tries the next attack (0x1007ce00:
+in range and no higher child running, else a MeleeCombatReposition child, type 6, toward the
+target); the attack start (0x1007c870) first ends every child. Which KillMelee template a
+character runs is its behaviour slot for type 0x4d: Character p85 in the generic slot map
+(0x100e17c0, the full table: 0 -> p81, 5 -> p87, 6 -> p83, 8 -> p82, 9 -> p76, 0x30 -> p88,
+0x39 -> p98, 0x42 -> p77, 0x4d -> p85, 0x4e -> p86 ...), p182 for CartWheelers. Retail p85:
+Unspeakable NPCs 10:578 (0.5..1.5 s; 10:1149 0.4..1, 10:1619 2.5..3.5, 10:1472 0.3..1), Slayers
+10:1565 (0 / 0). Port: the profile's `meleePause` from p85 when it is a plain KillMeleeBehavior
+(`manager.ts profile`); before, only CartWheelers waited and an armed NPC struck back to back
+(the Prelude's three inmates killed Torque in 7 s).
+
+An instance can override a Character's MeleeAttackBehavior slot p87 (retail: the Prelude's three
+attackers and one 2 Cellblocks inmate, 10:297 on template 10:392, which has none). The port's
+creature kinds were built from the template only, so those fought with guessed clips and a
+guessed 10 a blow; a placement with its own p87 now gets a kind of its own (`kinds.ts creature`,
+`clipmap.ts resolveCreatureClips` overrides): clips 10:1727 / 10:351, the weapon's 8 a blow.
+
 A blow is the blade Melee Weapon's p68..p69 mean (6.5) × Attack p6 (the ceiling slash: 9.75).
 
 **The leap (CartWheelerKillMelee update hook 0x10074c80; JumpAttack 0x10073b90 / 0x10073e50;
@@ -3846,12 +3989,9 @@ behaviour (Relay #8b39 after each break) restarts the cycle.
 Monitor scene (1a, monitor 6dec, §14.5): viewing it fires p72 -> Relay 7b0c -> Behavior
 Changer 7b13 (WaypointBehavior 7b0f, Waypoint 7b0d: p1 = 1, but Horace's MovementAnimBehavior
 10:637 has the same clip 10:567 for walk and run, so he walks) and Damage Action Object 7a65,
-whose p8 Electric Arc Effect 3:2230 stays on him for its p0 (999 s): p4 Electric Arc 3:2231
-(p0 0.5, p1 3) and p1 generator 3:2283 (a flickering pale-blue Point Light following him). The
-port had drawn two arcs for 0.6 s; it now keeps bursts of arcs over him for the effect's p0
-while he is there (director.ts `shocks`) [inferred: the per-target timer of the effect, update
-0x100b75d0, counts p0 down; the bolt rhythm is read from the Electric Arc's p0 / p1 without the
-bolt code traced].
+whose p8 Electric Arc Effect 3:2230 stays on him for its p0 (999 s): one arc of Electric Arc
+3:2231 travelling over his bones and p1 generator 3:2283 (a flickering pale-blue Point Light at
+the start bone). The arcs are decoded in §17.3.1 (fx/electric-arc.ts) [verified].
 
 #### 15.7.8 Killjoy and the Projector Effect (killjoy.ts, projector.ts)
 
@@ -3907,8 +4047,9 @@ p16 0x1008b820.
 | p4 | flicker % |
 | p5 / p6 | opacity % with all / none of the projectors standing |
 | p7 | strobe period in updates (0 in retail) |
-| p9 | a target bone per projector, hidden when that projector is missing |
-| p10 | projectors (Animating Statics) |
+| p8 | chance (%) per update that a standing projector's beam is hidden for one update (0 in retail) |
+| p9 | a target bone per projector: its channel hides that projector's beam |
+| p10 | projectors (Animating Statics, or placed objects without a model) |
 | p11 | the lens bone of each projector (5) |
 | p12 | the target vertex of each projector |
 
@@ -3927,9 +4068,20 @@ p16 0x1008b820.
   - Strobe: while the counter runs, the target is hidden. When it reaches 0 the target is shown
     and the counter restarts at p7.
   - The effect moves to the target's position.
-  - For each projector i, vertex p12[i] of the target moves to the world position of bone
-    p11[i] of projector p10[i], in the target's frame (welded copies included). If that
-    projector is gone, f, the share of projectors standing, drops by 1 / count.
+  - For each projector i (beam 0x1008b9e0; a null handle is skipped):
+    - Gone: its beam is hidden (animator request 0x100010 on the channel of target bone p9[i]);
+      the tip is not written and stays where it was. f, the share of projectors standing,
+      drops by 1 / count.
+    - Standing: vertex p12[i] of the target (welded copies included) goes to the lens. The lens
+      is bone p11[i] of the projector when it is a skinned instance with that bone (vt +0x94),
+      else the projector's own position (+0x44): 1c's #7ef6, 10's #11e4 and 5b's #1560 / #1562
+      are Breakables 7:330 without a model. The lens minus the target's position, turned and
+      scaled into the target's frame (0x1000ce10), is written into the model-space vertex array
+      (skin instance vt +0xa4) at index vt +0xb0 (p12[i]): the .mdu type-22 table (loader
+      0x483530, values - 1, negative entries dropped; identity for 10:90's first 2185
+      vertices), so p12 indexes the type-3 vertex list [verified]. The point also widens the
+      instance's bounds (0x1000a4b0). Then a hidden beam is shown again; a shown one is hidden
+      when U(0, 100) < p8.
   - The target's opacity (+0xd0) is clamp(p6 + (p5 - p6) f + U(-1, 1) p4) / 100, recomputed on
     every update.
   - f <= 0 deals the target 10000 damage.
@@ -3942,8 +4094,23 @@ p16 0x1008b820.
 - **Killjoy's model 10:90** carries five additive light cones in submesh 0 (Advanced 10:781:
   10:256 tinted 0x2d2d2d). Their tips are skeleton vertices 0..4, each at full weight on one of
   bones 86..90.
-  - Every Killjoy projector's p12 is a permutation of 0..4 [inferred: p12 indexes the skeleton
-    vertex list]. Moving the tips to the lens stretches the cones from the projector onto him.
+  - Every Killjoy projector's p12 is [2, 0, 4, 3, 1] (6a / 5b's figures 10:162 / 10:196:
+    [3, 1, 2, 4, 0]). Moving the tips to the lens stretches the cones from the projector onto
+    him. Each cone is a fan from its tip to his outline in his frontal plane.
+  - Material 10:781 has no UV scale or scroll waveform (p9 / p10 0): the beam is a still, dim
+    additive texture; its flicker is the object's opacity (p4), which the tinted pass's TFACTOR
+    alpha carries (§5.1 of docs/re/renderer.md).
+  - Hiding a channel skips mesh partitions: the object draw ORs the LOD word of every hidden
+    channel (model +0xc8, the .mdu type-8 channel table) into a mask (0x493698) and skips
+    partition k when bit k is set (0x498ee3). Channels 86..90 carry bits 1, 2, 4, 8, 0x10, and
+    the cones lie in the face list in tip order 2, 0, 4, 3, 1 = p12: projector i moves and hides
+    the same cone i [verified data; partition k = the k-th cone in face order inferred]. The
+    same table carries the dismemberment channels' bits on human rigs.
+  - The model's header flags are 0x1cc8012: bit 23, so his passes cull back faces like Hermes'
+    (docs/re/renderer.md §5.1). Below 0.99 opacity his opaque first pass blends as mode 1 with
+    the > 2 / 255 alpha test and still writes depth (0x48fc70 reads the layer's own mode).
+    A translucent Killjoy therefore shows his nearer front faces only: neither his back nor the
+    far side of his body shows through.
   - His body passes are Layered materials: texture × 0x414141 (unlit), then an additive pass of
     the black 10:428. Translucent at the effect's opacity, he is a dim, flickering figure in
     the projector's light.
@@ -3951,11 +4118,18 @@ p16 0x1008b820.
   - It runs the inputs, strobe, visibility (through the world's setVisible), opacity (copies of
     the target's materials, opaque passes switched to blending), the damage, and the projectors
     as breakable objects.
-  - Each cone tip is placed in bind space so that its bone's skinning lands it on the lens.
-  - A missing projector's tip goes back to its bind position instead of hiding bone p9 [port].
+  - Each cone tip is placed in bind space so that its bone's skinning lands it on the lens
+    (exact under any root motion [port]). A projector without a skeleton is its placement.
+  - A hidden beam's triangles (those using vertex p12[i]) are drawn degenerate.
+  - Characters whose model has header bit 23 are drawn front faces only (`app/character.ts`);
+    the fading figure keeps its depth write (`render-data.ts translucentPassState`).
+  - Before this, a missing or model-less projector's cone went back to its bind tip, about a
+    metre from Killjoy in some fixed direction: beams that came from nowhere (1c, 10, the 5b
+    rooms with an invisible projector, every 5b theatre projector once shot). The faded body
+    was drawn two-sided without depth, so his back and inner faces showed through.
   - A projected actor casts no projected shadow (fx/system.ts).
   - Before this, nothing showed 1b's Killjoy, the cones stayed folded round him, and his body
-    was drawn as an ordinary lit skin. The projectors' bone p9 is not hidden.
+    was drawn as an ordinary lit skin.
   - Prop targets: the 1a #8897 and 1c #808d / 5b single-vertex targets (skinned Breakable / Switch
     models 12:624, 7:653..655) are drawn by `levels/skinned-props.ts` (§14.8). The effect takes
     their Character from `services.skinnedProps`.
@@ -4341,12 +4515,36 @@ Unspeakable NPC template 10:391):
   original as in the port.
 - **Creatures' choice**: no preference for the player (§15.15): the companion's GameObject p4 0.5
   and p8 4 equal the player's; the creature KillEnemies templates list prisoners as enemies.
-- **Scripted protection**: none. 2's Action Dialogs 1c77 / 1c78 on the companion are
-  AttackedByPlayer: a player's hit counts when it comes p14 (3) s or more after the last one
-  (a gap over p19, 30 s, starts the count again); at p18 (3) the dialog fires p30 (On) to its
-  links (0x1008e130 counts, the update 0x1008dda0 fires), Relay 1c7f -> Behavior Changer 1c7b ->
-  FleeBehavior 1c7c (threats include the player 2:384), and 1c78 then turns him hostile
-  (HostilityBehavior 1c7e). 1c's 7edc does the same (Relay 7ede -> 7edd -> FleeBehavior 7ee0).
+- **Scripted protection**: none. 2's Action Dialogs 1c77 / 1c78 on the companion count the
+  player's hits: one counts when it comes p14 (3) s or more after the last one (a gap over p19,
+  30 s, starts the count again; not while the warning below runs, 0x1008e1a7) [verified].
+  - **A counted hit below p18 is a warning** (the update reads the dialog's flag 1:
+    0x1008d4a0) [verified]: a random p16 line and, with a p17 **clip** (an Animation: 10:1575
+    "step off" gesture, 2.4 s; 1c78 10:1475, 4.1 s) and the NPC not flagged +0x70 & 0x200, the
+    AttackedByPlayer behaviour (type 0x7c, vtable 0x10157020) pushed over his stack: its
+    children face the player (type 0xa) and play the clip with the line (type 0x78, vtable
+    0x10156fc0; done when both are), then it ends and the stack goes on. Without p17 (6b's
+    1574) only the line. It never fights: the earlier "[inferred] KillObject template" reading of
+    p17 was wrong (p17 is typed Animation).
+  - **The p18th counted hit turns him** (flag 4; update 0x1008dfba) [verified]: the dialog fires
+    p30 (On) to its links, sets the NPC's speech level (+0x5c4) to p21, says a random p20 line
+    and, with p23 = 1, destroys itself (0x1008daf0). The turn is the level logic's: 1c 7edc ->
+    Relay 7ede -> Behavior Changer 7edd -> FleeBehavior 7ee0 (threats include the player
+    2:384); 2's 1c77 -> Relay 1c7f -> 1c7b -> FleeBehavior 1c7c, and after Waypoint 903 1c78 ->
+    Relay 1c82 -> 1c7d -> HostilityBehavior 1c7e (his KillEnemies 10:214 lists the player's team
+    as an ally, so that is the end of the escort, not an attack); 6b's 1574 -> Behavior Changer
+    1575 (HostilityBehavior 1576 with KillEnemies 10:213, whose enemies include 2:384: Clem
+    attacks) and Relay 1577 (destroys the escort's Behavior Changers).
+  - **Nobody on an ally team fights the player back**: a KillEnemies leaves an ally team's
+    candidate out (0x100f9eb0), the player included. The port had given every hit NPC a grudge
+    on the player even on an ally team ("AttackedByPlayer") and turned companions at the first
+    hit (`behaviors.ts attackStartsFight` with an attached dialog) [fixed: `actor.ts damage`
+    takes no grudge on an ally player; `director.ts dialogWarn / dialogTurn`].
+  - Browser (frame strips in the report): 1c 7569 hit at 113.8 / 117.3 / 120.5 s: two warnings
+    (a warning voice line with the gesture), the turn at the third
+    (a second voice line, Relay 7ede), FleeBehavior 7ee0, no target, −5. 2's 868 (following):
+    the same with 1c77 -> FleeBehavior 1c7c, −5. 6b's 49a (Clem): two warnings (lines only),
+    no target until the turn, then HostilityBehavior 1576 with the player as his target.
 
 **Companions carried through transitions** [data]: a Level Transition's p7 lists the carried
 objects (1c → 2: the inmate 0x7569; 9 → 10 one). The target level has its own placed copy; the
@@ -4428,8 +4626,8 @@ Waypoint 0x1f, AttackedByPlayer 0x7c).
     behaviour the stack was built with (0x100973e0, 0x100e5170), whatever it is;
   - a Stomp root (a sequence holds the character) consumes 0x2001 and 0x2003: no reaction, no
     death while the sequence holds it;
-  - an attached Action Dialog pushes AttackedByPlayer (0x1008d4a0 / 0x1008d5a1) with its p17
-    KillObject template on its NPC [inferred from the code shape: the trigger flag was not traced].
+  - an attached Action Dialog pushes AttackedByPlayer (0x1008d4a0 / 0x1008d5a1) on its NPC at a
+    counted player's hit below its p18: the p17 clip and a p16 line, no fight (§15.10).
 - **Vision figures.** 1a's and 1b's monster selves (Unspeakable NPC tpl 10:593, model 2:124,
   team 10:1133; 1a 7a78 / 7aa0 / 7aa8 / 7afe, 1b 7ea7) have an ordinary combat template
   (KillEnemies 10:1158 lists the player's team, 300 health, no invulnerability, p5 = 0, no
@@ -4447,9 +4645,10 @@ Port (`behaviors.ts attackStartsFight`, `actor.ts damage / wake / update`, `mana
 
 - Fighting back (provoked, a grudge on the attacker) follows the table above. Port choices: hostile
   creature classes keep fighting back from passive roots (their class code, e.g. the Rat's, is
-  not decoded) and the kind's plain default (no root behaviour) too; an Action Dialog
-  attached to an NPC (its barks) stands for AttackedByPlayer against the player. A follower
-  takes no grudge: its waiting Hostility picks the attacker by the target score (§15.10).
+  not decoded) and the kind's plain default (no root behaviour) too. An attached Action Dialog
+  no longer makes its NPC fight (§15.10), and no grudge is taken on the player by a character
+  whose KillEnemies lists his team as an ally. A follower takes no grudge: its waiting
+  Hostility picks the attacker by the target score (§15.10).
   Before, every hit made any actor fight its attacker: the posed guards stood up and shot, the
   vision monster self attacked the player, and an idling prisoner turned on a creature.
 - wake() hands over to p69: a mode-1 DormantBehavior p69 poses the body again, a DeathBehavior
@@ -4487,11 +4686,32 @@ Code: `src/game/actors/hit-react.ts`, `actor.ts hitReact`; tests `tests/hit-reac
 **What reaches the picker.** The damage code sends the attack stimulus (0x2001) for every blow
 of 0 or more damage; behaviours that consume it stop everything here: Stomp (a sequence holds
 the body), TransitAnim, a JumpBehavior before its launch, a CeilingFloorTransition in transit
-(0x1010b060). Otherwise the default handler runs vt 72 with the damage record: the amount after
-resistances (a Damage Resistance's p5 may also set the Special Hit Reaction), the damage type
-(+0x40), the attack template (+0x44) and the Special Hit Reaction template (+0x48, default -1).
+(0x1010b060). Otherwise the default handler runs vt 72 with the damage record: the damage type
+(+0x40), the attack template (+0x44), the Special Hit Reaction template (+0x48, default -1) and
+**the amount the bands compare, which is the blow's impact force (+0x1c), not its damage**
+[verified, corrected]: Character damage 0x100e7390 builds the stimulus from a copy of the record
+(0x100e779b) whose force it multiplies by the matching Damage Resistance's **p2** (0x100e77e9,
+the lookup 0x100a2950 the damage uses; the resistance's p5, when set, becomes the Special Hit
+Reaction) or sets to 0 when no resistance matches and GameObject **p6** is set (0x100e7801); the
+message 0x2001 carries the record at +0xe, and the hit reaction reads +0x2a = record +0x1c
+(0x100e64b1 / 0x100e6536). The stimulus goes out when the damage after resistances is >= 0, so a
+blow that does no damage still makes the character react by its force (0x100e776b). Force is
+Missile p28..p29 over p30..p31 (revolver 6 -> 0, the shotgun pellet 20 -> 2), Melee Weapon p69 x
+Attack p7, Radius Damage p2 at the centre to p3 at its edge, a Damage Action Object's p6. The
+global resistance list (2:655 type 14, 2:464 type 6) has p2 = 0. Port (`fx/gas.ts
+resistanceForceMultiplier`, `manager.ts damage`, `ActorBlow.react`, `DamageEvent.force` /
+`minForce`): the player's bullets, melee and every Radius Damage pass their force; other sources
+(NPC blows, hazards) give none and the reaction falls back to the damage as before.
 Damage over time is one record per frame: a Particle Fountain's p18 x the frame time, a
 Damage Action Object's p4 / 30, so the picker sees the per-frame share, not a sum.
+
+**p11, the reaction's message** [verified: HitReact runtime vtable 0x10157bd0, start vt[7]
+0x100ebd80 -> 0x100ebfa0]: a whole-body reaction (the behaviour is pushed, so its start runs)
+sends its p11 to the character's links (`[0x1017bf54]->vt[3](handle, msg, 0)`, the send that
+SimpleConversation p21 and Horace's p2 use). The only retail user is Hermes' 10:1228 (p4 1,
+p11 Triggered): 8b's stove fight (Hermes' resistances 2:779 type 5 / 2:656 type 14 have p1 0 and
+p2 1, he has p5 = p6 = 1: nothing hurts him, only fire and wind push him; docs/playthrough.md "8
+Bluff"). Port: `HitReactDef.message`, `actor.ts startReaction`.
 
 **Which reaction (0x1009e650).** Two lists of HitReactBehavior templates:
 
@@ -4739,10 +4959,151 @@ tick (0.15..0.25 s) and runs the choice when one was dropped, at the re-pick int
 target every Hostility p3..p4 s (other roots 0.5 s, the WaypointBehavior's restart of its
 KillEnemies, 0x100f1054). Attackers are counted as the living characters in combat whose target it
 is; the damage memory is the actor's own log of blows (player and characters). Port additions: a
-passive root that fights back (§15.12, the grudge) counts its attacker as targeting it (and the
-player even on an ally team: AttackedByPlayer); the player's own target handle is not modelled
+passive root that fights back (§15.12, the grudge) counts its attacker as targeting it (never
+the player when its KillEnemies lists his team as an ally: §15.10); the player's own target handle is not modelled
 (only p25, 0 on every template, and the eligibility of a neutral team read it). Before, the port
 picked the nearest candidate in sight and kept it.
+
+### 15.16 Dismemberment: Part Caps [verified unless marked]
+
+Read in Suffering.rfl: the blow 0x10119150 (called by the Character damage 0x100e76e1 and the
+Player's 0x1002e036), the cut 0x10118dd0, the subtree walk 0x10118790, the bleed 0x10118680, the
+cut by bone 0x10118fc0 (message 451 CapLimb, 0x100e3e19 / 0x1002d99b) and the created-cut list
+0x10119690, the regrowth 0x101189e0 (from the resurrection 0x100eda49), the bleed's readers
+0x1007ebc0 / 0x100ef7a8 / 0x100fc047 / 0x100415a0, the Player's death clip 0x1002e3f0, the dead
+hit reaction 0x100e6480 -> 0x100e5d00 -> 0x100e2f70 (gibs); in SUFFERING.EXE the animator (request
+flags 0x100000 / 0x200000 set / clear node flag 0x10, 0x470bc6 / 0x470bd9), the renderer's batch
+mask (0x493698, 0x4cd447 -> 0x4914d0 / 0x4914a0 -> 0x4cc640) and the sphere tree (0x4271fd).
+Code: `src/game/actors/dismember.ts`, `gibs.ts`; wiring `actors/system.ts`, `manager.ts`
+(`partHit`, `corpseHit`, `cuttable`, `capLimb`), `actor.ts` (NPC blow hit points, `throwCorpse`,
+the knockdown bleed-out), `player-body.ts` (killer death clips); tests `tests/dismember.test.ts`,
+`tests/gibs.test.ts`.
+
+- **Data.** Character p16 lists its **Part Caps** (class 0x627acba2, template-only): p0 cap
+  model (a 2-bone skinned stump in the cut bone's frame), p1 the bone it caps, p2 bleed
+  (damage / s added to the body), p3 grows back with Killjoy's resurrection (0x100eda49), p4 /
+  p5 the corpse rule, p6 smallest blow, p7..p9 the chance, p10 most health %, p11 health
+  weight, p12 what happens to a weapon on a capped bone (1 drop, 2 remove), p13 / p14 the
+  damage-type rule, p15 attacker classes, p16 the stump's spurt generator (blood
+  4:1279 for 15 s through Follower Object 4:1254), p17 the severed-part generator
+  (BouncingObjects: the limb 3:590, five head chunks 3:611..615, blood fountains). Users: 29
+  NPC templates, 4 CartWheeler, Burrower, Mainliner, Nooseman, Slayer, the Player (166 entries).
+  Humans: head 48 (bleed 500, any blow of 3.9, 40..70 %), arms 10 / 12 / 30 / 32 (bleed 20,
+  health <= 60 %, 35..70 %), torso 3 / 6 (bleed 500, not bullets 1 / axe 2 / fire 5 / shiv 10 /
+  12), pelvis 55 (threshold 1e10, p13 0: never by a blow).
+- **Created cut.** With Character p18 = 0 the p17 list is cut when it is created (0x100e1fb3 ->
+  0x10119690 -> 0x10118fc0 with flag 0: no spurt, no part; the bleed is added): 108 placed bodies
+  in 0 / 1a / 1b / 1c / 2 / 3a / 3b / 4a / 4b / 5a / 5b / 6a / 8a / 8b lie headless, armless or
+  halved [data].
+- **The blow** (0x10119150, after the health change and the kill reputation; for every blow,
+  alive or dead, unless the character's +0x6c & 0x100 or +0x70 & 0x80 forbid it [which
+  properties set them: not traced]): the struck hit sphere (damage record +0x20) gives its
+  bone's channel (0x10085e50: model node +0x40); the first p16 cap whose p1 is that channel's
+  bone is the candidate; the channel must not be cut yet (node flag 0x10, 0x1008b8e0). Then:
+  amount > 0 and >= p6; health / max x 100 <= p10; p13 XOR (type in p14) = 1; p15 listed -> the
+  attacker (record +0x24) must be a Character whose template's class is the class of one of the
+  p15 templates (0x101193d5..0x101194ac compares class hashes; only Torque's caps list any:
+  2:625 head [2:923 CartWheeler], 2:675 waist [2:922 Fester]); and rand() / 32767 x 100 below
+  (p7 + (p9 - p7) min(amount / p8, 1)) x (p11 + (100 - p11)(p10 - health) / p10) / 100
+  (retail p11 = 100: the health term is 1). A revolver round (6) takes a guard's head at 52 %.
+- **The cut** (0x10118dd0): for the cut bone and its subtree, weapons on capped bones are
+  dropped (p12 1) or removed (p12 2, or the bone was cut already) (0x10118790 -> 0x100e4dd0; no
+  retail weapon sits on a capped bone); bleed += p2 (flag 2 cleared at 0); the Part Cap object is
+  created at the hit bone's matrix and attached to the bone (world vt +4, character vt +0x18),
+  its p16 / p17 generators with it; the animator (vt +0x34, request 0x100010) sets node flag
+  0x10 on the bone's node and, walking the subtree (0x470f20), on every node below it, and its
+  own state flag 0x4000000.
+- **What node flag 0x10 does** (SUFFERING.EXE) [verified]: nothing to the pose (the bone
+  matrices 0x4701c0 / 0x46ecd0 never read it). The renderer (draw 0x493698, shadow 0x4cd447),
+  while the animator has 0x4000000, ORs for every channel whose bone's node is cut (0x4914d0)
+  that channel's LOD word of the channel table's `bits` (0x4914a0) and skips the mesh's draw
+  batches whose bit is set (draw 0x498ee3, shadow 0x4cc640: batch i when mask & 1 << i). On every rig with Part Caps
+  the channels with a bit are the capped body segments (humans: chest 6 / 7, forearms 12 / 30,
+  hands 14 / 32, neck 48, head 49, legs 55 / 60..62; CartWheelers 3 / 5 / 9 / 10 / 13 / 15 / 20
+  / 23 / 27), so the cut bone's own segment and every segment below it vanish and the cap stands
+  in for them. The hit-sphere tree skips spheres whose bone's node is cut (0x4271fd, 0x42908a,
+  0x429264), animation events on a cut node are not dispatched (0x46d96a), and 0x1008b8e0 /
+  0x4914d0 ("channel not cut") read it. When the attacker is the Player: flag 2, and on a body dead more than p4 s
+  (0x100a1f20: now - death time) reputation += p5 (0x1011961f).
+- **The bleed** (0x10118680, every Character update): while the body lives, bleed x frame time
+  through its damage virtual, the attacker the Player when flag 2 is set (his kill: p166, p169),
+  else the body itself. Every reader of +0x536 / +0x448 [verified: all accesses]: the Action
+  Dialog does not count the player's hits meanwhile (0x10040d10); HitReactBehavior
+  (0x100ef75c..0x100ef7ef) kills a knocked-down body at once when health <= bleed x the length of
+  its get-up clip p21 (it dies on the floor instead of standing up); KillObjectBehavior
+  (0x100fc020) starts no Dodge (type 0x38) / ProjectileBlock (0x21) and MainlinerKillObject
+  (0x1007ebc0) no evasive move while bleeding; the Player (0x100415a0: alive and not bleeding) for
+  two pickup classes. Nothing reads it for speed or anything else.
+- **Regrowth** (0x100ed9c0, the resurrection Character vt 22 that Killjoy's RaiseDead ends with):
+  health = p160 %, the bleed = 0 and flag 2 cleared (0x100eda37), then for every p16 cap with p3
+  != 0 (counted by 0x10118930) 0x101189e0: when its channel is cut, the cap object attached to
+  the bone is released and the bone gets request 0x200010 (node flag 0x10 cleared on the
+  subtree): the segments show again. Caps with p3 0 stay cut. Retail p3 = 1: 10:94 / 10:973 (13),
+  10:108 (9), 10:800 / 10:954 (3), 10:1545 (4), 10:1557 (1), 10:1558 (16), 10:1559 (6): the
+  CartWheelers' and the 5b raisables' limbs.
+- **CapLimb** (message 451, fixed input of the Character and the Player maps): `[+4] = 1` cuts
+  the cap of bone `[+0xa]` (an animation event's bone), otherwise the whole p17 list. The only
+  retail clip with the event is Torque's 2:562 (bones 11, 31, 48: his Part Caps 2:766 / 2:765 /
+  2:770, whose p6 1e9 no blow reaches), his **death by a Slayer**: the Player's death
+  (0x1002e3f0) plays the killer's clip, Mainliner p330 2:598, Slayer p332 2:562, Burrower p335
+  2:606, Inferna p337 2:616 (Switch 9:2849 lists Interaction Properties 2:562, a different
+  resource). **Creature-form finishers: none.** No
+  creature-form clip carries 451; the creature's claws (damage type 8, 35 / 52.5) cut by the
+  ordinary test: heads at any health, arms at 60 % or less, torsos too (type 8 is not in their
+  p14) [verified: every .adu event list].
+- **Torque's caps** (Player p16 = 2:766, 2:625, 2:770, 2:765, 2:675 on the Player's +0x448
+  component; his damage 0x1002e036 runs the same blow test after the health change): a
+  CartWheeler's blow on his head at 20 % health or less takes it (2:625: p6 1, 100 %, bleed 1000),
+  a Fester's type-11 blow on his waist halves him (2:675: p13 0, types [11], 40..70 %, bleed 500);
+  the arms and the other head cap only by the Slayer death clip's CapLimb events.
+- **Gibs** (`gibs.ts`) [verified unless marked]: the attack stimulus (sent after the health
+  change, before the Part Cap test) reaches the hit reaction vt 72 (0x100e6480); for a dead
+  character (0x100a1ad0: health <= 0, so the killing blow too) with damage type 8 (Gonzogun, the
+  creature's claws) or 3 (explosions) and p117 set it calls the death reaction vt +0x128
+  (0x100e5d00) and nothing else. Type 3 with p112 set and the attacker known: the body is
+  replaced by p112, a BouncingObject of its own model (guards 10:487, CartWheelers 10:99), its -Z
+  from the attacker to the body raised to p114 degrees (30 / 10) when lower; the new object takes
+  the body's cuts (request 0x100010 per cut p16 channel) and plays p113; it flies at p1 / 2048 =
+  12.2 m/s, lives p12 = 5 s and bursts into p34 at its bone p35 (3:2834 at the guard's chest 6)
+  [inferred: the throwables' fuse / detonation fields]. Otherwise (types 7 / 8, or 3 without
+  p112) 0x100e30d0 -> 0x100e2f70 spawns p117 at bone p116's matrix (guards 3:2834 at 6,
+  prisoners 3:2859 / 3:2845, CartWheelers 3:2966 / 3:2998 at 3). Either way the death outputs
+  that have not fired go (p28 output, p29 message: flags +0x70 0x800 / 0x1000), then output p30,
+  and the body is removed. 41 Character templates set p117 (the earlier note "no chapter-1 NPC
+  sets it" was wrong).
+- **Port** [inferred unless marked]: the hit point picks the nearest posed leaf hit sphere not on
+  a cut bone; a bone's channel is itself or the nearest ancestor in the channel table. The
+  engine's draw batches are not decoded (they are not the file's material runs), so the port
+  gives every triangle a segment (each corner's heaviest bone, up the tree to the nearest bit
+  channel; the corners' majority) and drops the cut segments' triangles from the actor's own
+  index (the vertex buffers stay shared); a rig without bit channels keeps the older stand-in
+  (the cut bone's children scaled to nothing). What rides the cut bone and its subtree goes
+  (hats, guns: `weapons/npc.ts` via `brokenParts`); the cap model rides the cut bone; the p17 generator is
+  spawned at the cut bone thrown away from the attacker; the p16 spurt follows the bone. Shots
+  stop at dead bodies with parts left (`raycast 'cuttable'`), and creature blows are swept
+  against a body's leaf hit spheres when it is dead (`melee.ts sweepSpheres`; the living keep
+  the standing capsule stand-in, §13.9), so corpses can be cut where a claw reaches them (the
+  standing combo passes over a body on the floor: browser, 1a 7b36, five swings, no contact). Posed bodies (a DormantBehavior pose) do not bleed [port:
+  their placed pose is kept]. NPC blows carry a hit point: the blade's contact from the sweep
+  (`npc-melee.ts`, with the weapon's p70 type), a shot's point where the deflected round passes
+  the aim point (`spreadShotPoint`, the same draw as `spreadShotHits`; type Missile p32), the aim
+  point for blows without weapon spheres [port]; radius damage still cuts nothing. The thrown
+  body is the actor itself (`throwCorpse`: its motor launched, p113 played, its cuts kept); blasts
+  now reach corpses that have p117 (`world/damage.ts`), thrown from the blast's centre; the body is
+  removed the frame after (outside the actors' loop) and the Part Cap test still sees the blow.
+  Type 7 is left out [its users not traced]. The bleed-out on the floor deals the remaining
+  health as the bleed (the player's kill when he cut it). Torque's cuts apply to the human body
+  only (not while transformed) and are cleared when he is revived; his killer's death clip and
+  its CapLimb events (`Dismemberment.schedule`) play through `PlayerBody.die(clip)`. Not ported:
+  Dodge / ProjectileBlock and the Mainliner's evasion themselves (so their bleed gates have
+  nothing to gate), the cut-node event skip (the port's NPC clip events are not per bone), the
+  p12 weapon drop (no retail weapon sits on a capped bone). Cuts and the bleed are saved
+  ('actors.parts').
+- **Browser** (1a, frame strips in the report): the placed bodies lie cut (78f3 armless at the
+  elbow with its stump); the stabbed inmate 7652 shot in the head (20, type 1): head gone, neck
+  stump, blood spurt, head chunks, dead from the bleed (500 / s) within a frame; corpse 7b36 struck by a
+  claw blow (35, type 8) is cut at the waist (cap 10:860, torso chunks fly) and the corpse rule
+  pays −2.
 
 ## 16. Materials and surface rendering [verified unless marked]
 
@@ -4917,8 +5278,60 @@ shake to landing or to the player being hit; the port adds a small jolt for fall
 | BloodPool | p0 material (4:1095 blood texture), grows from p1 to p3/100·2 units over p2 s, opacity p4 %, stays p6 s [inferred] |
 | Blood Point Generator | drops at p0..p1° elevation within p3° around the direction away from the attacker, reaching up to p2 units, each leaving a splat where it lands [inferred] |
 | Water Ripple | model scaled from p2 to p1 over p3 s [inferred] |
-| Electric Arc | p1 bolt length; three jagged bolts for 0.4 s [inferred] |
+| Electric Arc / Electric Arc Effect | §17.3.1 [verified]; a bare Electric Arc spawned at a point, and the template-free 'electric' hit (Horace's shots), crackle between the point and a few around it with the arc model [port] |
 | Particle Smoke | p0 puffs, p19 flipbook (frame by age), life p4..p5 ms, colour p16, size p13/10 [inferred] |
+
+#### 17.3.1 Electric Arc Effect and Electric Arc (`electric-arc.ts`) [verified unless marked]
+
+Suffering.rfl: Electric Arc Effect (class 0x2d326c65) ctor 0x100aada0, start 0x100ab3d0, arc
+spawn 0x100ab180, update 0x100ab590; Electric Arc (0x6c5a0ad6) ctor 0x1001ff80, init
+0x100a9bf0, update 0x100a9c40. A Damage Action Object's p8 is spawned on each of its targets.
+
+- **Effect**: p0 seconds it lasts (-1 until removed; 999 on Horace), p1 an Object Generator
+  attached at the start endpoint (0x100aa680: the pale-blue Point Light 0x82a7ff with a
+  Lighting Effect flicker), p2 the endpoints, p3 arcs, p4 the Electric Arc, p5 = 1 travel, p6
+  restart a finished path from the root (0 ends the effect), p7 = 1 direct children only, p8
+  damage per second to the target (0x100a9ef0; 0 in retail).
+- **Endpoints** form a tree (first child, next sibling). With p2 = 1 they are the target and,
+  recursively, the objects it links to (0x100aa380; an object met twice destroys the effect).
+  Otherwise they are the bones of the target's skeleton (0x100aa080, bone records +0x44 /
+  +0x48). Fewer than two destroy it. The start is the hit bone the message carries, else bone 1
+  (p2 = 0) or the target itself.
+- **Electric Arc**: the template's model is the bolt, two crossed ribbons 0.4 wide and 1 long
+  along -z in 10 (3:447, 3:1150) or 20 (3:578, 3:1054) sections, textured with an additive bolt
+  (3:332 / 3:375) whose Advanced Material carries the glow mark. p0 / p1 (m) the distance range
+  of its next end, p2 bow scale, p3..p4 % the per-section bow, p5..p6 s how long it keeps its
+  ends, p7..p8 % the width scale.
+- **Ends.** When an arc's life runs out it takes new ends and a life U(p5, p6). Random (p5 = 0,
+  0x100aaf80 / 0x100aa7a0): the old end becomes the start; the new end is a random endpoint in
+  (p0, p1) of it, else any endpoint (the start included: a zero-length arc, drawn 0.01 long).
+  Travel (p5 = 1, 0x100ab460 / 0x100aa9d0): A <- B <- C, C <- a random descendant of B within
+  (p0, p1); nearer than p0 the walk goes deeper, with p1 less that distance. Only arc 0 travels;
+  the others copy its ends and life.
+- **Every frame** (0x100ab590): width w = U(p7, p8) / 100. Travel runs the arc from
+  A + (B - A) k to B + (C - B) k, k = 1 - t / life; with no C it shrinks into B, w x sqrt(1 - k).
+  The model is put at the start with its -z to the end, scaled (w, w, length) and rolled by
+  U(0, 2 pi) about its axis. Its sections (vertices of one z sorted by z; a vertex at the origin
+  is skipped, 0x100c3810) move along the model's y by sin(pi i / n) x U(p3, p4) / 100 x p2 x
+  length: a bow to one side with a jagged edge, new every frame (0x100a9c40). Arcs hide with
+  their target; the effect goes with it.
+- **The 1a electrocution** (Relay 8a1b at the guard's Waypoint 752d): Timer 81d5 fires 75dd
+  (3:2898, with light generator 3:2940) and 8185 (3:2941, 200 damage) at guard 609e: one arc
+  each travelling over his bones for 15 s (3:2899: 0.5..3 m, bow 60 x 0.3..1 %, 0.5..1 s,
+  width 35..55 %), so they keep crawling over the body on the floor. Relay 7619 starts the door
+  and chair-room bolts: 816e / 82a4 (3:2893, every 0.5 ± 0.25 s for 4 s) on decoration trees
+  from the door frame to the floor in front of it; 818e (3:2909, every 0.35 ± 0.1 s for 4 s)
+  ceiling-to-floor bolts in the chair room 5..7 times the model's width (2..2.8 m: the white flare
+  through the doorway); 81d2 (3:2893, 8 s) on the chair-room ceiling; generator 816d's light;
+  Relay 81bc breaks the two Light Housings.
+- **The glow.** The bolt material's glow mark (Advanced Material p5) feeds the engine's HDR
+  scene glow (docs/re/renderer.md §3.2, `src/app/scene-glow.ts`: marked pixels blurred over four
+  levels and added back, with the Pixel Shaders option). The arcs are drawn with the model's own
+  material, so the glow pass picks up their deformed meshes; nothing else adds a glow.
+- **Port**: `ElectricArcs` in the fx system (services.fx.arcEffect); the director builds the
+  target (an actor's bones; the linked objects' tree) for each Damage Action Object target. The
+  generator's Point Light is fed to the engine lighting at the start endpoint for its run time.
+  On the player the arcs use his third-person body, which first person does not show.
 
 **Decals** (`decals.ts`): orthographic projection along the surface normal onto the static
 collision triangles around the point (`CollisionWorld.trianglesInBox`), clipped to the decal box,

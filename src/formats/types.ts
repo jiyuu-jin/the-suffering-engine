@@ -54,11 +54,27 @@ export interface MeshPart {
    * (Decoration, docs/game-logic.md §14.9).
    */
   moveSolid?: false;
+  /**
+   * Collision parts (LevelData.collision): the COLLISION_LAYER bits of the part's triangles
+   * (src/app/physics.ts), overriding the rule from `moveSolid` / `splat`.
+   */
+  layers?: number;
+  /**
+   * Collision parts: AI sight passes the part (engine object +8 bit 0x20000, template flag bit 10
+   * or instance 0x1000000 under 0x2000; docs/game-logic.md §14.10).
+   */
+  sightPass?: true;
 }
 
 export interface LevelData {
   name: string;
   parts: MeshPart[];
+  /**
+   * The original's collision geometry when the loader asked for it (LevelExtras.collisionOf):
+   * placed objects' type-7 collision models (formats/model-collision.ts) and the floor layers.
+   * Absent: `parts` collide as drawn.
+   */
+  collision?: MeshPart[];
   /** Suggested camera spawn, if the parser can find a player start. */
   spawn?: { position: [number, number, number]; yaw: number };
   /** Zones and portals (formats/visgraph.ts); absent for levels without zones. */

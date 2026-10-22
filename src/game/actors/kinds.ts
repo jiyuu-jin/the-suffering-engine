@@ -8,7 +8,7 @@ import { classByHash, readObjectTemplate, decodeTemplateProps } from '../../form
 import type { AnimClipData } from '../../formats/animation';
 import * as THREE from 'three/webgpu';
 import { buildAnimationClip, Character, decodeCharacterTextures } from '../../app/character';
-import { clipSpeed, loadClip, readClipEvents, resolveCreatureClips, type ClipEvents, type ClipRef } from './clipmap';
+import { CHARACTER_MELEE_SLOT, clipSpeed, loadClip, readClipEvents, resolveCreatureClips, type ClipEvents, type ClipRef } from './clipmap';
 import { readAnimEvents } from '../../formats/animation';
 import { armWindows, type ArmWindow } from '../insanity/melee';
 import { readMoverVolume, type MoverVolume } from './mover';
@@ -80,12 +80,16 @@ export class KindLibrary {
   constructor(private readonly pkgs: PackageSet) {}
 
   /** Creature kind for a Character-family template (null when its model is not skinned). */
-  creature(template: ResRef): CreatureKind | null {
-    const key = `c${template.pkg}:${template.id}`;
+  /**
+   * `melee`: an instance's own MeleeAttackBehavior (Character p87 overridden on the placement: the
+   * Prelude's baton guards 10:297 on template 10:392, which has none); a kind of its own.
+   */
+  creature(template: ResRef, melee?: ResRef): CreatureKind | null {
+    const key = `c${template.pkg}:${template.id}${melee ? `+m${melee.pkg}:${melee.id}` : ''}`;
     if (!this.kinds.has(key)) {
       let k: CreatureKind | null = null;
       try {
-        k = this.buildCreature(key, template);
+        k = this.buildCreature(key, template, melee);
       } catch (err) {
         console.warn(`[actors] template ${template.pkg}:${template.id}:`, err);
       }
@@ -175,13 +179,13 @@ export class KindLibrary {
     this.kinds.clear();
   }
 
-  private buildCreature(key: string, template: ResRef): CreatureKind | null {
+  private buildCreature(key: string, template: ResRef, melee?: ResRef): CreatureKind | null {
     const t = readObjectTemplate(this.pkgs, template);
     if (!t?.modelRef) return null;
     const cls = classByHash(t.classHash);
     const skinned = readSkinnedModel(this.pkgs, t.modelRef);
     if (!skinned || !cls) return null;
-    const map = resolveCreatureClips(this.pkgs, template, t.modelRef.pkg, skinned.animSet);
+    const map = resolveCreatureClips(this.pkgs, template, t.modelRef.pkg, skinned.animSet, melee ? new Map([[CHARACTER_MELEE_SLOT, melee]]) : undefined);
     const refs: ClipRef[] = [];
     const add = (r: ClipRef | undefined) => {
       if (!r) return -1;

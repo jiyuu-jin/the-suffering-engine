@@ -26,7 +26,10 @@ import { RETAIL_WATER_RULES, waterSurfaceParts, waterVolumeUids } from '../src/g
 import { parseLevel } from '../src/formats/level';
 import { findLevelDependencies } from '../src/app/loader';
 import { mechArrivalOutput } from '../src/game/world/props';
-import type { World } from '../src/game/world/logic';
+import { World, type WorldHooks } from '../src/game/world/logic';
+import { resistanceForceMultiplier, resistanceMultiplier } from '../src/game/fx/gas';
+import { readHitTables } from '../src/game/actors/hit-react';
+import { readTemplate } from '../src/game/world/fx';
 import { nodeFS, readSrsc, skip } from './helpers';
 
 const cutOut = () => {
@@ -146,4 +149,112 @@ test('8b: each gas valve\'s Mechanism sends p58 Off into the gas Count Down 1fa9
   }
   // The Count Down decrements on Off (2) and starts at 4.
   assert.deepEqual([by.get(0x1fa9)!.values[0], by.get(0x1fa9)!.values[4]], [4, 2]);
+});
+
+async function level8b() {
+  const L = 'LEVELS/8 Bluff/8b Bluff.lvl';
+  const lvl = readSrsc(L);
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    const packages = (await loadPackages(nodeFS(), dirname(L), readLevelHeader(lvl).dependencies, () => {})) as EntityPackageSet;
+    const ents = parseEntities(lvl, packages, { resolveStrings: false });
+    return { packages, by: new Map(ents.map((e) => [e.uid, e])) };
+  } finally {
+    console.warn = warn;
+  }
+}
+
+test('8b stove: fire makes Hermes react, his reaction\'s Triggered passes Relay 1f0d', { skip }, async () => {
+  const { packages, by } = await level8b();
+  const relay = by.get(0x1f0d)!;
+  assert.equal(relay.values[4], 6, '1f0d relays Triggered');
+  assert.equal(relay.values[0], 0, 'and starts disabled: a copy in Detector 2565 (filter 1) enables it');
+  assert.deepEqual([by.get(0x2565)!.values[1], by.get(0x249b)!.links, by.get(0x249a)!.links], [1, [0x1f0d], [0x1f0d]]);
+  for (const u of [0x1df3, 0x2410, 0x2419, 0x241d, 0x2421, 0x2425, 0x252b]) {
+    const h = by.get(u)!;
+    assert.ok(h.links.includes(0x1f0d), `Hermes ${u.toString(16)} links the relay`);
+    // No damage from anything: p5 (immune to unlisted) and both resistances at x0 ...
+    for (const type of [1, 3, 5, 13, 14]) assert.equal(resistanceMultiplier(packages as never, h.values, type), 0);
+    // ... but fire (5) and wind (14) keep their force (p2 = 1); the rest none (p6 = 1).
+    assert.equal(resistanceForceMultiplier(packages as never, h.values, 5), 1);
+    assert.equal(resistanceForceMultiplier(packages as never, h.values, 14), 1);
+    assert.equal(resistanceForceMultiplier(packages as never, h.values, 1), 0, 'bullets do not even push him');
+    // His only hit reaction: from force 1, a whole-body one that sends Triggered to his links.
+    const t = readHitTables(packages as never, h.values);
+    assert.deepEqual(t.hits.map((d) => [d.min, d.layerBone, d.message]), [[1, -1, 6]]);
+  }
+  // A Molotov's blast (Radius Damage 4:248, fire): 20 force at the centre, 13 at its edge.
+  const rd = readTemplate(packages as never, { pkg: 4, id: 248 })!;
+  assert.deepEqual([rd.values[10], rd.values[2], rd.values[3]], [5, 20, 13]);
+  // The rest of the chain: 1f0d -> 2496 -> "Hermes" 1f0f -> Relay 1f17 -> Count Down 1f15 (2);
+  // the stove door 1e37 starts open (p36) and closing it (p65 Decrement) takes the second.
+  assert.deepEqual(relay.links, [0x2496]);
+  assert.ok(by.get(0x2496)!.links.includes(0x1f0f));
+  assert.equal(by.get(0x1f15)!.values[0], 2);
+  const door = by.get(0x1e37)!;
+  assert.deepEqual([door.values[36], door.values[65]], [1, 9]);
+  assert.ok(door.links.includes(0x1f15));
+  assert.deepEqual(by.get(0x1f15)!.links, [0x1f21, 0x26ae]);
+});
+
+test('8b Jimmy: his escort chain ends in the gas room; the walkway Detector picks his scene; nothing of him reaches 9', { skip }, async () => {
+  const { by } = await level8b();
+  // Freed (Relay 174e) -> 1751 -> Behavior Changer 174f: SimpleConversation 1752 -> WaypointBehavior
+  // 1753 (escort: p8 the Player 10, p9 10 m, p10 20 m) -> ... -> 1760 -> WaypointBehavior 189f to
+  // Waypoint 1ea5 in Hermes' room (p0 On -> Count Down 1f01).
+  assert.equal(by.get(0x174f)!.values[6], 0x1752);
+  const chain = [0x1752, 0x1753, 0x1758, 0x1759, 0x1760, 0x189f];
+  for (let i = 0; i + 1 < chain.length; i++) assert.deepEqual(by.get(chain[i])!.links, [chain[i + 1]]);
+  assert.deepEqual([by.get(0x1753)!.values[8], by.get(0x1753)!.values[9], by.get(0x1753)!.values[10]], [[10], 10, 20]);
+  assert.equal(by.get(0x189f)!.values[2], 0x1ea5);
+  assert.deepEqual(by.get(0x1ea5)!.links, [0x1f01]);
+  // Detector 26b5 (ground enemies) -> Instance Message Filter 26b6 (sender Jimmy) -> Relay 1ea3 ->
+  // 24e9 Enable: 1edf (inDisable 4) off, 24e8 (inEnable 4) on -> "Camera" 1eb1 instead of 1ed5.
+  assert.equal(by.get(0x26b5)!.values[1], 1);
+  assert.deepEqual(by.get(0x26b6)!.values[1], [0x1738]);
+  assert.deepEqual(by.get(0x24e9)!.links, [0x24e8, 0x1edf]);
+  assert.deepEqual([by.get(0x1edf)!.values[6], by.get(0x24e8)!.values[5], by.get(0x24e8)!.values[0]], [4, 4, 0]);
+  // His scene's end hands him a DeathBehavior (Behavior Changer 25d5 -> 10:350): Hermes kills him.
+  assert.ok(by.get(0x1eb1)!.links.includes(0x25d5));
+  // Level Transition 1798 lists him (p7) but 9's arrival from 8b (Player Spawn Point ca5) names no
+  // companion copy (p4 / p5 empty): nobody is carried.
+  assert.deepEqual(by.get(0x1798)!.values[7], [0x1738]);
+});
+
+test('8b: Relay 2413 (one random link) skips the jets already blocked: the copies keep coming', { skip }, async () => {
+  const L = 'LEVELS/8 Bluff/8b Bluff.lvl';
+  const lvl = readSrsc(L);
+  const warn = console.warn;
+  console.warn = () => {};
+  const packages = (await loadPackages(nodeFS(), dirname(L), readLevelHeader(lvl).dependencies, () => {})) as EntityPackageSet;
+  console.warn = warn;
+  const hooks: WorldHooks = {
+    player: () => ({ feet: [0, -1000, 0], eye: [0, -998, 0], forward: [0, 0, 1] }),
+    setVisible: () => {},
+    setTransform: () => {},
+    switchPose: () => {},
+    playSound: () => undefined,
+    toast: () => {},
+    help: () => {},
+    requestLevel: () => {},
+    hasItem: () => false,
+  };
+  const world = new World(parseEntities(lvl, packages, { resolveStrings: false }), packages, hooks, { levelPath: L });
+  const relay = world.get(0x2413)!;
+  // p2 1 link, p3 1 random, over the five jets' Relays (2415 / 2418 the stove / 241c / 2420 / 2532).
+  assert.deepEqual([relay.e.values[2], relay.e.values[3]], [1, 1]);
+  assert.deepEqual(relay.e.links, [0x2415, 0x2418, 0x241c, 0x2420, 0x2532]);
+  // Four jets blocked: their Relays destroyed (2415 by Relay 2041's Destroy 5, ...).
+  for (const u of [0x2415, 0x241c, 0x2420, 0x2532]) world.destroy(world.get(u)!);
+  const got: number[] = [];
+  world.subscribe('*', (msg, _from, to) => {
+    if (msg === 1 && relay.e.links.includes(to)) got.push(to);
+  });
+  for (let i = 0; i < 20; i++) {
+    world.send(0x2413, 1, 0);
+    world.update(0.01);
+  }
+  assert.equal(got.length, 20, 'every pick lands on a live jet');
+  assert.ok(got.every((u) => u === 0x2418), 'the stove, the only one left');
 });

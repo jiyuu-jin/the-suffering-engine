@@ -13,7 +13,10 @@ import { framePass } from './matrix-pass';
 import { context } from 'three/tsl';
 import { BACK_BUFFER_TYPE, EngineFog, GAMMA_BACK_BUFFER, LEGACY_LIGHTING, backBufferOutput, engineFogNode, engineLights } from './engine-light';
 import { frameProbe } from './frame-probe';
+import { NO_GLOW, SceneGlow } from './scene-glow';
 import { warmObjects, warmTargets, warmHooks, warmViewmodelObjects } from './prewarm';
+import { ENHANCED } from './enhanced/config';
+import type { EnhancedRenderer } from './enhanced';
 
 
 export type BackendName = 'WebGPU' | 'WebGL2';
@@ -71,6 +74,11 @@ export class LevelRenderer {
   /** Static collision for the current level (null until a level is set). */
   collision: CollisionWorld | null = null;
   /**
+   * The level's drawn triangles as a query world (decal projection, the actors' draw occlusion);
+   * the same object as `collision` when the level has no collision parts (LevelData.collision).
+   */
+  drawn: CollisionWorld | null = null;
+  /**
    * Which parts collide, built per level (applied on the next setLevel).
    * Default null = everything collides. e.g. `(lvl, tex) => cutoutAlphaFilter(tex)`.
    */
@@ -86,6 +94,12 @@ export class LevelRenderer {
    */
   readonly viewmodel = new THREE.Group();
   private readonly fpScene = new THREE.Scene();
+  /** Enhanced graphics mode (docs/enhanced.md); null in Original mode. */
+  enhanced: EnhancedRenderer | null = null;
+  /** The viewmodel's scene and camera (the Enhanced pipeline draws them as a pass). */
+  get viewmodelPass(): { scene: THREE.Scene; camera: THREE.PerspectiveCamera } {
+    return { scene: this.fpScene, camera: this.fpCamera };
+  }
   /** Same lens as the world camera; near plane 32 engine units (1.6 cm, SUFFERING.EXE 0x49c400). */
   private readonly fpCamera = new THREE.PerspectiveCamera(70, 1, 32 / 2048, 50);
   /**
@@ -120,6 +134,11 @@ export class LevelRenderer {
    * The first-person viewmodel pass is drawn on top afterwards either way.
    */
   postProcess: { render(): void } | null = null;
+  /**
+   * The engine's HDR scene glow (scene-glow.ts) in the Original look; null in Enhanced mode,
+   * with `?lighting=legacy` or `?noglow`. Screen effects apply it to their own scene target.
+   */
+  glow: SceneGlow | null = null;
   /**
    * Game clock rate (Time Scale objects, src/game/insanity): scales the dt handed to the
    * player and to every frame listener (game systems). 1 = normal.
@@ -224,11 +243,16 @@ export class LevelRenderer {
 
   static async create(container: HTMLElement): Promise<LevelRenderer> {
     const forceWebGL = new URLSearchParams(location.search).has('webgl');
+    // Enhanced graphics mode (docs/enhanced.md): its shading hooks must be in before any
+    // material is built (the player's, in the constructor). Original never loads it.
+    const enhanced = ENHANCED ? await import('./enhanced') : null;
     const r = new LevelRenderer(container, forceWebGL);
     await r.renderer.init();
     coalesceNodeBuilds(r.renderer);
     r.backend = (r.renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend ? 'WebGPU' : 'WebGL2';
     r.timer.connect(document);
+    if (GAMMA_BACK_BUFFER && !ENHANCED && !NO_GLOW) r.glow = new SceneGlow(r.renderer, r.scene, r.camera);
+    if (enhanced) r.enhanced = await enhanced.createEnhanced(r);
     r.renderer.setAnimationLoop((t) => r.frame(t));
     return r;
   }
@@ -335,7 +359,11 @@ export class LevelRenderer {
       engineLights.renderShadows(this.renderer, this.camera, this.flashlight);
       probe.lap('shadows');
     }
-    if (this.postProcess && this.postEffects) this.postProcess.render();
+    if (this.enhanced) this.enhanced.draw(this.postProcess && this.postEffects ? this.postProcess : null);
+    else if (this.postProcess && this.postEffects) this.postProcess.render();
+    // The HDR scene glow runs with the front-buffer effects, i.e. the Pixel Shaders option
+    // (scene-glow.ts, docs/re/renderer.md §3.2).
+    else if (this.glow && this.postEffects) this.glow.render();
     else this.renderer.render(this.scene, this.camera);
     probe.lap('render');
   }
@@ -362,6 +390,8 @@ export class LevelRenderer {
       lamp.position.copy(fl.position);
       lamp.target.position.copy(fl.target.position);
     }
+    // Enhanced mode draws the viewmodel as a pass of its pipeline (enhanced/post.ts).
+    if (this.enhanced) return;
     const r = this.renderer;
     r.autoClear = false;
     r.clearDepth();
@@ -829,8 +859,12 @@ export class LevelRenderer {
     this.levelGroup.matrixWorldAutoUpdate = false;
     this.frameLevel(level);
 
-    // Collision: everything collides unless a filter is set (see physics.ts PartFilter).
-    this.collision = new CollisionWorld(level, { filter: this.collisionFilter?.(level, textures) });
+    // Collision: the original's collision geometry when the loader built it (LevelData.collision,
+    // docs/game-logic.md §14.10), else everything drawn unless a filter is set (PartFilter).
+    this.collision = level.collision
+      ? new CollisionWorld({ parts: level.collision })
+      : new CollisionWorld(level, { filter: this.collisionFilter?.(level, textures) });
+    this.drawn = level.collision ? new CollisionWorld(level) : this.collision;
     this.player.setWorld(this.collision);
     stats.collisionTriangles = this.collision.stats.triangles;
     stats.collisionMs = this.collision.stats.ms;

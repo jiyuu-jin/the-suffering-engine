@@ -6,9 +6,12 @@
 //   compares the new health h and the previous one with the threshold p0: when they lie on
 //   different sides it fires output p3 to its links if p1 = 0 and h < p0 (dropping below) or
 //   p1 = 1 and h > p0 (rising above); p2 set = destroy itself after firing. The previous health
-//   starts at 0, so a threshold above the starting health never fires (the Prelude's 170 / 120
-//   only matter with the Easy health of 200). Port: polled each frame on the player's health
-//   (services.combat), NPC targets through services.actors when they expose `health`.
+//   starts at 0 (constructor 0x10015150) and only health events update it: the starting health
+//   is no event, so the first blow compares with 0 and only arms the trigger (Prelude: Easy 200
+//   -> 170 fires on the second blow below 170, Impossible 60 -> 40 likewise; Medium's 120 lies
+//   above the health of 100 and Hard's 70 is crossed by the first blow, so neither fires).
+//   Port: polled each frame on the player's health (services.combat), NPC targets through
+//   services.actors when they expose `health`; a change of the polled value is the event.
 //
 // Inventory Add Remove (0x744df9ea; 3a x2, 6a, 9) [inferred from all 4 instances]: p1 input
 //   (On) applies the change, p2 input Destroy; p0 = 1 removes the p4 item templates from the
@@ -41,7 +44,7 @@ interface HealthSource {
 }
 
 export class LevelLogic {
-  private readonly thresholds: { w: WorldEntity; target: number; prev: number }[] = [];
+  private readonly thresholds: { w: WorldEntity; target: number; prev: number; seen?: number }[] = [];
 
   constructor(
     private readonly world: World,
@@ -96,7 +99,11 @@ export class LevelLogic {
       const { w } = t;
       if (w.destroyed) continue;
       const h = this.health.health(t.target);
-      if (h === undefined || h === t.prev) continue;
+      if (h === undefined || h === t.seen) continue;
+      // The first value seen is the starting health, not an event: prev stays 0.
+      const first = t.seen === undefined;
+      t.seen = h;
+      if (first) continue;
       const v = w.e.values;
       const p0 = num(v[0]);
       const before = Math.sign(t.prev - p0), now = Math.sign(h - p0);

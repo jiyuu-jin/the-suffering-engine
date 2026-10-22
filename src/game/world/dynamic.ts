@@ -19,6 +19,10 @@ import { PICKUP_CLASSES } from './logic';
 import { materialSeeThrough } from '../actors/sight';
 import { warmObjects } from '../../app/prewarm';
 import { housingExtras } from './housing';
+import { moverCollisionMesh, rayOnlyCollisionMesh, readModelCollision, type CollisionMesh } from '../../formats/model-collision';
+import type { ObjectCollision } from '../../formats/level';
+import { collisionForClass } from './object-collision';
+import { switchBaseMaterials, switchBaseSwaps, switchPart, type SwitchPart } from './switch-part';
 
 const SYSTEM_PKG = 2;
 
@@ -160,8 +164,15 @@ export interface DynamicObject {
   /** Root placed at the instance transform; `pivot` carries switch motion. */
   root: THREE.Group;
   pivot: THREE.Group;
-  /** Local-space triangles (model units, scale applied in the matrix) for collision. */
+  /** Local-space drawn triangles per submesh (model units, scale applied). */
   local: { positions: Float32Array; indices: Uint32Array }[];
+  /**
+   * Local-space collision triangles (scale applied) of the body: the model's collision tree
+   * (formats/model-collision.ts, docs/game-logic.md §14.10), or `local` for a skinned prop.
+   */
+  collisionLocal?: { positions: Float32Array; indices: Uint32Array }[];
+  /** AI sight (and shots) pass the body (engine +8 bit 0x20000, object-collision.ts). */
+  sightPass?: boolean;
   /** Base instance matrix (placement). */
   base: THREE.Matrix4;
   collides: boolean;
@@ -173,6 +184,11 @@ export interface DynamicObject {
   model?: RiotModel;
   /** Created at runtime (spawned template), removed with remove(). */
   spawned?: boolean;
+  /**
+   * A Switch with a p37 part (switch-part.ts): the object draws the part, which its motion moves,
+   * and `stand` is the base it was placed with, a separate object that stays put.
+   */
+  stand?: DynamicObject;
 }
 
 const bakedGain = uniform(3.0);
@@ -280,18 +296,57 @@ export class DynamicObjects {
       if (d) d.pivot.traverse((c) => ((c as THREE.Mesh).isMesh ? (c.visible = false) : undefined));
       return d;
     }
+    // How the object collides: its class (the movers' collide lists) and its sight flag.
+    const how = collisionForClass(e.className, o.flags, readObjectTemplate(this.packages, o.template)?.flags ?? 0);
+    // A Switch with a p37 part wears the part's model and leaves its own to a base object at the
+    // placement (switch-part.ts, Suffering.rfl 0x101313b0): the lever turns, the box stays.
+    const part = skinned ? undefined : switchPart(e, this.packages);
+    if (part && this.model(part.model)) return this.buildSwitchWithPart(o, e, part, modelRef, lit?.colors, how);
     return this.buildModel(e.uid, `${e.className}#${e.uid.toString(16)}`, modelRef, instanceMatrix(o.position, o.rotation), {
       scale: o.scale,
       colors: lit?.colors,
+      how: skinned ? undefined : how,
       // No .ldu colours: the engine's load-time pass (static-light.ts); the sky dome is drawn
       // unlit by lights.ts.
       lightAtLoad: !lit && e.className !== 'Sky / Sun',
       entity: e,
       collides,
-      // A Decoration is seen by sight and shots but no mover (docs/game-logic.md §14.9).
-      layers: skinned ? COLLISION_LAYER.projectile : e.className === 'Decoration' ? COLLISION_LAYER.decor : undefined,
+      layers: skinned ? COLLISION_LAYER.projectile : undefined,
       cullDistance: placedCullDistance(o, e, this.packages),
     });
+  }
+
+  /**
+   * A Switch and its p37 part (switch-part.ts): the switch object draws and collides with the
+   * part's model (its pivot carries the motion); the base, its own model, is a separate object at
+   * the placement with the p37 template's collision rule, registered under a new uid. The base
+   * keeps the instance's .ldu colours (they are its model's) [port]; the part is lit by the
+   * load-time pass. The base is pre-warmed in both state colours (world.ts switchPose sets them).
+   */
+  private buildSwitchWithPart(o: LevelObject, e: Entity, part: SwitchPart, own: ResRef, colors: Uint8Array | undefined, how: ObjectCollision | null): DynamicObject | undefined {
+    const M = instanceMatrix(o.position, o.rotation);
+    const name = `${e.className}#${e.uid.toString(16)}`;
+    const cullDistance = placedCullDistance(o, e, this.packages);
+    const collides = !this.housingExtras.has(e.uid);
+    const d = this.buildModel(e.uid, name, part.model, M, { scale: o.scale, how, lightAtLoad: true, entity: e, collides, cullDistance });
+    if (!d) return undefined;
+    const uid = nextSpawnUid++;
+    const stand = this.buildModel(uid, `${name}:base`, own, M, {
+      scale: o.scale,
+      colors,
+      lightAtLoad: !colors,
+      entity: e,
+      collides,
+      how: collisionForClass(part.cls, 0, part.flags),
+      cullDistance,
+    });
+    if (stand) {
+      this.objects.set(uid, stand);
+      d.stand = stand;
+      const slots = stand.model?.materials.length ?? 0;
+      if (switchBaseSwaps(e.values)) this.warmMaterials(uid, [switchBaseMaterials(e.values, true, slots), switchBaseMaterials(e.values, false, slots)]);
+    }
+    return d;
   }
 
   /**
@@ -308,7 +363,21 @@ export class DynamicObjects {
     name: string,
     modelRef: ResRef,
     base: THREE.Matrix4,
-    opts: { scale?: [number, number, number]; colors?: Uint8Array; lightAtLoad?: boolean; entity?: Entity; collides?: boolean; spawned?: boolean; cullDistance?: number; layers?: number } = {},
+    opts: {
+      scale?: [number, number, number];
+      colors?: Uint8Array;
+      lightAtLoad?: boolean;
+      entity?: Entity;
+      collides?: boolean;
+      spawned?: boolean;
+      cullDistance?: number;
+      layers?: number;
+      /**
+       * The class rule (object-collision.ts): with it, or for a spawned model, the body is the
+       * model's collision tree; null = no body. Skinned props pass undefined (drawn triangles).
+       */
+      how?: ObjectCollision | null;
+    } = {},
   ): DynamicObject | undefined {
     const m = this.model(modelRef);
     if (!m) return undefined;
@@ -388,10 +457,27 @@ export class DynamicObjects {
     root.matrix.copy(base);
     root.matrixWorldNeedsUpdate = true;
     this.group.add(root);
-    const collides = opts.collides ?? false;
+    let collides = opts.collides ?? false;
     const d: DynamicObject = { uid, entity: opts.entity as Entity, root, pivot, local, base: base.clone(), collides, visible: true, solid: true, model: m, spawned: opts.spawned };
+    let layers = opts.layers;
+    // The original's collision geometry (docs/game-logic.md §14.10): placed objects by their
+    // class rule, spawned models (remains, debris) as solids.
+    const how = opts.how !== undefined ? opts.how : opts.spawned ? { layers: COLLISION_LAYER.solid, rayLayers: COLLISION_LAYER.decor, sightPass: false } : undefined;
+    if (collides && how !== undefined) {
+      const mdu = this.packages.get(modelRef.pkg)?.mdu;
+      const tree = how && mdu && readModelCollision(mdu, modelRef.id) ? mdu : undefined;
+      const sMax = Math.max(Math.abs(s[0]), Math.abs(s[1]), Math.abs(s[2]));
+      const mover = tree ? moverCollisionMesh(tree, modelRef.id, sMax) : undefined;
+      const ray = tree && !mover ? rayOnlyCollisionMesh(tree, modelRef.id) : undefined;
+      const mesh = mover ?? ray;
+      if (how && mesh) {
+        d.collisionLocal = [scaledMesh(mesh, s)];
+        d.sightPass = how.sightPass;
+        layers = mover ? how.layers : how.rayLayers;
+      } else collides = d.collides = false;
+    }
     if (collides && this.collision) {
-      d.body = this.collision.addDynamic(this.worldParts(d), true, opts.layers);
+      d.body = this.collision.addDynamic(this.collisionParts(d), true, layers);
       this.bodyUids.set(d.body, uid);
     }
     return d;
@@ -499,6 +585,8 @@ export class DynamicObjects {
    */
   seeThrough(uid: number, part: number): boolean {
     const d = this.objects.get(uid);
+    // A collision-tree body: the object's sight flag (docs/game-logic.md §14.10).
+    if (d?.collisionLocal) return !!d.sightPass;
     return partSeeThrough(d?.entity, (d?.pivot.children[part] as THREE.Mesh | undefined)?.material);
   }
 
@@ -634,11 +722,20 @@ export class DynamicObjects {
     return t;
   }
 
-  /** World-space collision triangles at the object's current pose. */
+  /** World-space drawn triangles at the object's current pose (grouped water surfaces). */
   worldParts(d: DynamicObject): DynamicParts {
+    return this.posed(d, d.local);
+  }
+
+  /** World-space collision triangles of the object's body at its current pose. */
+  collisionParts(d: DynamicObject): DynamicParts {
+    return this.posed(d, d.collisionLocal ?? d.local);
+  }
+
+  private posed(d: DynamicObject, local: readonly { positions: Float32Array; indices: Uint32Array }[]): DynamicParts {
     d.root.updateMatrixWorld(true);
     const M = new THREE.Matrix4().multiplyMatrices(d.root.matrix, d.pivot.matrix).elements;
-    return d.local.map(({ positions: P, indices }) => {
+    return local.map(({ positions: P, indices }) => {
       const out = new Float32Array(P.length);
       for (let i = 0; i < P.length; i += 3) {
         const x = P[i], y = P[i + 1], z = P[i + 2];
@@ -653,7 +750,7 @@ export class DynamicObjects {
   /** Re-sync collision with the current pose / visibility. */
   refreshCollision(d: DynamicObject, rebuild: boolean) {
     if (!this.collision || d.body === undefined) return;
-    if (rebuild) this.collision.updateDynamic(d.body, this.worldParts(d));
+    if (rebuild) this.collision.updateDynamic(d.body, this.collisionParts(d));
     this.collision.setDynamicEnabled(d.body, d.visible && d.solid);
   }
 
@@ -702,6 +799,17 @@ export function placedCullDistance(o: LevelObject, e: Entity, packages: PackageS
   if (o.drawDistance !== undefined && o.drawDistance > 0) return o.drawDistance / WORLD_SCALE + (r ?? 0);
   if (t && t.flags & 0x10000) return Infinity;
   return r !== undefined ? 70.71 * r + r : Infinity;
+}
+
+/** A collision mesh with the instance scale applied (dynamic objects keep scale out of the matrix). */
+function scaledMesh(mesh: CollisionMesh, s: readonly number[]): { positions: Float32Array; indices: Uint32Array } {
+  const P = new Float32Array(mesh.positions.length);
+  for (let i = 0; i < P.length; i += 3) {
+    P[i] = mesh.positions[i] * s[0];
+    P[i + 1] = mesh.positions[i + 1] * s[1];
+    P[i + 2] = mesh.positions[i + 2] * s[2];
+  }
+  return { positions: P, indices: mesh.indices };
 }
 
 /** Placement matrix (output space) of an instance: T(pos) · R(engine rotation). */

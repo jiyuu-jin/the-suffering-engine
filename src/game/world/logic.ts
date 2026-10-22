@@ -713,13 +713,23 @@ export class World {
     else {
       const m = num(w.e.values[8]);
       const mode = num(w.e.values[3]);
-      let pool = Array.isArray(w.s.pool) ? (w.s.pool as number[]) : [...w.e.links];
+      // A destroyed link is no pick: it leaves the pool and the pick is made again (0x100cbdc3 ->
+      // 0x100a9e90, the loop counter taken back at 0x100cbdd7); the refill (0x100cb8f0) takes the
+      // live links only [verified]. 8b's Relay 2413 picks the spot the next Hermes copy is cloned
+      // at among the Relays of the gas jets the player has not blocked yet (each block destroys
+      // its Relay): picking a destroyed one ended the cloning for good.
+      const live = () => w.e.links.filter((u) => !this.ents.get(u)?.destroyed);
+      let pool = Array.isArray(w.s.pool) ? (w.s.pool as number[]) : live();
       for (let k = 0; k < pick && m; k++) {
-        if (!pool.length) pool = [...w.e.links];
+        if (!pool.length) pool = live();
         if (!pool.length) break;
         const i = mode === 0 ? 0 : Math.floor(Math.random() * pool.length);
         const to = pool[i];
-        if (mode !== 1) pool.splice(i, 1);
+        if (mode !== 1 || this.ents.get(to)?.destroyed) pool.splice(i, 1);
+        if (this.ents.get(to)?.destroyed) {
+          k--;
+          continue;
+        }
         this.send(to, m, from || w.uid);
       }
       w.s.pool = pool;

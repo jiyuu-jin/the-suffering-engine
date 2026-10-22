@@ -95,10 +95,14 @@ const refsOf = (v: PropValue | undefined): ClipRef[] =>
 const num = (v: PropValue | undefined, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
 
 /** Character MeleeAttackBehavior slot (behaviour type 5) [verified 0x100e17c0]. */
-const CHARACTER_MELEE_SLOT = 87;
+export const CHARACTER_MELEE_SLOT = 87;
 
-/** Templates referenced by a template's top-level Template-typed properties, with their class names. */
-function behaviorTemplates(pkgs: PackageSet, template: ResRef): { cls: string; values: PropValue[]; types: number[]; index: number }[] {
+/**
+ * Templates referenced by a template's top-level Template-typed properties, with their class names.
+ * `overrides`: an instance's own values for some of those slots (property index -> template), used
+ * in place of the template's.
+ */
+function behaviorTemplates(pkgs: PackageSet, template: ResRef, overrides?: ReadonlyMap<number, ResRef>): { cls: string; values: PropValue[]; types: number[]; index: number }[] {
   const t = readObjectTemplate(pkgs, template);
   if (!t) return [];
   const cls = classByHash(t.classHash);
@@ -107,7 +111,8 @@ function behaviorTemplates(pkgs: PackageSet, template: ResRef): { cls: string; v
   const out: { cls: string; values: PropValue[]; types: number[]; index: number }[] = [];
   vals.forEach((v, i) => {
     if (((cls.types[i] ?? 0) & 0xff) !== PropType.Template) return;
-    for (const r of refsOf(v)) {
+    const own = overrides?.get(i);
+    for (const r of own ? [own] : refsOf(v)) {
       const bt = readObjectTemplate(pkgs, r);
       const bc = bt ? classByHash(bt.classHash) : undefined;
       if (bt && bc) out.push({ cls: bc.name, values: decodeTemplateProps(bc, bt), types: bc.types, index: i });
@@ -138,10 +143,10 @@ export function clipSpeed(clip: AnimClipData): number {
  * are the rig's animation set (SkinnedModel.animSet) and the package of its
  * .mdu, used for the heuristic fallback.
  */
-export function resolveCreatureClips(pkgs: PackageSet, template: ResRef, modelPkg: number, animSet: number): CreatureClipMap {
+export function resolveCreatureClips(pkgs: PackageSet, template: ResRef, modelPkg: number, animSet: number, overrides?: ReadonlyMap<number, ResRef>): CreatureClipMap {
   const map: CreatureClipMap = { attacks: [], hits: [], deaths: [], source: {} };
   const ok = (r: ClipRef | undefined) => !!r && !!loadClip(pkgs, r);
-  const behaviors = behaviorTemplates(pkgs, template);
+  const behaviors = behaviorTemplates(pkgs, template, overrides);
   // A Character's melee is its MeleeAttackBehavior slot p87 (behaviour type 5 -> p87, RFL
   // 0x100e17c0) [verified]; other MeleeAttackBehaviors of the template belong to class-specific
   // slots used under conditions (the CartWheeler's ceiling slash p179, specials/cartwheeler.ts).

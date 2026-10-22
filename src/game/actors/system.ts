@@ -72,8 +72,11 @@ import type { NoiseSpec } from './behaviors';
 import { modelHitSpheres, posedSpheres } from '../fx/gas-system';
 import { KILLED_BY_PLAYER_OUTPUT, killReputation } from '../insanity/reputation';
 import { readSkeletonTrailer, type SkeletonSphere } from '../../formats/skeleton';
-import { characterValues, Dismemberment, readPartCapRef, refsOf, type PartCapRule, type PartsSave } from './dismember';
+import { bleedsOutBeforeUp, CAP_LIMB, characterValues, Dismemberment, readPartCapRef, refsOf, segmentBonesOf, templateClass, type PartActor, type PartCapRule, type PartsSave } from './dismember';
+import { corpseBlowKind, readGibRule, readThrownBody, throwDirection, type GibRule } from './gibs';
+import { ANIM_EVENT_MESSAGE, readAnimEvents } from '../../formats/animation';
 import { buildHeldModel } from '../weapons/models';
+import type { ArcHandle, ArcTarget } from '../fx/electric-arc';
 
 export interface ActorsService {
   list(): readonly Actor[];
@@ -131,6 +134,8 @@ interface WorldMessaging {
   readonly world?: { readonly playerUid?: number };
   /** Collision hits the eye passes through (cut-out bars, glass): occlusion looks past them. */
   seeThrough?(hit: RayHit): boolean;
+  /** Does the eye see through a hit on the drawn triangles (LevelRenderer.drawn)? */
+  eyeThrough?(hit: RayHit): boolean;
 }
 
 interface WeaponsLike {
@@ -255,7 +260,8 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
     // Hit spheres the NPC weapon sweep tests (npc-melee.ts): skeleton sphere tree leaves as posed
     // now; the player's of the model he shows (fx/gas-system.ts does the same for gas).
     hitSpheres: (who) => {
-      if (who !== 'player') return posedSpheres(who.ch, modelHitSpheres(packages, who.kind.skinned.ref, sphereTrees));
+      // The sphere tree skips the spheres of cut nodes (SUFFERING.EXE 0x4271fd: dismember.ts).
+      if (who !== 'player') return posedSpheres(who.ch, modelHitSpheres(packages, who.kind.skinned.ref, sphereTrees).filter((n) => !parts.isGone(who, n.bone)));
       const b = body?.body;
       if (!b) return [];
       const fp = (view.player as { mode?: string }).mode === 'fp';
@@ -270,9 +276,9 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
     time: 0,
     actors: manager.actors,
     behaviors: manager.behaviors,
-    damagePlayer: (amount, from) => combat.damage(amount, from),
-    damageActor: (t, amount, from) => {
-      manager.damage(t, amount, from.position, from);
+    damagePlayer: (amount, from, hit) => playerBlow(amount, from, hit),
+    damageActor: (t, amount, from, hit) => {
+      manager.damage(t, amount, from.position, from, hit && { point: hit.point, type: hit.type });
     },
     propTarget: (uid) => worldSvc()?.propTarget?.(uid),
     // A KillEnemies object target (a fence Breakable) hit by a character: through services.damage
@@ -444,6 +450,8 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
       audio.play3D(k, [at.x, at.y, at.z], { bus: 'sfx' });
       return audio.get(k)?.duration || 1;
     },
+    arcEffect: (ref, target) => (ctx.services.fx as { arcEffect?(r: ResRef, t: ArcTarget): ArcHandle | undefined } | undefined)?.arcEffect?.(ref, target),
+    playerBody: () => body?.body,
   }, fx);
   repHooks = { hit: (a) => director.playerHit(a), kill: (a) => director.playerKill(a) };
 
@@ -467,7 +475,10 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
   });
   const _sm = new THREE.Matrix4(), _sv = new THREE.Vector3();
   const partSpheres = (a: Actor) => {
-    const leaves = modelHitSpheres(packages, a.kind.skinned.ref, sphereTrees);
+    // The player's part actor (playerPart, below) is his body's Character, not an Actor.
+    const ref = (a as Partial<Actor>).kind?.skinned.ref ?? (a.ch as { skinned?: { ref: ResRef } }).skinned?.ref;
+    if (!ref) return [];
+    const leaves = modelHitSpheres(packages, ref, sphereTrees);
     const out: { c: number[]; r: number; bone: number }[] = [];
     const { bones, boneInverses } = a.ch.skeleton;
     a.ch.root.updateWorldMatrix(true, true);
@@ -481,23 +492,180 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
     }
     return out;
   };
+  /** Character p112..p117 of the bodies that gib (gibs.ts). */
+  const gibRules = new WeakMap<Actor, GibRule>();
   const setupParts = (a: Actor) => {
     const v = characterValues(pkgs, a);
     if (!v) return;
     const capsOf = (x: unknown) => refsOf(x).map((r) => readPartCapRef(pkgs, r)).filter((c): c is PartCapRule => !!c);
     const rules = capsOf(v[16]);
-    const precut = v[18] === 0 ? capsOf(v[17]) : [];
-    if (!rules.length && !precut.length) return;
+    const listed = capsOf(v[17]);
+    const g = readGibRule(v);
+    if (g) {
+      gibRules.set(a, g);
+      (a as PartActor).corpseBlows = true;
+      (a as PartActor).cuttable = true;
+    }
+    if (!rules.length && !listed.length) return;
     const sk = a.kind.skinned;
     const mdu = packages.get(sk.ref.pkg)?.mdu;
-    const channels = (mdu && readSkeletonTrailer(mdu, sk.ref.id)?.channels.map((c) => c.bone)) || [];
-    parts.setup(a, rules, sk.skeleton.bones.map((b) => b.parent), channels, precut);
+    const tr = mdu ? readSkeletonTrailer(mdu, sk.ref.id) : undefined;
+    const channels = tr?.channels.map((c) => c.bone) ?? [];
+    parts.setup(a, rules, sk.skeleton.bones.map((b) => b.parent), channels, listed, tr ? segmentBonesOf(tr.channels) : [], v[18] === 0);
   };
+  // Before the first setupParts: it records each actor's gib rule (gibs below).
   for (const a of manager.actors) if (!a.template) setupParts(a);
   manager.on('spawn', (a) => !a.template && setupParts(a));
   manager.on('death', (a) => parts.died(a));
-  manager.partHit = (a, amount, from, by, hit) => void parts.hit(a, { amount, type: hit?.type, point: hit?.point, from, byPlayer: by === undefined || by === 'player' });
+  manager.partHit = (a, amount, from, by, hit) =>
+    void parts.hit(a, { amount, type: hit?.type, point: hit?.point, from, byPlayer: by === undefined || by === 'player', attackerClass: by instanceof Object && 'kind' in by ? classOf(by as Actor) : undefined });
   manager.cuttable = (a) => parts.cuttable(a);
+  manager.capLimb = (a) => void parts.capLimb(a);
+  env.resurrected = (a) => void parts.regrow(a);
+  // HitReactBehavior's knockdown (0x100ef7a8): bleeding out before the get-up clip ends, the body
+  // dies on the floor (the rest of its health as the bleed: the player's kill when he cut it).
+  env.bleedsOut = (a, len) => {
+    if (!bleedsOutBeforeUp(a.health, parts.bleedRate(a), len)) return false;
+    manager.damage(a, a.health + 1, undefined, parts.bleedByPlayer(a) ? 'player' : (a.uid ?? 0));
+    return !a.alive;
+  };
+
+  // Corpse blows (gibs.ts; docs/game-logic.md §15.16 "Gibs"): an explosion throws a dead body
+  // with p112 / p113, Gonzo and claw blows burst it into p117 at bone p116; either way the death
+  // outputs that have not fired go, then p30, and the body is removed.
+  const deathFired = new WeakSet<Actor>();
+  manager.on('death', (a) => deathFired.add(a));
+  const going = new Set<Actor>();
+  const thrown: { a: Actor; until: number; burst: ResRef[]; bone: number }[] = [];
+  const boneMatrix = (a: Actor, bone: number) => {
+    const b = bone >= 0 ? a.ch.skeleton.bones[bone] : undefined;
+    const o = b ?? a.ch.root;
+    o.updateWorldMatrix(true, false);
+    return o.matrixWorld.clone();
+  };
+  const goneOutputs = (a: Actor) => {
+    if (!deathFired.has(a)) {
+      deathFired.add(a);
+      fireSlot(a, 28);
+      if (a.entity?.family === 'Character') fireSlot(a, 29);
+    }
+    fireSlot(a, 30);
+  };
+  const gibBody = (a: Actor, gib: readonly ResRef[], bone: number) => {
+    const M = boneMatrix(a, bone);
+    for (const g of gib) fxSvc()?.spawn?.(g, M.clone());
+    a.ch.root.visible = false;
+    going.add(a);
+  };
+  manager.corpseHit = (a, _amount, from, by, hit) => {
+    if (going.has(a) || thrown.some((t) => t.a === a)) return true;
+    const r = gibRules.get(a);
+    const at = from ?? (by instanceof Object && 'kind' in by ? (by as Actor).position : by === undefined || by === 'player' ? view.player.position : undefined);
+    const kind = corpseBlowKind(r, hit?.type, !!at);
+    if (!kind || !r) return false;
+    if (kind === 'throw' && at) {
+      const tb = readThrownBody(pkgs, r.body);
+      const c = { x: a.position.x, y: a.bottom + a.height * 0.5, z: a.position.z };
+      const v = throwDirection(c, at, r.elevation).multiplyScalar(tb?.speed || 12);
+      a.throwCorpse(r.bodyClip ? manager.kinds.clipIndex(a.kind, r.bodyClip) : -1, v);
+      thrown.push({ a, until: env.time + (tb?.life ?? 5), burst: tb?.burst.length ? tb.burst : [r.gib], bone: tb && tb.bone >= 0 ? tb.bone : r.bone });
+      console.debug(`[actors] ${a.ch.root.name} #${(a.uid ?? 0).toString(16)} thrown by the blast at ${v.length().toFixed(1)} m/s`);
+    } else {
+      gibBody(a, [r.gib], r.bone);
+      console.debug(`[actors] ${a.ch.root.name} #${(a.uid ?? 0).toString(16)} gibbed (${r.gib.pkg}:${r.gib.id} at bone ${r.bone})`);
+    }
+    goneOutputs(a);
+    return true;
+  };
+  /** Thrown bodies burst at the end of their life; gibbed ones leave (outside the actors' update). */
+  const updateGibs = () => {
+    for (let i = thrown.length - 1; i >= 0; i--) {
+      const t = thrown[i];
+      if (env.time < t.until && t.a.ch.root.parent) continue;
+      thrown.splice(i, 1);
+      if (t.a.ch.root.parent) gibBody(t.a, t.burst, t.bone);
+    }
+    for (const a of going) manager.remove(a);
+    going.clear();
+  };
+  const classOf = (a: Actor) => a.entity?.className ?? templateClass(pkgs, a.kind.template);
+
+  // Torque's own Part Caps (Player p16 on the Player's +0x448 component; his damage 0x1002e036
+  // runs the same blow test): a CartWheeler's blow on his head at 20 % health or less (2:625),
+  // a Fester's type-11 blow on his waist (2:675). His death clip is the killer's (0x1002e3f0:
+  // Mainliner p330, Slayer p332, Burrower p335, Inferna p337); the Slayer's 2:562 carries the
+  // CapLimb events that take his arms and head (2:766 / 2:765 / 2:770, beyond any blow's p6).
+  const playerPart: PartActor | undefined = body
+    ? {
+        get ch() {
+          return body.body as unknown as PartActor['ch'];
+        },
+        get alive() {
+          return combat.alive;
+        },
+        get health() {
+          return combat.health;
+        },
+        set health(_v: number) {},
+        get maxHealth() {
+          return combat.maxHealth;
+        },
+        set maxHealth(_v: number) {},
+        uid: playerEnt?.uid,
+        get position() {
+          return view.player.position;
+        },
+      }
+    : undefined;
+  const setupPlayerParts = () => {
+    if (!body || !playerPart) return;
+    const v = playerEnt?.values ?? characterValues(pkgs, { kind: { template: { pkg: 2, id: 5 } } }) ?? [];
+    const rules = refsOf(v[16]).map((r) => readPartCapRef(pkgs, r)).filter((c): c is PartCapRule => !!c);
+    if (!rules.length) return;
+    const sk = body.body.skinned;
+    const tr = packages.get(sk.ref.pkg)?.mdu ? readSkeletonTrailer(packages.get(sk.ref.pkg)!.mdu!, sk.ref.id) : undefined;
+    parts.setup(playerPart, rules, sk.skeleton.bones.map((b) => b.parent), tr?.channels.map((c) => c.bone) ?? [], [], tr ? segmentBonesOf(tr.channels) : []);
+  };
+  setupPlayerParts();
+  const PLAYER_DEATH_CLIPS: [string, number][] = [['Mainliner', 330], ['Slayer', 332], ['Burrower', 335], ['Inferna', 337]];
+  /** The killer's death clip and its CapLimb events (bone index, clip time). */
+  const playerDeathClip = (killer: Actor | undefined): ResRef | undefined => {
+    const cls = killer && classOf(killer);
+    const k = PLAYER_DEATH_CLIPS.find(([c]) => c === cls)?.[1];
+    const v = k === undefined ? undefined : playerEnt?.values[k];
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as ResRef) : undefined;
+  };
+  const capLimbEvents = (clip: ResRef) => {
+    const adu = packages.get(clip.pkg)?.adu;
+    const ev = adu ? readAnimEvents(adu, clip.id) : undefined;
+    const byHash = body?.body.skinned.skeleton.byHash;
+    return (ev?.events ?? [])
+      .filter((e) => e.kind === ANIM_EVENT_MESSAGE && e.param === CAP_LIMB)
+      .map((e) => ({ time: e.time, bone: byHash?.get(e.boneHash) ?? -1 }))
+      .filter((e) => e.bone >= 0);
+  };
+  function playerBlow(amount: number, from: Actor, hit?: { point?: THREE.Vector3Like; type?: number }) {
+    const was = combat.alive;
+    const human = !(insanity() as { transformed?: boolean } | undefined)?.transformed;
+    const clip = was ? playerDeathClip(from) : undefined;
+    if (clip) combat.deathClip = clip;
+    combat.damage(amount, from);
+    combat.deathClip = undefined;
+    if (!playerPart || !human) return;
+    if (amount > 0 && hit?.point) parts.hit(playerPart, { amount, type: hit.type, point: hit.point, from: from.position, byPlayer: false, attackerClass: classOf(from) });
+    if (was && !combat.alive && clip && combat.deathClipLength > 0) parts.schedule(playerPart, capLimbEvents(clip));
+  }
+  let playerDown = false;
+  /** A revived player (checkpoint) is whole again. */
+  const checkPlayerParts = () => {
+    if (!playerPart) return;
+    if (!combat.alive) playerDown = true;
+    else if (playerDown) {
+      playerDown = false;
+      parts.forget(playerPart);
+      setupPlayerParts();
+    }
+  };
 
   // Ambient Creatures take damage as PhysicalObjects [verified: vtable 0x101544b0: damage vt +0x58
   // 0x1009b490, death vt +0x90 0x100916f0 -> 0x1009ba20]: health p0 (1), invulnerable p3 / the
@@ -607,7 +775,7 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
   ];
   // Debug/test hook, like window.__view.
   Object.assign(window, {
-    __actors: { manager, director, parts, combat, body, env, fx, speakLog, services: { actors: actorsService, combat: combatService }, companions: { pending: pendingCarry, arrived, spawnName: ctx.spawnName, levelPath: ctx.levelPath } },
+    __actors: { manager, director, parts, gibs: { thrown, going, rule: (a: Actor) => gibRules.get(a) }, playerPart, combat, body, env, fx, speakLog, services: { actors: actorsService, combat: combatService }, companions: { pending: pendingCarry, arrived, spawnName: ctx.spawnName, levelPath: ctx.levelPath } },
   });
 
   const kinds = manager.kinds.all();
@@ -626,6 +794,8 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
     worldHooked = true;
     if (w.world?.playerUid) env.playerUid = w.world.playerUid;
     if (typeof w.seeThrough === 'function') manager.seeThrough = (hit) => w.seeThrough!(hit);
+    // Draw occlusion looks at the drawn triangles (docs/game-logic.md §14.10).
+    if (typeof w.eyeThrough === 'function' && view.drawn !== view.collision) manager.occlusion = { world: () => view.drawn, seeThrough: (hit) => w.eyeThrough!(hit) };
     // NPC sight and shots pass what the eye passes (bars, grates, chain-link, glass).
     env.seeThrough = manager.seeThrough;
     // Companions carried here: their Companion Spawn Point passes its p0 message on [inferred].
@@ -678,7 +848,12 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
         director.update(dt, env);
         specials.update(dt);
         // The bleed of cut bodies (0x10118680): the player's when a cut was his.
-        parts.update(dt, (a, amount, byPlayer) => void manager.damage(a as Actor, amount, undefined, byPlayer ? 'player' : ((a as Actor).uid ?? 0)));
+        parts.update(dt, (a, amount, byPlayer) => {
+          if (a === playerPart) combat.damage(amount);
+          else manager.damage(a as Actor, amount, undefined, byPlayer ? 'player' : ((a as Actor).uid ?? 0));
+        });
+        updateGibs();
+        checkPlayerParts();
         manager.drawDistance = view.culler?.fogDistance ?? Infinity;
         manager.update(dt, env, view.camera);
       }

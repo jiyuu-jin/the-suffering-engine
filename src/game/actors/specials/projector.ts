@@ -22,29 +22,48 @@
 //   p15 (Off) hides the target and disables the effect. Off runs p14 then p15 (map order).
 //   update    (enabled, updates on) strobe: while the counter runs the target is hidden; when
 //             it reaches 0 the target is shown and the counter restarts at p7 (0 in retail, so
-//             shown once). Then for every projector i: vertex p12[i] of the target goes to the
-//             world position of bone p11[i] of projector p10[i] (in the target's frame, its
-//             welded copies too), or, if that projector is gone, bone p9[i] is hidden and the
-//             share f of standing projectors drops by 1 / count. Opacity (object +0xd0) =
+//             shown once). Then for every projector i (beam 0x1008b9e0): a null handle is
+//             skipped; a projector that is gone gets its beam hidden (channel of target bone
+//             p9[i]: animator request 0x100010) and the share f of standing projectors drops by
+//             1 / count; a standing one moves vertex p12[i] of the target (and its welded
+//             copies) to its lens and shows the beam again, or hides it with chance p8 %
+//             (U(0, 100) < p8; 0 in retail). Opacity (object +0xd0) =
 //             clamp(p6 + (p5 - p6) x f + U(-1, 1) x p4, 0, 1) / 100 per update; f <= 0 deals
 //             the target 10000 damage.
+//   the lens  the world position of bone p11[i] of projector p10[i] when the projector is a
+//             skinned instance (+0xec) with that bone (vt +0x94), else the projector's own
+//             position (+0x44): 1c / 10 / 5b's invisible Breakables 7:330 (no model) are such
+//             projectors. Minus the target's position, turned and scaled into the target's frame
+//             (0x1000ce10), it is written into the target's model-space vertex array (skin
+//             instance vt +0xa4) at index vt +0xb0 (p12[i]) = the .mdu type-22 table (loader
+//             0x483530: u16 values - 1, negative entries dropped; identity for Killjoy's first
+//             2185 vertices). The cone bones 86..90 are children of the root with its bind
+//             frame, so the tip is drawn at the lens. The point also widens the instance's
+//             bounds (0x1000a4b0).
 //
-// Killjoy's model (10:90) carries five additive light cones (submesh 0, Advanced 10:781:
-// 10:256 tinted 0x2d2d2d) whose tips are skeleton vertices 0..4 on bones 86..90; p12 (a
-// permutation of 0..4 in every Killjoy projector) names those tips [inferred: p12 indexes the
-// skeleton's vertex list; the five tips are exactly vertices 0..4]. Moving them to the lens
-// stretches the cones from the projector onto him: the projector beam.
+// Killjoy's model (10:90, header flags 0x1cc8012: bit 23, back faces culled) carries five
+// additive light cones (submesh 0, Advanced 10:781: texture 10:256, mode 2, tint 0x2d2d2d, no
+// UV waveform: a still, dim beam whose flicker is the object's opacity). Each cone is a fan
+// from a tip (vertices 0..4, weight 1 on bones 86..90) to Killjoy's outline in his frontal
+// plane. Hiding a channel skips mesh partitions (0x493698: the bits of every hidden channel's
+// LOD word, model +0xc8 / .mdu type-8 channel table, skip partition bit k in the object draw
+// 0x498ee3). Channels 86..90 carry bits 1, 2, 4, 8, 0x10, and the cones lie in the face list in
+// the order of tips 2, 0, 4, 3, 1, which is every Killjoy projector's p12: projector i drives
+// the tip and the visibility of the same cone i [verified data; partition k = k-th cone in face
+// order inferred].
 //
 // Port: actor targets (Characters) and skinned prop targets (1a #8897 12:624, 1c #808d and the 5b
 // figures 7:653..655: skinned Breakables / Switches drawn by levels/skinned-props.ts, whose one
 // beam vertex p12 follows the lens), and their projectors (Animating Statics, decoration
-// actors). The vertex is placed so that after skinning by its bone it lands on the lens; a
-// missing projector's tip goes back to its bind position (the cone folds onto the body) instead
-// of a hidden bone [port]. A prop target takes the 10000 damage through the world's damage
-// service (props.ts breaks it: p18 generator, p21, destroyed).
+// actors, skinned props, or any placed object by its position). The vertex is placed so that
+// after skinning by its bone it lands on the lens [port: exact under any root motion]. A hidden
+// beam is the triangles that use vertex p12[i], drawn degenerate. A prop target takes the 10000
+// damage through the world's damage service (props.ts breaks it: p18 generator, p21, destroyed).
+// The figure's own passes (translucent object: render-data.ts translucentPassState).
 
 import * as THREE from 'three/webgpu';
 import type { Character } from '../../../app/character';
+import { translucentPassState } from '../../../formats/render-data';
 import type { Entity, PropValue } from '../../../formats/entities';
 import type { Actor, ActorEnv } from '../actor';
 import { num, nums, ref, type SpecialMove, type SpecialRuntime } from './runtime';
@@ -59,6 +78,8 @@ export interface ProjectorParams {
   low: number;
   /** Strobe period in updates (p7). */
   strobe: number;
+  /** p8: chance (%) per update that a standing projector's beam is hidden for one update. */
+  beamFlicker: number;
   bones: number[];
   units: number[];
   lenses: number[];
@@ -76,6 +97,7 @@ export function projectorParams(val: readonly PropValue[]): ProjectorParams {
     high: num(val[5], 100),
     low: num(val[6], 0),
     strobe: Math.max(0, num(val[7], 0)),
+    beamFlicker: num(val[8], 0),
     bones: nums(val[9]),
     units: nums(val[10]),
     lenses: nums(val[11]),
@@ -169,6 +191,32 @@ export function skinnedVertexFor(world: THREE.Vector3, boneWorld: THREE.Matrix4,
   return out.copy(world).applyMatrix4(_m.multiplyMatrices(boneWorld, boneInverse).invert());
 }
 const _m = new THREE.Matrix4();
+
+/**
+ * The beam of each projector i: the triangles (offsets into the index, in triangles) that use a
+ * render vertex of skeleton vertex `tips[i]` (the cone fanning from that tip).
+ */
+export function beamTriangles(index: ArrayLike<number>, source: ArrayLike<number>, tips: readonly number[]): number[][] {
+  const out = tips.map(() => [] as number[]);
+  const which = new Map<number, number[]>();
+  tips.forEach((v, i) => (which.get(v) ?? which.set(v, []).get(v)!).push(i));
+  for (let t = 0; t + 2 < index.length; t += 3) {
+    const seen = new Set<number>();
+    for (let k = 0; k < 3; k++) for (const i of which.get(source[index[t + k]]) ?? []) seen.add(i);
+    for (const i of seen) out[i].push(t / 3);
+  }
+  return out;
+}
+
+/**
+ * One beam's update decision (0x1008bb34..0x1008bdf6): a projector that is gone hides its beam;
+ * a standing one shows a hidden beam, or hides a shown one when U(0, 100) < p8.
+ */
+export function beamHidden(hidden: boolean, standing: boolean, beamFlicker: number, r100: number): boolean {
+  if (!standing) return true;
+  if (hidden) return false;
+  return r100 < beamFlicker;
+}
 
 /** Animating Statics given hit points, per runtime (shared by every effect and the pass below). */
 const breakables = new WeakMap<SpecialRuntime, Set<number>>();
@@ -269,7 +317,21 @@ function projector(rt: SpecialRuntime, e: Entity): () => void {
   let unsub: (() => void) | undefined;
   let killed = false;
   /** The target's own geometry / materials (actors of a kind share theirs). */
-  let owned: { ch: Character; geometry: THREE.BufferGeometry; mats: THREE.Material[]; bind: Float32Array; tips: number[][] } | undefined;
+  let owned:
+    | {
+        ch: Character;
+        geometry: THREE.BufferGeometry;
+        mats: THREE.Material[];
+        /** Each material's own pass state, put back at full opacity. */
+        base: { transparent: boolean; depthWrite: boolean; alphaTest: number }[];
+        bind: Float32Array;
+        tips: number[][];
+        /** The untouched index, and each beam's triangles (beamTriangles). */
+        index: Uint32Array | Uint16Array | undefined;
+        beams: number[][];
+        hidden: boolean[];
+      }
+    | undefined;
   /** Projectors found when the effect started (the engine's count, +0x10). */
   let found = -1;
   const lens = new THREE.Vector3();
@@ -297,7 +359,13 @@ function projector(rt: SpecialRuntime, e: Entity): () => void {
     const geometry = mesh.geometry.clone();
     mesh.geometry = geometry;
     const m = mesh.material;
-    const mats = (Array.isArray(m) ? m : [m]).map((x) => x.clone());
+    const mats = (Array.isArray(m) ? m : [m]).map((x) => {
+      const c = x.clone();
+      // Material.copy round-trips userData through JSON: keep the scene glow's mark material
+      // (scene-glow.ts glowMarkOf; his 10:428 pass carries the flag) as the object it is.
+      if (x.userData.glowMark) c.userData.glowMark = x.userData.glowMark;
+      return c;
+    });
     mesh.material = mats.length === 1 ? mats[0] : mats;
     const pos = geometry.getAttribute('position') as THREE.BufferAttribute;
     // Render vertices of each skeleton vertex p12[i] (the welded copies the engine updates too).
@@ -307,20 +375,40 @@ function projector(rt: SpecialRuntime, e: Entity): () => void {
       for (let c = 0; c < source.length && c < pos.count; c++) if (source[c] === sv) out.push(c);
       return out;
     });
-    owned = { ch, geometry, mats, bind: (pos.array as Float32Array).slice(), tips };
+    const idx = geometry.getIndex();
+    const index = idx ? ((idx.array as Uint32Array | Uint16Array).slice() as Uint32Array | Uint16Array) : undefined;
+    const beams = index ? beamTriangles(index, source, p.vertices) : p.vertices.map(() => []);
+    const base = mats.map((x) => ({ transparent: x.transparent, depthWrite: x.depthWrite, alphaTest: x.alphaTest }));
+    owned = { ch, geometry, mats, base, bind: (pos.array as Float32Array).slice(), tips, index, beams, hidden: p.vertices.map(() => false) };
     return owned;
   };
-  const applyOpacity = (o: { mats: THREE.Material[] }, op: number) => {
-    for (const m of o.mats) {
-      // Blended passes already blend; an opaque pass starts blending (the engine's translucent
-      // object path, 0x48fab0 with the object's opacity), its depth write off.
-      if (op < 1 && !m.transparent) {
-        m.transparent = true;
-        m.depthWrite = false;
+  const applyOpacity = (o: NonNullable<typeof owned>, op: number) => {
+    o.mats.forEach((m, k) => {
+      // Below 0.99 the object draw goes translucent (0x4933b1): an opaque or cut-out first pass
+      // blends as mode 1 with the 2 / 255 alpha test and keeps writing depth, so only the
+      // nearest of the figure's front faces shows (render-data.ts translucentPassState).
+      const s = translucentPassState(o.base[k], op);
+      if (s.transparent !== m.transparent || s.depthWrite !== m.depthWrite || s.alphaTest !== m.alphaTest) {
+        m.transparent = s.transparent;
+        m.depthWrite = s.depthWrite;
+        m.alphaTest = s.alphaTest;
         m.needsUpdate = true;
       }
       m.opacity = op;
+    });
+  };
+  /** Hide (degenerate triangles) or show beam i. */
+  const setBeam = (o: NonNullable<typeof owned>, i: number, hide: boolean) => {
+    if (o.hidden[i] === hide || !o.index) return;
+    o.hidden[i] = hide;
+    const attr = o.geometry.getIndex()!;
+    const a = attr.array as Uint32Array | Uint16Array;
+    for (const t of o.beams[i] ?? []) {
+      const j = 3 * t;
+      if (hide) a[j + 1] = a[j + 2] = a[j];
+      else (a[j + 1] = o.index[j + 1]), (a[j + 2] = o.index[j + 2]);
     }
+    attr.needsUpdate = true;
   };
   const step = (s: ProjectorStep) => {
     if (s.show !== undefined) setVisible(s.show);
@@ -330,29 +418,40 @@ function projector(rt: SpecialRuntime, e: Entity): () => void {
     if (t) t.ch.root.userData.noShadow = st.updating;
   };
 
-  /** Cone tip i at the lens of projector i (true), or back at its bind position. */
-  const placeTip = (o: NonNullable<typeof owned>, i: number, unit: Actor | undefined) => {
+  /**
+   * The lens of projector u for beam i: bone p11[i] of its skeleton, else its own position (a
+   * placed object without a model: its placement). False when it cannot be found.
+   */
+  const lensOf = (u: number, i: number, out: THREE.Vector3): boolean => {
+    const a = rt.manager.get(u);
+    const ch = a?.ch ?? (rt.ctx.services.skinnedProps as { character?(uid: number): Character | undefined } | undefined)?.character?.(u);
+    if (ch) {
+      const b = ch.skeleton?.bones[p.lenses[i] ?? -1];
+      if (b) b.getWorldPosition(out);
+      else ch.root.getWorldPosition(out);
+      return true;
+    }
+    const e = rt.byUid.get(u);
+    if (!e) return false;
+    out.set(e.position[0] / 2048, e.position[1] / 2048, e.position[2] / 2048);
+    return true;
+  };
+  /** Cone tip i at `at` (world). */
+  const placeTip = (o: NonNullable<typeof owned>, i: number, at: THREE.Vector3) => {
     const pos = o.geometry.getAttribute('position') as THREE.BufferAttribute;
     const verts = o.tips[i];
     if (!verts?.length) return;
+    if (!dbg.tips[i]) dbg.tips[i] = new THREE.Vector3();
+    dbg.tips[i].copy(at);
     const ch = o.ch;
-    if (unit) {
-      const bones = unit.ch.skeleton.bones;
-      const b = bones[p.lenses[i] ?? -1];
-      if (b) b.getWorldPosition(lens);
-      else unit.ch.root.getWorldPosition(lens);
-      if (!dbg.tips[i]) dbg.tips[i] = new THREE.Vector3();
-      dbg.tips[i].copy(lens);
-    }
     const skin = ch.mesh.geometry.getAttribute('skinIndex') as THREE.BufferAttribute;
     for (const c of verts) {
-      if (unit) {
-        const bi = skin.getX(c);
-        const bone = ch.skeleton.bones[bi];
-        if (!bone) continue;
-        skinnedVertexFor(lens, bone.matrixWorld, ch.skeleton.boneInverses[bi], v);
-        pos.setXYZ(c, v.x, v.y, v.z);
-      } else pos.setXYZ(c, o.bind[3 * c], o.bind[3 * c + 1], o.bind[3 * c + 2]);
+      const bi = skin.getX(c);
+      const bone = ch.skeleton.bones[bi];
+      if (!bone) continue;
+      bone.updateWorldMatrix(true, false);
+      skinnedVertexFor(at, bone.matrixWorld, ch.skeleton.boneInverses[bi], v);
+      pos.setXYZ(c, v.x, v.y, v.z);
     }
     pos.needsUpdate = true;
   };
@@ -377,9 +476,13 @@ function projector(rt: SpecialRuntime, e: Entity): () => void {
     let f = 1;
     p.vertices.forEach((_, i) => {
       const u = p.units[i];
-      const missing = u === undefined || gone(u);
+      const missing = !u || gone(u);
       if (missing && found > 0) f -= 1 / found;
-      placeTip(o, i, missing ? undefined : rt.manager.get(u));
+      // A null handle draws nothing; a gone projector keeps its tip where it was.
+      if (!u) return;
+      const standing = !missing && lensOf(u, i, lens);
+      if (standing) placeTip(o, i, lens);
+      setBeam(o, i, beamHidden(o.hidden[i], standing, p.beamFlicker, Math.random() * 100));
     });
     dbg.share = f = Math.min(1, Math.max(0, f));
     const op = projectorOpacity(p, f, Math.random() * 2 - 1);

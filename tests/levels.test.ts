@@ -37,34 +37,39 @@ test('carrier camera: the hardpoint a track hangs on follows the attach keys', (
   assert.equal(attachedHardpoint(boat, cam, 19.2), undefined);
 });
 
-test('Health Threshold Trigger fires on crossing below p0 only, previous health starts at 0', () => {
-  const fired: number[] = [];
-  const mk = (uid: number, p0: number): WorldEntity =>
-    ({ uid, cls: 'Health Threshold Trigger', destroyed: false, visible: true, enabled: true, s: {}, pos: [0, 0, 0], e: { links: [9], values: [p0, 0, 1, 1], family: '' } }) as unknown as WorldEntity;
-  const ents = [mk(1, 170), mk(2, 70), mk(3, 40)];
-  const player = { uid: 9, e: { family: 'Character' } };
-  const world = {
-    handlers: [],
-    of: (cls: string) => (cls === 'Health Threshold Trigger' ? ents : []),
-    get: (uid: number) => (uid === 9 ? player : ents.find((x) => x.uid === uid)),
-    fire: (w: WorldEntity) => fired.push(w.uid),
-    destroy: (w: WorldEntity) => (w.destroyed = true),
-  } as unknown as World;
-  let health = 100;
-  const logic = new LevelLogic(world, new Map() as EntityPackageSet, () => undefined, { health: () => health });
-  logic.update(); // 0 -> 100: crosses 70 and 40 upwards (p1 = 0: no fire); 170 stays above
-  assert.deepEqual(fired, []);
-  health = 60;
-  logic.update(); // drops below 70
-  assert.deepEqual(fired, [2]);
-  health = 30;
-  logic.update(); // below 40; 70 is destroyed (p2)
-  assert.deepEqual(fired, [2, 3]);
-  health = 200;
-  logic.update();
-  health = 100;
-  logic.update(); // 170 was never above-then-below before; now it is (200 -> 100)
-  assert.deepEqual(fired, [2, 3, 1]);
+test('Health Threshold Trigger fires on crossing below p0 only; the starting health is no event (previous starts at 0)', () => {
+  // The Prelude's four variants, one per difficulty: Easy 170 (health 200), Medium 120 (100),
+  // Hard 70 (75), Impossible 40 (60). Blows of 10 / 10 / 10 / 10 / 20.
+  const run = (p0: number, start: number, blows: number[]) => {
+    const fired: number[] = [];
+    const t = { uid: 1, cls: 'Health Threshold Trigger', destroyed: false, visible: true, enabled: true, s: {}, pos: [0, 0, 0], e: { links: [9], values: [p0, 0, 1, 1], family: '' } } as unknown as WorldEntity;
+    const player = { uid: 9, e: { family: 'Character' } };
+    const world = {
+      handlers: [],
+      of: (cls: string) => (cls === 'Health Threshold Trigger' ? [t] : []),
+      get: (uid: number) => (uid === 9 ? player : t),
+      fire: (w: WorldEntity) => fired.push(w.uid),
+      destroy: (w: WorldEntity) => (w.destroyed = true),
+    } as unknown as World;
+    let health = start;
+    const logic = new LevelLogic(world, new Map() as EntityPackageSet, () => undefined, { health: () => health });
+    logic.update();
+    let at = -1;
+    blows.forEach((b, i) => {
+      health -= b;
+      logic.update();
+      if (fired.length && at < 0) at = i;
+    });
+    return at; // index of the blow that fired it, -1 none
+  };
+  // Easy: 200 -> 190 compares with 0 and only arms it (rising side); 190 -> 160 fires.
+  assert.equal(run(170, 200, [10, 30, 10]), 1);
+  // Medium: 120 lies above the health of 100: never.
+  assert.equal(run(120, 100, [10, 10, 10, 10, 20]), -1);
+  // Hard: the first blow takes 75 below 70 while the previous value is 0: same side, never after.
+  assert.equal(run(70, 75, [10, 10, 10, 10]), -1);
+  // Impossible: 60 -> 50 arms it, 50 -> 30 fires.
+  assert.equal(run(40, 60, [10, 20]), 1);
 });
 
 test('Water Volumes: surfaces are drawn but left out of collision', { skip }, async () => {

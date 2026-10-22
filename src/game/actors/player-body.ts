@@ -1162,15 +1162,25 @@ export class PlayerBody {
     this.drownNext = true;
   }
 
-  die() {
-    if (this.dead) return;
+  /**
+   * `clip`: the killer's death clip (Player p330 / p332 / p335 / p337 by the killer's class:
+   * 0x1002e3f0; system.ts playerDeathClip). Returns its length (s), 0 for the role's clip.
+   */
+  die(clip?: ResRef): number {
+    if (this.dead) return 0;
     this.dead = true;
     this.oneShot = null;
     this.stopUpper(0);
     const drown = this.drownNext ? this.idx('drown') : -1;
     this.drownNext = false;
-    const i = drown >= 0 ? drown : this.idx('death');
+    let own = -1;
+    if (drown < 0 && clip) {
+      const data = loadClip(this.pkgs, clip);
+      if (data && data.animSet === this.body.skinned.animSet) own = this.addClip(data);
+    }
+    const i = drown >= 0 ? drown : own >= 0 ? own : this.idx('death');
     if (i >= 0) this.playIndex(i, { loop: false, fade: 0.15 });
+    return own >= 0 ? this.body.clips[own]?.duration ?? 0 : 0;
   }
 
   revive() {

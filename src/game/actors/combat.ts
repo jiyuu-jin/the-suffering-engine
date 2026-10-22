@@ -59,6 +59,9 @@ export class PlayerCombat {
   health = 100;
   maxHealth = 100;
   invulnerable = false;
+  /** The death clip the next death plays (the killer's: system.ts playerDeathClip), then its start / length. */
+  deathClip?: ResRef;
+  deathClipLength = 0;
   private savedMode: 'fp' | 'tp' | null = null;
   private off: (() => void)[] = [];
 
@@ -117,7 +120,8 @@ export class PlayerCombat {
 
   private die() {
     const p = this.view.player;
-    this.body?.die();
+    this.deathClipLength = this.body?.die(this.deathClip) ?? 0;
+    this.deathClip = undefined;
     p.setVirtualInput({ forward: 0, strafe: 0 });
     this.savedMode = p.mode;
     p.setMode('tp');

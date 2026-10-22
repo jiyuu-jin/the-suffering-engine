@@ -151,6 +151,8 @@ outputs, STOMP Players and Level Transitions, and checked in the browser.
 | 54 | 1a Dumbell (restore) | At checkpoint 8393 Breakable 7b16 (the "Dumbell") is in Goose's hand at the off-map staging area (258.2, 98.4, 319.0); a restore drew it at its one key from "Goose" (150.12 s, the cell floor). | The STOMP attach link (Goose hp 19 from 40.15 s, never cleared) lived only in the attach service; the save kept the object's last key. | Decoded (docs/game-logic.md §7 attach keys): a key on an attached object is overwritten by the bone the same frame, and the end of a sequence (finished or skipped) detaches nothing, so live play and a skipped opening are right. The links still in place are saved (provider `sequence.attach`, `sequence/system.ts`) and hung again on a restore. `--deaths 1a.flashlight`: the restore check is clean. | fixed [verified], test |
 | 55 | actors (mover) | Creatures floated on ledge rims (1c's fence CartWheeler, 3a 1b5d / 1b5e, 4a) and the 6a Slayer 2337 could not pass under a leaning log. | NPC motors had a guessed capsule (bind-pose height, radius from the mesh x scale) and a sphere ground probe. | The character mover decoded and implemented (docs/game-logic.md §14.9, `actors/mover.ts`, physics.ts `groundProbe: 'centre'`): Collider spheres (Character p42), ground only under the feet point, p48 step down, p46 slope. The spheres scale with the character [inferred]: unscaled, 1b's Slayer 7ffc (scale 0.72, a 3.15 m stack) under a 2.72 m ceiling was pressed 0.43 m into the floor (the probe's "sinking 7ffc -0.39 / -0.43" in two chapter 1 runs; the same -0.430 in a test room). The floating / sinking probe measures NPC ground the way the mover does (rays at the feet point, not a 15 cm sphere that also touches a step's rim beside the feet) and leaves out a crawler in a ceiling / wall transit or a leap (4a's wall CartWheeler 82d5 read "floating +3.96 / +5.99" at `4a.wake`). | fixed [verified rules; scale inferred], tests |
 | 56 | 1a escort (route) | `1a.guard-comes` waited 150 s for nothing (also with the committed code, an A/B run): the guard 609e stood at the west end beckoning. | Whether he comes depends on his chain when the player goes ahead: SimpleConversation 7522 walks him to the listener, but once WaypointBehavior 7524 runs, a player beyond 20 m is only beckoned (the decoded escort rule). | The step goes back to the guard and keeps by him until he opens the gate (`follow`), as a player answering the beckon does. | fixed (route) |
+| 57 | 1a metal detector (user report) | Walking through the lobby's metal detector gates (Detectors 8956 / 8957 -> Relay 813e -> Sound Effect 8147, 3:297) no longer sounded the alarm. | The logic ran (8147 asked to play, its light on), but the mixer dropped the voice: 48 of 48 voices were the looping hum 4:297 at (404.7, 92.7, 489.3), the lobby sparks generator 81f2 spawning its Sound Effect 4:1159 (play mode 1) every 0.1 s since the decoded generator rule (13b4507), and a new sound of priority 85 finds none of strictly lower priority to steal. | Object Generator p23 decoded (docs/game-logic.md §14.2): no spawn while p23 objects it made still exist; 81f2 (p23 3) keeps one hum (`world/fx.ts`). A spawned Sound Effect plays at creation only with p1 and loops in play mode 1. | fixed [verified], tests; step `1a.metal-detector` (`expect.heard`: a voice of 3:297 started during the step) |
+| 58 | 1a "Gaurd" #218 (user report, not reproduced) | "The second guard after the earthquake is already dead; the scene where he gets bashed doesn't play." | Not reproduced. Walked like a player from a capture before the hall (stroll), and back from the walkway after #114 in three ways (straight back through the junction, waiting east of Detector 7ac1 until #114 ended, back at once): #218 started each time as a cinematic with guard 609f alive (health 50, DormantBehavior 10:147 at the off-map staging area until then), on screen 24.6 s of 28.3, killed in the scene. The full opening watched (216 s) leaves him and CartWheeler 6208 dormant and unhurt. The other candidate, the crawling guard 7fdf of "Cartwheeler" #253, is placed dead by the data (p68 none, p69 DeathBehavior 10:933, pose 10:1663) in the room north of the west corridor, out of sight; #253 keys him alive, crawling, and his tripwire Detector 642a spans the corridor. | Check added: `expect.aliveAtStart` (the characters a sequence finds alive when it starts, recorded by wrapping the world's sequence observer); `1a.gaurd` fails if 609f is dead when #218 starts. | open (needs the reporter's path or a save) |
 
 ## Open observations
 
@@ -299,6 +301,114 @@ Failures left, by the area that owns them:
 - Fixed this session: the dropped revolver drawn black (row 30), and the harness's slow failed
   plans, checkpoint timing, battery comparison, exit bounce, NPC defence and death-in-wait (rows
   31-36).
+
+## 0 Prelude (route `0.*`)
+
+**How it is reached** [verified]: the Prelude is a bonus level, New Game's level once the game was
+finished. Main Menu p17 holds 1a's path, p18 the Prelude's (5:316); New Game uses p18 while
+engine flag 0x400 is set, and GUI Game Finished sets the flag in its constructor (its notice 5:325
+mentions the archive pages and the Prelude). The port had this wired already: Game Finished
+calls `profile.setGameFinished()` (`src/app/menu/profile.ts`, kept in localStorage and in saves)
+and `flow.ts resolveNewGameLevel` picks the Prelude while `profile.preludeUnlocked`. No debug path
+is needed. Its one transition, Level Transition 1172 ("West Spawn", chapter 5:585), leads into
+1a's Player Spawn Point 894e, 0.3 m from 1a's Player object, so the Prelude ends where a plain
+New Game starts and 1a's opening plays the same way.
+
+`node tools/playthrough.mjs --level 0 --to 0.1a --shots <dir>` boots through the menus with the
+profile's prelude unlock set (logged: as after Game Finished), New Game, Medium; `--direct`
+deep-links the level instead. The route [verified, read from the level's message graph]:
+
+- **The boat.** Timer 11c3 starts "Camera" 10e9 (41.7 s, the camera on the PoliceBoat's hardpoints,
+  docs/levels.md §4.1) and forbids the insanity (Allow Player Insanity Object 1143 p5). Its end
+  (Relay 1114) starts the dock scene: Torque locked in the holding pen (x 451..460, z 218..232;
+  gates 1185 / 1186 locked) with five inmates, ddd / de0 / de3 (an instance team 10:301) and dcb /
+  dda (prisoners), the guards 10e4..10e7 outside the west fence. Archive page "The Island"
+  (Archives Trigger 11fa), the move and first-person hints (Help Popups 11f7 / 12c9).
+- **"Hat!!"** (`0.hat`). Timers 12d9 / 12dc open Detector 12da (a 1 m box at the pen's
+  south-east corner) for 4 s while a gull comes over (Ambient Creature 12d3): a player standing
+  there sees "Hat!!" 12ea knock an inmate's hat off (Attachment 12e8), and the talk goes on at once
+  (Sound 12db -> Relay 12e6) instead of after Timer 10ea. The route takes it.
+- **The beating** (`0.talk`, `0.beating`). The inmates' talk (Timers 129e..12ad) ends in Behavior
+  Changers 112f / 1131 / 1133: de3, de0, ddd draw their weapons (SpawnWeapons 153 in clip 2:219,
+  Melee Weapon 4:766, 8 a blow) and go for Torque (KillEnemies dd8 / de2 / 12a9, the player's
+  team among their enemies); dcb / dda flee to the pen's corners (FleeBehaviors ddf / de5, Flee
+  Positions 11b8..11bb); Relay 1235 fills the meter (Toggle Player Insanity 1141 p3) and starts
+  Timer 119b (17 s). On Medium nothing else transforms him (the Health Threshold Triggers, one per
+  difficulty, below): Timer 119b -> Relay 1173 -> Screen Fader 1174 -> Timer 12c2 -> Toggle 1141
+  On, "Shoe Left" 12c4 and "Hat!!" 12e9, the attack hints (Help Popups 11fb / 11fc). A Torque who
+  stands still dies just before it (13 blows in 15 s with the KillMelee wait, row 0-1), so the
+  route keeps away from them round the pen (new step kind `evade`): 100 -> 20..76 health.
+- **The fight** (`0.fight`). As the creature, the three attackers die (Count Down de6). Killing
+  dcb / dda would be a kill by the player (their p169 QuestStart 350: Reputation Points Sender
+  11e1 -10 each, Relays 11e3 / 11e4 destroyed); the route spares them (`spare`, new arena option):
+  +10 each when the vision comes. Count Down 1138 (Timer 1137 5 s after de6, or both fleeing
+  inmates dead) enables Detector df6 (the pen, Relay df8) and starts Timer 12eb (20 s).
+- **The vision** (`0.vision`, `0.vision-end`). In df6 (it sends On every tick while he is inside)
+  the Visiblity Message Filter in view (60 % x 30 % of the screen) picks the vision: east df7,
+  south 1007, north 100f (Relays 115e / 1162 / 1160 show their Animating Statics, a giant creature
+  climbing the dock and Torque's family; Timer 12eb picks the east one after 20 s). Relay df9 runs
+  it (Screen Fader e00, Time Scale e01, Screen Blur 1157, Camera Shake e02, Adrenaline Sender 1159),
+  changes him back (Toggle 1141 Off, "Shoe Left" 12c5) and pays the spared inmates (+10 +10).
+- **Out** (`0.exit`, `0.1a`). The vision's sounds end (Timer e05: statics destroyed, Screen Fader
+  e08), Relay 127c starts the guards' last lines (Behavior Changers 114f..1155: voice
+  lines) and Timer 12f0 (17 s) -> Screen Fader 1171 -> Timer 12ef (3 s) -> Level
+  Transition 1172 (Behavior Changer 1155 also fires it when its talk ends). 1a loads with chapter
+  1's loading screen, the player at 894e (398.8, 97.7, 516.7) with the Prelude's health and
+  reputation (+20), "Goose" 7509 plays (watched, skipped as in `1a.intro`), the cell door gives way.
+
+The crane (Crane 11d, a skinned jib on a static tower, `levels/crane.ts`, docs/levels.md §4.6) and
+its controls (Mountable 875, p30 = 0x11d) stand on the lower dock outside the locked pen: no play
+reaches them. Checked in the session by teleport (logged): mounted with E, the look input slews the
+jib (-0.126 rad) and works the hoist (cable 1 -> 5.05 m and back up to the 1 m minimum; p29 12.95 m
+is its maximum, nothing hung: p36 empty). The 4 Teleport Pads and the Switches / Mechanisms /
+Clamber Points on the lower dock are 10 Docks' layout left in the copy [data].
+
+### Bugs found and fixed
+
+| # | Area | Issue | Cause | Fix | Status |
+|---|---|---|---|---|---|
+| 0-1 | actors (melee) | The three inmates beat Torque to death in 7 s, long before the scripted transformation (Timer 119b, 17 s). | The generic KillMelee's wait between attacks was not run: only CartWheelers had one (their p182). | Decoded (0x1007cf10 child finished, 0x1007ce60 update, 0x1007ce00 / 0x1007c870 attack): after each MeleeAttack the KillMelee waits p2 + U(0, p3 - p2) and only then attacks again. Its template is the Character's slot for behaviour type 0x4d, p85 (the slot table 0x100e17c0, docs/game-logic.md "Melee"): Unspeakable NPCs 10:578, 0.5..1.5 s (`manager.ts profile` `meleePause`). | fixed [verified], tests |
+| 0-2 | actors (melee) | The attackers swung idle clips for a guessed 10 a blow with no weapon. | Their MeleeAttackBehavior is an instance override (p87 = 10:297 on template 10:392, which has none); creature kinds were built from the template only. Retail: these three and one inmate in 2 Cellblocks. | A placement with its own p87 gets a kind of its own (`kinds.ts creature(template, melee)`, `clipmap.ts resolveCreatureClips` overrides): clips 10:1727 / 10:351 arm Melee Weapon 4:766 (8 a blow). | fixed [verified], tests |
+| 0-3 | levels (Health Threshold Trigger) | The port armed every threshold below the starting health on the first frame (Hard: 70 under 75 fired on the first blow). | The polled starting health counted as a health event. | Previous health 0 (constructor 0x10015150) and only health changes are events: Easy 170 fires, Impossible 40 fires, Medium 120 and Hard 70 never (Timer 119b instead) (`levels/logic.ts`, docs/levels.md §4.4). | fixed [verified], test |
+| 0-4 | harness | `changeBack` pressed Insanity during the scripted creature form (the key is forbidden, flag 0x80) and waited 8 s at the start of every step. | | It does nothing while transforming is forbidden. | fixed (harness) |
+| 0-5 | harness | Boots timed out on a loaded machine (front end, gate, dev server, browser, New Game level). | Fixed 20..180 s waits. | 90..420 s; a run that dies before its report prints the page's last errors. | fixed (harness) |
+
+New harness pieces: `--level 0` (menu boot with the prelude unlock), step kind `evade`, the arena's
+`spare` list (`window.__ptSpare`, read by `__pt.engage`), `noCineWait` (a step that ends in the next
+level's opening leaves it to the next step).
+
+### Results (Medium, headless Brave / WebGPU, 1280x720)
+
+- **r1** (before 0-1 / 0-2): the beating killed the harness standing still; the vision step's
+  condition matched the Prefetch to Screen Fader e00 that Count Down de6 sends, so the creature
+  form ran on until the meter's health drain killed him (Player p257 at an empty meter); retried
+  invulnerable, through to 1a.
+- **r3 / r4 / r6** (2026-10-19, all fixes): every step played, no death, 0 Prelude to 1a's
+  opening in 252..344 s. r6: the hat, the beating (9 legs round the pen, health down to 76), the
+  fight (3 swings as the creature), the east vision (frames `0.vision-end-f01..05`: the giant
+  creature, Torque's family, gone), the guards' lines, the fade, 1a's loading screen
+  (`0.exit-f*`), 1a at West Spawn with health 76 and reputation 20, "Goose" skipped, "BustedDoor"
+  5b9e. 7 / 9 steps clean; the two flagged are below.
+
+### Open (by owning area)
+
+- **Actors (mover): the guard 10e5's pacing leg.** WaypointBehavior 11b3 walks him round
+  Waypoints 11ac / 11a9 / 11ad outside the pen's west fence. From (448.4, 225.7) the straight leg
+  to 11ac (450.0, 231.0) passes 0.5 m from a post at (449.3, 230.3); his capsule (r 0.43) stops
+  on it, the leg fails after the port's stuck rule and the next Behavior Changer moves him on
+  ("stuck actors: 10e5 move 16..18 s" in `0.hat`). Whether the original slides round it is not
+  decoded (docs/playthrough.md 9 Lighthouse, the foliage of 884, is the same question).
+- **Dismemberment (in progress elsewhere):** blows on the player raise `TypeError: Cannot read
+  properties of undefined (reading 'skinned')` in `actors/system.ts partSpheres` (called with the
+  player from `Dismemberment.hit` via `playerBlow`); the damage still lands. Seen in `0.talk` /
+  `0.beating`.
+- **Insanity:** the placed Player overrides p82 / p83 (meter drain) with 0, but while transformed
+  the engine reads the creature template 2:240 (docs/game-logic.md §13.1), so the meter drains at
+  2.25..4.25 a second and the low-meter hint (a Help Popup with an <Insanity> control placeholder) shows
+  although the key is forbidden. Matches the decoded rule; not checked against the original.
+- **Spawn point p6** (a Map Item: 1a's 894e names 4:668, the level's own map; 79b5 / 83a0 name
+  4:673, the first floor) looks like the map shown on arrival [inferred from data]; the port
+  shows Level Properties p45 only (the same map for this hand-off).
 
 ## 2 Cellblocks (route `2.*`)
 
@@ -1157,9 +1267,19 @@ levels' message graphs and checked in the browser [verified]:
   2823: Speech 2821, 40:132); the script blows him up when the player comes on (Detector 2d3d /
   1cb0 -> Relay 2d3b -> Timer 2d07). Detector 2914 starts the yard ambush: Object Cloner 274d
   (six Slayers, two at a time), Cloner 27ed and the pit's CartWheelers (Behavior Changers 27ee /
-  27f0, switched by a grid of yard Detectors through Relays 27f2 / 27f3). Detector 28fc takes the
+  27f0, switched by a grid of yard Detectors through Relays 27f2 / 27f3). The refuge the yard is
+  built round is the guard house roof (103.6, 6 m over the yard): Clamber Point 2288 is its east
+  edge over the alley (a box 8 m along z; the entity dump's yaw is not the matrix's) and 2d2c its
+  south edge, both 6 m up, past a clamber's 4.5 m. The way up is the crate 193a (Pushable 7:457,
+  2 m tall) in the corner south of the alley: pulled west in line with the guard house, pushed
+  north up the alley under 2288, jumped onto (the first-person jump: Player p215 10 m/s under p214
+  24.4, 2.05 m) and clambered from (4 m). On the roof Detector 27fc (the top of 2288) -> Relay
+  27f3 enables Behavior Changer 27ee (FleeBehavior 27ef) and disables 27f0 (KillEnemies 27f1, the
+  player its p3 target): the pit's CartWheelers flee (Timer 29e7 -> Relay 2806 hands it out; the
+  yard grid does the reverse). The Slayers still shoot up at him. Detector 28fd (on the roof) and
+  28fc (by the wagon) take the
   invulnerability off the paddy wagon's engine box 1b80 (a hidden 20-health target) and its fuel
-  can 25b3; the engine shot plays "PaddyWagon" 1b7c (4.7 s): the wagon rolls north and smashes
+  can 25b3; the engine is shot from the roof's north edge (25 m) and plays "PaddyWagon" 1b7c (4.7 s): the wagon rolls north and smashes
   the yard gate (Door1 / Door2 25e4 / 25ef), its collision box SwitchBus 2a15 lands in the
   gateway, Relay 1da0 enables the wagon's Clamber Points 26e0 / 26e1 / 26e3 and Relay 28df turns
   the ambush cloners Off. Over the wagon (26e0, its east side) and off its north end: Detector
@@ -1195,18 +1315,37 @@ levels' message graphs and checked in the browser [verified]:
   moved into 180a along its diagonals (it stands at 135 deg) and shot: Relay 174e -> "Cavern
   Rubble" 1d86. East: Detector 11fd -> Autosave 1898; Burrowers and CartWheelers; the ravine
   (Detector 1793 -> Relay 1794); Ladder d05 to the walkway: Detector 25f9 -> Autosave 25fa.
-  Hermes' gas room: Detector 1eaf -> "Camera" 1ed5 (48 s; with Jimmy alive and unhurt "Camera"
-  1eb1, 76 s); its end turns the gas on (one Damage Action Object per difficulty, 3.5 / 5 / 7.5 /
-  10 a second) and makes the room's lamp stands breakable (Relay 25c4). The four valves (Switches
-  2159 / 2157 / 21cf / 213d -> Disarm -> Mechanisms 272a / 2729 / 2725 / 2728 turn 160 deg -> p58
-  Off -> Count Down 1fa9): the gas stops and the Hermes phase starts (Cloner 2416, Detectors 2565
-  / 24d2 / 271a..271d, Timer 2429 -> Behavior Changer 242d every 10 s: RootPlayAnim 10:1735 on the
-  copies, then Timer 2443 destroys and re-clones them). A copy at the stove (Detector 2565, filter
-  1) enables Relay 1f0d; the relay passes Triggered (6) to Relay 2496 -> "Hermes" 1f0f (the gas
-  into the stove) -> Relay 1f17 decrements Count Down 1f15 (Timer 1f13, 8 s, would put it back;
-  the stove door Switch 1e37 closing, p65, takes it down and resets the timer); at zero Relay 26ae
-  -> "Camera" 24e7, Timers 251c / 25da -> "Door" 24ff. Up the ladder 1ec7 through the hatch:
-  Detector 1f2f -> Level Transition 1798 (9 Lighthouse; it carries Jimmy 1738 when he lives).
+  Jimmy, freed by the blast (Relay 174e -> 1751 -> Behavior Changer 174f), is an escort:
+  SimpleConversation 1752 (40:20) -> WaypointBehavior 1753 (p8 the Player, a leg only while he is
+  within p9 10 m, beckoning beyond p10 20 m) east through the broken wall -> SimpleConversation
+  1758 -> WaypointBehavior 1759 round the caves and into the ravine to 175c by Ladder d05 ->
+  SimpleConversation 1760 (40:312) -> WaypointBehavior 189f straight to Waypoint 1ea5 in Hermes'
+  room (up the ladder; p3 2: he never fights on it). On the walkway Detector 26b5 (filter 1) ->
+  Instance Message Filter 26b6 (sender Jimmy) -> Relay 1ea3 -> 24e9: Relay 1edf off, 24e8 on, so
+  the room's scene is his "Camera" 1eb1 (76 s), not 1ed5 (48 s); its end hands him a DeathBehavior
+  (Behavior Changer 25d5 -> 10:350): Hermes kills him. Level Transition 1798 lists him (p7), but
+  9's arrival from 8b (Player Spawn Point ca5) names no companion (p4 / p5 empty): nobody is
+  carried to 9, in the original as in the port.
+  Hermes' gas room: Detector 1eaf -> "Camera" 1ed5 or 1eb1; its end turns the gas on (one Damage
+  Action Object per difficulty, 3.5 / 5 / 7.5 / 10 a second) and makes the room's hanging lamps
+  breakable (Relay 25c4). The four valves (Switches 2159 / 2157 / 21cf / 213d -> Disarm ->
+  Mechanisms 272a / 2729 / 2725 / 2728 turn 160 deg -> p58 Off -> Count Down 1fa9): the gas stops
+  and the Hermes phase starts. Six spots, each a gas jet (Object Generator 3:3251), a lamp stand
+  and an Object Cloner of a Hermes copy; Relay 2413 picks the spot of the next copy at random among
+  the live jet Relays (2415, 2418 the stove, 241c, 2420, 2532); every 10 s a copy spends at the
+  spots (Timer 2429, paused while none is in their Detectors) Behavior Changer 242d makes them all
+  vanish (RootPlayAnim 10:1735) and Timer 2443 clones again. The player blocks jets: the crate
+  2404 onto Detector 2458 (filter 3), the hanging lamps 2510 / 24be / 250b shot down (Mechanisms
+  2509 / 24ae / 24a0); each block destroys its Relay and sends Relay 2718 -> 2716 -> Behavior
+  Changer 20c5: every copy walks to Waypoint 20c3 at the stove. A copy at the stove (Detector 2565)
+  enables Relay 1f0d. Hermes takes no damage at all (p5, Damage Resistances 2:779 type 5 / 2:656
+  type 14 at x0), but their p2 = 1 passes the impact force of fire and wind, and the hit reaction is
+  picked by force (row 8-8): a Molotov's blast makes him react and his HitReactBehavior 10:1228
+  sends its p11, Triggered, to his links: 1f0d -> 2496 -> "Hermes" 1f0f (the gas into the stove)
+  -> Count Down 1f15 (2 -> 1), Timer 1f13 (8 s: he gets out, the door opens). Closing the stove
+  door 1e37 (p36: starts open; p65 Decrement) takes 1f15 to zero -> Relay 26ae -> "Camera" 24e7,
+  Timers 251c / 25da -> "Door" 24ff. Up the ladder 1ec7 through the hatch: Detector 1f2f -> Level
+  Transition 1798 (9 Lighthouse).
 
 No new step kinds (walk / clamber / ladder / use / push with `rel` / break / arena / wait).
 Harness fixes: a walk into a Level Transition's Detector ends cleanly in the next level
@@ -1225,6 +1364,10 @@ free spot up to 0.8 m away.
 | 8-5 | harness | A walk into a Level Transition's Detector (8a's exit 1b70) failed with `__actors is not defined` (the level is torn down under the loop). | `walk` evaluated page state every 80 ms. | A failed evaluation during a level change ends the walk (`left ... on the way`). | fixed |
 | 8-6 | harness | The planner could not start from a body pressed against a shelf in a fight (8b's store room): every walk and fight stalled for minutes. | The start cell had no free neighbour. | `plan` starts from a free spot up to 0.8 m away. | fixed |
 | 8-7 | route | Pushing 8b's explosive crate 2598 failed ("could not grab"). | It stands at 135 deg; the grab takes the crate axis that points at it and lets go when the player is more than 1.4 m off that axis. | Stands on the crate's diagonals, relative to where it is (`rel`). | fixed |
+| 8-8 | actors (hit reactions) | 8b: Hermes never sent Triggered (6) to the stove Relay 1f0d; the route sent On to Relay 26ae after 120 s (logged). | Two decodes missing. The hit reaction's amount is the blow's impact force (damage record +0x1c, Missile p28..p31, Melee p69 x Attack p7, Radius Damage p2..p3) times the matching Damage Resistance's p2 (0 with GameObject p6 and no match), and it is sent for blows of 0 damage; the port compared the damage after resistances and dropped zero-damage blows. And a whole-body HitReactBehavior sends its p11 to the character's links as it starts (Hermes' 10:1228: p11 6). | Decoded (Character damage 0x100e7390: 0x100e779b / 0x100e77e9 / 0x100e7801 / 0x100e776b, hit reaction 0x100e6480 reads message +0x2a; HitReact start 0x100ebfa0; docs/game-logic.md §15.13): `fx/gas.ts resistanceForceMultiplier`, `manager.ts damage`, `ActorBlow.react`, `HitReactDef.message`, `actor.ts startReaction`; the player's bullets, melee and every Radius Damage pass `force` / `minForce` (world/damage.ts). Hermes takes no damage but fire (2:779) and wind (2:656) push him: a Molotov makes him react. | fixed [verified], tests |
+| 8-9 | world (Message Relay) | 8b: after a few jets were blocked the Hermes copies stopped coming back. | Relay 2413 picks one random link among the jets' Relays; blocking a jet destroys its Relay, and the port still picked destroyed links (the message went nowhere and the clone cycle ended). | A destroyed link leaves the pool and the pick is made again; the refill takes the live links only (0x100cbdc3 -> 0x100a9e90, the counter taken back at 0x100cbdd7; 0x100cb8f0) [verified] (`logic.ts relay`). | fixed [verified], test |
+| 8-10 | route | 8a: the yard ambush killed the harness in every run (row "8a yard ambush" of the open list). | No way up to the guard house roof was found: its walls are 6 m, a clamber 4.5 m at most. | The crate 193a pulled and pushed under Clamber Point 2288, the first-person jump onto it (2.05 m), the clamber (4 m); the CartWheelers flee from the roof (27fc). Harness: `clamber here`, `route relTo`. | fixed (route) |
+| 8-11 | route | 8b: Jimmy's scene "Camera" 1eb1 never played and nothing of him reached 9. | The route ran ahead of his escort (WaypointBehavior 1753 walks a leg only while the player is within 10 m). Being carried to 9 was a misreading: 9's arrival point ca5 has no p4 / p5, and his scene kills him. | `follow` steps after him to the walkway (Detector 26b5); the carry stays empty by data. | route |
 
 ### Results (Medium, headless Brave / WebGPU, 1280x720, a GPU shared with other agents' runs)
 
@@ -1264,23 +1407,13 @@ Hermes' room and its end).
 
 ### Open (by owning area)
 
-- **8b Hermes at the stove (actors / logic, not decoded).** A Hermes copy at the stove (Detector
-  2565, filter 1) enables Relay 1f0d, whose input is Triggered (6). None of Hermes' outputs (p15
-  Damaged 20, p28 Died 19, p31 ISeeYou 18, p34 QuestStart 350, p30 / p35 / p168 / p169 none)
-  carries 6, and bullets cannot hurt him (Damage Resistances 2:779 / 2:656: types 5 and 14 at x0,
-  the rest immune), so the relay never passes and "Hermes" 1f0f never plays. The copies' 10 s
-  RootPlayAnim (10:1735) carries markers 208 / 209 / 152, not 6. Candidates: GameObject 0x100a18f0
-  (fires property 6, then destroys itself when p1 is set) and what calls it; the stove door
-  Switch 1e37 (scripted, p64 Increment / p65 Decrement into Count Down 1f15).
-- **8b Jimmy (actors).** Freed by the blast he talks (Behavior Changer 174f ->
-  SimpleConversation 1752), but the 76 s "Camera" 1eb1 (his version) did not play and Level
-  Transition 1798 carried no companion to 9: whether he follows the player was not checked.
-- **8a yard ambush (combat).** The harness dies there in every run on Medium (by data: the pit's
-  CartWheelers 17.5 a blade hit, the Slayers 3 a bullet, both cloners running until the wagon
-  rolls). The guard house roof (Detectors 27fc / 28fd / 1cb0 switch the CartWheelers' Behavior
-  Changers off and make the wagon breakable from up there) is a refuge, but its walls are 6 m
-  high, out of reach of Clamber Point 2288 (p2 4.5 m) from the yard floor; how a player gets up
-  was not found.
+- **8a yard on Medium (combat).** On the roof the CartWheelers flee but the Slayers (Cloner 274d,
+  two at a time, and 2756 by the alley) shoot up at the player; a run died there before the wagon
+  shot. The crate push needs latency to spare: under a loaded machine the pull overshot the guard
+  house's line or the grab failed after a checkpoint restore.
+- **8b fifth jet (world, Pushable).** The crate 1f8d stands on a table; pushed off it, it lands
+  0.4 m into the floor and cannot be grabbed again. The route leaves that jet open (the picks then
+  alternate between it and the stove).
 - **Water (levels, other chapters).** Row 8-2 (second fix): water holds nobody up; the player
   drowns deeper than 2 m. Every route point of 4a, 4b, 5a, 6a, 6b, 8b, 9 and 10 was checked
   against the water: none lies in water deeper than 1.6 m (5a's Burrower fight 1.57 m, 6a's creek
@@ -1346,6 +1479,7 @@ gone: rows 9-12 / 9-13.)
 | 9-12 | world (collision) / actors (mover) | The burial ground's Infernas c9b / c9c / c9d stood 0.47..0.48 m "under the terrain" with the decoded centre ground probe: c9b / c9c never walked, Count Down ddd never reached zero and the guard's escort waited. | Four 12 m fog quads (Decoration 3:2181, model 3:440, texture 3:267, alpha blend) lie 0.42..0.48 m over the burial ground and were in the movers' collision: an Inferna's capsule (from 0.465 m) met a quad's edge as a wall or rested on it, its probe (from the foot radius, 0.4 m) under it; where the terrain rose under a quad, a body stood on it. | Decoded: a mover's query turns on only the classes of its collide list (character: 18 classes at 0x10178c40 via 0x1009ee20; player: 0x1002c340, 20 classes at 0x101509c0); neither names Decoration. Decorations' parts are `moveSolid: false` (`blockers.ts decorationUids`, `COLLISION_LAYER.decor`): sight and shots see them, movers (NPCs and the player) do not (docs/game-logic.md §14.9). | fixed [verified], tests |
 | 9-13 | actors (mover) | bd5 (outside the base, Count Down c59) is placed 0.663 m under the terrain and walked held under it, "sinking -0.47". | The port's capsule rested on the terrain from below; the follower's Landscape fallback (0x100b6730 -> 0x100c0520: the Landscape under a point 2 m above the feet) was not modelled. c9c (0.196 m under) read as a drop-in with no ground and was hidden until woken. | With no walkable mover ground, the walkable Landscape under a point 2 m above the feet is the ground (`physics.ts landscapeGround`); `groundGap` takes a surface just above sunk feet with nothing under them as their floor. | fixed [verified probe; port limits inferred], tests |
 | 9-14 | actors (companion) | The guard bc9 died in every whole-chapter run (r2 / r4 / r5) and with him the way out of 9. | Character p161 is health regained per second (0x100e1410, called every frame from 0x100e58d0; capped at the maximum by 0x100a2d00); every companion template has 4. The port had no regeneration (§15.10 said "none found"). | `actor.ts regenerate`, every frame for every character (docs/game-logic.md §15.10). No class rule reacts to a companion's death (no game over); 9's level logic has no exit without him [data]. | fixed [verified], test |
+| 9-15 | world (collision) | The guard bc9 stalled at (297.3, 113.7, 244.2) by the burial ground from `9.escort3` on (run r1 of 2026-10-15): every escort leg failed there, Waypoint e08 was never reached and 9 could not be left. | The port collided with every drawn triangle; his capsule met the alpha-tested leaves of Static Object 884 (model 23:142) 1.2..4.4 m up. The original collides with the model's type-7 collision tree: 884 is one leaf box (2.2 x 5.9 x 14.5 m) north of his leg; 1844 of 1847 box trees in 9's packages list no faces at all. | Decoded the tree, which geometry movers and rays take from it, the classes and the AI sight flag (docs/game-logic.md §14.10): `formats/model-collision.ts`, `world/object-collision.ts`, `LevelData.collision`, dynamic bodies and crane loads from the tree; decals and draw occlusion on the drawn triangles. Runs r1 / r2 (2026-10-18): `9.escort3` and every escort after it passed. | fixed [verified], tests |
 
 ### Results (Medium, headless Brave / WebGPU, 1280x720, a GPU shared with other agents' runs)
 
@@ -1391,19 +1525,8 @@ with the guard carried (row 10-1). Whole-chapter runs (`--level 9 --to 10.finish
   Landscape fallback lifts it) and **the guard's deaths** (row 9-14: companions regain p161 = 4
   health a second). No class rule reacts to a companion's death; 9's data has no way out without
   him (docs/game-logic.md §15.10).
-- **Actors / collision: the guard's escorts stall at the burial ground** (the blocker of run r1
-  below). From (297.3, 113.7, 244.2) his path's next node is 97 (292.5, 241.75), west; his capsule
-  (r 0.43, to 2.07 m) meets the foliage of Static Object 884 (template 23:153, model 23:142,
-  texture 23:56, blend 8: alpha-tested leaves) 1.2..4.4 m above his feet, 0.47 m west. He stands
-  still with the leg's MoveTo running; after 4.5 s the leg fails (the port's stuck rule), the
-  WaypointBehavior ends and the next one starts from the same spot: in r1 escorts dc8 .. e08 all
-  ended there and he never reached Waypoint e08, so Level Transition ca6 stayed disabled. The port
-  collides with every render triangle; the original's collision interface (as the BouncingObject
-  sweep reaches it, docs/game-logic.md §14.2) tests an object's bounding sphere alone unless the
-  object has engine `+0xc` bit 0, else its collision model's box tree; whether the movers' sweep
-  goes the same way was not traced. 884's type-7 record is one bounding sphere (no leaves). What sets bit 0, and so whether
-  a tree's leaves block characters, is not decoded (the cut-out filter `physics.ts
-  cutoutAlphaFilter` stays off). The player passes there.
+- **Fixed since: the guard's escorts stalled at the burial ground** (row 9-15: objects collide
+  with their collision trees, not their drawn triangles; docs/game-logic.md §14.10).
 - **Combat.** The first Inferna fight (c59) killed the harness on Medium in r2, r3 and r4 (radius
   fire 11..18 a hit, three Infernas); retried invulnerable.
 
@@ -1597,7 +1720,10 @@ Ambient Creatures at −2; Part Caps −2 per part cut from a corpse dead over 5
 | R-1 | actors (death) | Executions and companions' deaths cost no reputation: 2's 308b (−10), 3a's prisoners, 4a's 5b7b (−15), 8a's 281d, 9's three prisoners, 10's guard 7b8 (Timer 10d8 −10), 1b's CartWheelers 8b46 / 8b47 (−5 each) ... Also the Count Downs, relays and lines hung on the same outputs never ran. | A Character killed by the player fires its output p169 (0x100e75fa, after the kill reputation); the port never fired it. | `actors/system.ts`: p169 on a kill by the player (not by anyone else). | fixed [verified], browser: 1b 8b46 by the player -> 350 -> Sender 8b63, −5; 8b47 by a hazard: nothing |
 | R-2 | actors / insanity | Hurting or killing a companion with an Action Dialog cost nothing (1a 609e, 1c 7569, 2's Dallas 868, 3a 95c, 5b 1295, 6b 49a, 8b 1738, 9 / 10's guard bc9 / 7b8). | Not decoded: the dialog counts the player's hits (p14 / p18 / p19) and pays p22 once, at the p18th counted hit or with the kill (0x1008e130, 0x1008d300). | `insanity/reputation.ts` rules; the director keeps each attached dialog's count (saved with 'actors.logic'); the kill adds p166 + the unpaid p22. | fixed [verified], test, browser: 1c 7569 — invulnerable in his cell: no count; hits at 106, 107, 110.3 and 113.6 s: the second too soon (p14 3 s), −5 on the fourth; the kill −10 (p166) and Timer 801a -> Sender 8098 −10: −25 in all |
 | R-3 | insanity | A Reputation Points Sender with p0 0 would add nothing, one with p0 2 once. | p0 read as an enable flag; it is the target mode (0 sender, 1 player, 2 each link: once per target, 0x1008e510). | `senderApplications`. No retail sender is affected (all p0 1). | fixed [verified], test |
-| R-4 | actors | An Ambient Creature (rat, crow) killed by the player costs 2 (p26, 0x100916f0); the port read p166. | | `killReputation` reads p26 for them. **Not reachable yet**: the port builds Ambient Creatures as decorations, which take no damage (browser: 1b 8218 kept its 1 health). | rule fixed; open (actors) |
+| R-4 | actors | An Ambient Creature (rat, crow) killed by the player costs 2 (p26, 0x100916f0); the port read p166, and built them as decorations that took no damage (1b 8218 kept its 1 health). | Not decoded: a PhysicalObject with p0 health 1, PhysicalObject damage / death (docs/game-logic.md §15.3 "Ambient Creature"). | `killReputation` reads p26; `system.ts ambientHit`: health, p15, p26 by the player's kill, the p18 break, p21, removed (saved); shots find them while shown. | fixed [verified], browser: 1b rat 8a05 shot with the revolver: blood, gone, reputation 0 -> −2 (strip-rat) |
+| R-5 | actors (Ambient Creature) | Rats and crows played their sounds as clips and ran at the sound interval's numbers; the 66 placed with p22 = 0 were animated before anything started them. | p24 is the one animation, p25 the speed, p28 sounds every p29..p30 s (at most p31 at once), p22 0 = still until On (0x10091930, 0x10091070, 0x100910f0). | `manager.ts` builds them on p24; `director.ts` speed p25, sounds, p22. | fixed [verified], browser: On to 1b 8a09 / 8a07 / 8a06: 3.7 m in 1.2 s with the run loop; test |
+| R-6 | actors (companions) | A player's first hit turned a companion on the player (`attackStartsFight` with an attached dialog, and a grudge on the player even when his team is an ally). | The dialog warns at each counted hit below p18 (AttackedByPlayer: face, p17 clip, p16 line, 0x1008d4a0) and at the p18th fires p30 to the level logic (0x1008dda0); KillEnemies never takes an ally team's player (0x100f9eb0). | `director.ts dialogWarn / dialogTurn`, `behaviors.ts attackStartsFight`, `actor.ts damage` (no grudge on an ally player). | fixed [verified], browser: 1c 7569 -> FleeBehavior 7ee0 at the third counted hit; 2's 868 -> FleeBehavior 1c7c; 6b's 49a no target until the turn, then HostilityBehavior 1576 on the player (strip-inmate / strip-dallas / strip-clem); tests |
+| R-7 | actors | No dismemberment: placed bodies whole, heads and limbs never cut, and the corpse rule (−2 per part cut from a body dead over 5 s) unreachable. | Part Caps decoded (docs/game-logic.md §15.16). | `actors/dismember.ts` (rules, cut, bleed, created-cut bodies, save), `manager.ts` (blows on corpses), weapons / creature melee strike corpses with parts left. | fixed [verified rules; renderer side inferred], browser: 1a's 26 bodies created cut (78f3 armless at the elbow), a head shot on 7652, a claw on corpse 7b36 (−2) (strip-live / strip-corpse / strip-arm); tests |
 
 Checked in the browser as well: 1b's Horace cell vision by reputation (−10: STOMP 89f3 "Horace#276",
 filter 83b2; 0: 89f2, filter 83b3, frames `horace-evil` / `horace-good`), and Torque's skin by
@@ -1607,11 +1733,14 @@ clean one).
 
 ### Open (by owning area)
 
-- **Actors: Part Caps.** Cutting a part from a corpse dead over p4 (5) s pays p5 (−2) (0x10119150 ->
-  0x1011961f); the port has no dismemberment.
-- **Actors (companions): the turn at p18.** The original turns a companion on the player only when
-  its dialog's count reaches p18 (state 4, the update 0x1008dda0 fires p30); the port turns him at
-  the first hit (`attackStartsFight`). The reputation part follows the original's count.
-- **Actors: Ambient Creatures take no damage** (R-4).
 - **Data: 10 Docks Switches 13a8 (−90) / 13aa (+200)** at (463, 94.3, 75): placed reputation
   switches, not on the route [placement not checked in the browser].
+- **Actors: dismemberment leftovers** (docs/game-logic.md §15.16): decoded and ported: node flag
+  0x10 (the renderer skips the cut segments' draw batches; the sphere tree skips cut bones), the
+  bleed's readers (knockdown bleed-out; Dodge / ProjectileBlock / Mainliner evasion gates, whose
+  behaviours the port lacks), the p3 regrowth on Killjoy's resurrection, Torque's Part Caps and
+  his killer death clips (the Slayer's 2:562 CapLimb), p117 / p112 corpse gibs and throws, NPC
+  blow hit points. Still open: which properties set the Character flags that forbid cuts (+0x6c &
+  0x100, +0x70 & 0x80); damage type 7's users; the engine's batch building (the port groups
+  triangles by segment). Browser frame strips not taken: the machine stayed at load ~200 and the
+  harness could not bring a level up (see the agent report).

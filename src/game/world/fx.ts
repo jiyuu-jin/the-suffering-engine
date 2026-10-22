@@ -41,6 +41,7 @@ import type { CollisionWorld, RayHit } from '../../app/physics';
 import type { DynamicObjects, DynamicObject } from './dynamic';
 import type { World } from './logic';
 import { instanceMatrix } from './dynamic';
+import { SFX_MODE } from './sound-effect';
 
 type Vec3 = [number, number, number];
 
@@ -756,6 +757,17 @@ export function generatorInRange(gv: PropValue[], d: Vec3 | undefined): boolean 
  *   generator is destroyed. A destroyed generator with p5 set destroys what it spawned
  *   (0x100b4dc0 -> 0x100b49e0: Particle Fountains through their Destroy p52, the rest removed);
  *   without p5 its spawns live on.
+ * - p23 caps what it has alive: every spawn is refused while p23 > 0 objects it made still exist
+ *   (spawn 0x100b52a0 compares the handle list +0x5a / count +0x62 with p23 first; the think
+ *   0x100b61fa drops the handles of objects gone, before the timer). 1a's lobby sparks 81f2
+ *   (3:2642: p7 0.1 endless, p23 3) spawn two spark fountains and the Sound Effect 4:1159 (p1
+ *   plays it at creation, p3 1 repeats 4:297 until stopped, so it never goes): one hum, the
+ *   fountains renewed as they burn out. Without the cap the port started a new looping hum
+ *   every 0.1 s, filled all 48 voices in 5 s and every later sound of the same or lower
+ *   priority was dropped (the metal detector alarm 8147 among them) [verified].
+ *   Port: what is alive is known for fountains, generators, BouncingObjects and Sound Effects
+ *   (`Fx.spawn` returns the probe); other spawned classes (src/game/fx spawners, props) are not
+ *   counted.
  * So 1a's chair-room generator 12:779 (p7 0.05, p21 0.6, p22 1) fires 12 or 13 times and is
  * gone, leaving the one endless 12:775 it spawned (p7 1 ± 0.3, within p28 50 m).
  */
@@ -777,6 +789,8 @@ export class Generator {
   private readonly children: { emitters: Emitter[]; generators: Generator[] } | undefined;
   /** The p6 = 1 entry counter (+0x10, 0 at creation). */
   readonly pick = { next: 0 };
+  /** What it spawned that still exists, for the p23 cap (+0x5a / +0x62). */
+  readonly live: (() => boolean)[] = [];
 
   constructor(
     readonly v: PropValue[],
@@ -831,6 +845,8 @@ export class Generator {
   update(dt: number, near: boolean, player?: Vec3) {
     if (this.dead || !this.running) return;
     if (this.endless && !near) return;
+    // Handles of objects gone are dropped first (0x100b61fa).
+    for (let i = this.live.length - 1; i >= 0; i--) if (!this.live[i]()) this.live.splice(i, 1);
     let ended = false;
     if (this.life !== 0) {
       this.life -= dt;
@@ -846,7 +862,7 @@ export class Generator {
     const c = this.children;
     const e0 = c ? this.fx.emitters.length : 0;
     const g0 = c ? this.fx.generators.length : 0;
-    this.fx.spawnList(this.v, this.M, this.ctx, this.pick, generatorInRange(this.v, player));
+    this.fx.spawnList(this.v, this.M, this.ctx, this.pick, generatorInRange(this.v, player), { max: Math.max(0, Math.floor(num(this.v[23]))), live: this.live });
     if (c) {
       c.emitters.push(...this.fx.emitters.slice(e0));
       c.generators.push(...this.fx.generators.slice(g0));
@@ -1078,7 +1094,8 @@ export class Fx {
 
   /** One firing of an Object Generator at M: the p0 entries `generatorPicks` chooses. */
   /** `inRange`: generatorInRange; out of range only the sound plays (the picks do not advance). */
-  spawnList(gv: PropValue[], M: THREE.Matrix4, ctx: SpawnContext, pick: { next: number } = { next: 0 }, inRange = true) {
+  /** `cap`: the generator's p23 (0 = no limit) and what it has alive (Generator.live). */
+  spawnList(gv: PropValue[], M: THREE.Matrix4, ctx: SpawnContext, pick: { next: number } = { next: 0 }, inRange = true, cap?: { max: number; live: (() => boolean)[] }) {
     const list = refList(gv[0]);
     const sounds = refList(gv[36]);
     const pos = new THREE.Vector3().setFromMatrixPosition(M);
@@ -1088,12 +1105,20 @@ export class Fx {
     const sub = { ...ctx, gen: gv };
     for (const { index, count } of generatorPicks(gv, pick)) {
       const r = list[index];
-      if (r) for (let n = 0; n < count; n++) this.spawn(r, M, sub);
+      if (!r) continue;
+      for (let n = 0; n < count; n++) {
+        if (cap && cap.max > 0 && cap.live.length >= cap.max) continue;
+        const alive = this.spawn(r, M, sub);
+        if (alive && cap) cap.live.push(alive);
+      }
     }
   }
 
-  /** Spawn a template at a placement (output space). */
-  spawn(r: ResRef, M: THREE.Matrix4, ctx: SpawnContext = {}) {
+  /**
+   * Spawn a template at a placement (output space). Returns whether the object it made still
+   * exists (a generator's p23 cap), for the classes whose life the port tracks.
+   */
+  spawn(r: ResRef, M: THREE.Matrix4, ctx: SpawnContext = {}): (() => boolean) | undefined {
     const t = readTemplate(this.env.packages, r);
     if (!t) return;
     if (this.env.spawnOther?.(t, M, ctx)) return;
@@ -1107,7 +1132,7 @@ export class Fx {
         this.generators.push(g);
         g.trigger(ctx);
         if (!g.endless) g.update(0, true, this.playerOffset(M));
-        return;
+        return () => !g.dead;
       }
       case 'Particle Fountain': {
         const em = this.addFountain(t.values, M, 0, t.model);
@@ -1122,12 +1147,16 @@ export class Fx {
           }
           // Spawned fountains without a duration emit for a short burst only.
           else if (!(num(t.values[10]) > 0)) setTimeout(() => em.stop(), 1500);
+          return () => !em.dead && !em.done;
         }
         return;
       }
-      case 'BouncingObject':
+      case 'BouncingObject': {
+        const last = this.debris[this.debris.length - 1];
         this.spawnDebris(t, M, ctx);
-        return;
+        const x = this.debris[this.debris.length - 1];
+        return x && x !== last ? () => this.debris.includes(x) : undefined;
+      }
       case 'Decorative FX':
         for (const x of refList(t.values[0])) if (x) this.spawn(x, M, ctx);
         return;
@@ -1135,9 +1164,12 @@ export class Fx {
         const keys = refList(t.values[0]).filter((x): x is ResRef => !!x).map((x) => `${x.pkg}:${x.id}`);
         const p = new THREE.Vector3().setFromMatrixPosition(M);
         // p6 is the re-trigger interval, not a range: the sound's header distances apply
-        // (src/game/world/sound-effect.ts).
-        if (keys.length) this.env.playSound(keys, [p.x, p.y, p.z]);
-        return;
+        // (src/game/world/sound-effect.ts). p1 plays it at creation (0x1012cc8c -> Play
+        // 0x1012c9a0); play mode p3 1 repeats it until stopped. The object stays (a Sound Effect
+        // destroys itself only in play mode 4 or when what it is attached to goes), so it holds
+        // its generator's p23 slot [port: spawned modes 2..4 play once].
+        if (keys.length && num(t.values[1]) !== 0) this.env.playSound(keys, [p.x, p.y, p.z], num(t.values[3]) === SFX_MODE.repeat ? { loop: true } : undefined);
+        return () => true;
       }
     }
   }
@@ -1162,6 +1194,9 @@ export class Fx {
     let launch = speed;
     let grav = this.gravity, keep = 0.55, reflect = false;
     let life = rnd(num(t.values[1], 3000), Math.max(num(t.values[1], 3000), num(t.values[2], 5000))) / 1000;
+    // p1 / p2 are launch speeds (bouncingLaunch); a piece whose "life" read so is none (the
+    // corpse gibs 3:2834..: p1 -500..-3000) lives its p12 s instead [port].
+    if (!(life > 0.05)) life = num(t.values[12], 2) || 2;
     // A generator that gives no speed, spread or cone (p13 / p14 / p20 all 0) leaves the
     // BouncingObject its own launch (bouncingLaunch) and bounce rules (bounceKeep,
     // bounceVelocity). 1a "Hat Gen": the guard's cap.

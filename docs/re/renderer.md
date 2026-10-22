@@ -738,11 +738,63 @@ null. The five templates in World Common (7:1759, 1804, 1805, 2603, 2604) are no
 by any placed object or template. The other RFL caller (0x100af9f0) applies a template from
 its own p1.
 
-**Port: not implemented, on purpose.** No retail level uses a glow template: Level
-Properties p11 is null in all 18 levels, and nothing references the five World Common
-templates. The pass also needs front-buffer effects and destination-alpha glow masks, which
-the port does not have. Without the masks it would bloom the whole frame at the default
-strength.
+**The mask and the default state [verified].** The level-0 down-sample's pass state sets
+ALPHAREF 5, ALPHAFUNC GREATER; 0x49a940 enables the alpha test whenever the reference is
+non-zero, and the state is applied because the mask passes of 0x49c030 left bit 0 set
+(0x48d264..0x48d28f). So by default only frame texels whose destination alpha is above 5 / 255
+enter the glow. The alpha is the mask: 0x49c030 (run before the glow, 0x49d60b) clears the
+frame's alpha with a full-screen quad (colour writes alpha only, `xpsSetAlpha00`), then draws a
+second quad with TFACTOR alpha 0xff, STENCILFUNC EQUAL: alpha 1 exactly where a flagged pass left
+stencil 1 (§5.1, layer flag 4). A glow flag p3 (+0xc) or engine property 0x39 = 2 set the
+reference to 0 instead, i.e. no test: the whole frame would glow. No retail template or setting
+does that.
+
+So the glow is **on by default** (property 0x39 = 1, the default state 0x5ba0a4: colour white,
+alpha 0xff, additive) whenever the front-buffer targets exist. Level Properties p11 being null
+only means no level replaces the default. Front-buffer effects are inferred to follow the Pixel
+Shaders option (§3.1). Texture stage 1 is set back to DISABLE (0x49d5f5) before these passes,
+so the 0x80 down-sample colour really halves.
+
+Per level f (256, 128, 64, 32), in 256² RGBA8 targets on gamma values:
+1. B = clear, then a f × f quad of the source × 0x80: the frame (level 0, alpha-tested) or the
+   previous level's A (its 2f × 2f corner);
+2. A = clear, then the seven taps of B, additive, colour as the weight (`GLOW_TAPS`), alpha
+   from the vertex colour (stage 0 alpha SELECTARG2);
+3. C: level 0 copies A over the whole 256² (blend 0, glow colour); levels 1..3 add theirs with
+   the glow blend mode (2) and colour.
+
+The composite (0x48cdf0, one screen-covering triangle) adds C × colour × alpha over the back
+buffer. A flat marked area comes back about 3.4 × (0.94 + 0.89 + 0.83 + 0.78), blurred over 2,
+4, 8 and 16 texels of the 256² grid. The flagged materials (120 in the retail data, every one
+tinted): 38 Advanced + 15 Animating additive (effect and fire cards, marked only where their
+alpha > 32 / 255), 35 + 3 opaque (lamp glass 7:1863, bulbs 4:1374, the fluorescent tubes
+9:5742, lit panels), 27 + 1 alpha-blended, 1 lit opaque. (`render-data.ts glowMarked`.)
+
+**What it does to the lamps.** The cell-block lamps' "on" table (Light Housing p32, game-logic.md
+§14.4) swaps in the frosted glass 7:1863 (texture 7:581's frosted disc with the cage pattern ×
+0x8a8a75, unlit: about 0.42 gamma) and the bulb 4:1374 (white × 0xffd67e). Both carry the flag.
+Without the glow the glass sits at a flat mid grey behind the cage and the bulb is a flat orange
+disc: the "cage with no glass" of the report. With it the glass saturates to milky white around
+a blown-out bulb, and a halo spreads over the cage, the shade's rim and the wall behind, as in
+the user's reference frame of a lit cage lamp (bulb 255, glass 200..250, rim 250, a haze of
+40..60 around it over a black ceiling).
+
+**Port** (`src/app/scene-glow.ts`, `surface-material.ts glowMarkMaterial`, render-data.ts
+`glowMarked` / `glowMarkAlphaRef` / `sceneGlowReference`, tests `tests/scene-glow.test.ts`):
+- with the Pixel Shaders option on in the Original look, the scene is drawn into a target of
+  its own (the frame target's attachments: no extra pipelines), then copied to the canvas; the
+  screen effects apply the glow to their own scene target;
+- the mask: a quad clears the frame's alpha (colour kept), then every drawn mesh whose material
+  has a flagged layer is drawn again with its mark material (colour kept, alpha 1, the flagged
+  layer's alpha test) over the scene's depth (LESS_EQUAL, no depth write). Opaque surfaces in
+  front hide the mark as the engine's ZERO does; blended ones drawn over it keep it (KEEP);
+- the levels as above in 256..32 targets (the level-0 down-sample takes 2 × 2 bilinear taps:
+  the port's frame is several times the engine's 640..1024 pixels), then the four levels are
+  added over the frame (each upsampled to the screen directly; the engine stretches its 256²
+  accumulation);
+- `?noglow` turns it off; Enhanced mode and `?lighting=legacy` do not use it;
+- not done: the HDR Scene Glow templates (no retail caller), the destination alpha of HUD
+  quads drawn after the world (the port adds the glow before the viewmodel and the HUD).
 
 ### 3.3 Black-and-white present [verified]
 
@@ -802,8 +854,9 @@ layers (about 1 % of level triangles in 1a, e.g. lamp glow materials) draw unlit
   red-orange. The flames show as several overlapping cards (fires are placed in clusters of
   3–5), plus the orange point light on the surroundings.
 
-Nothing else in the original brightens them. There is no bloom (§3.2), no MODULATE2X, and the
-Fire class spawns no sprites. The faint flames in the port are therefore faithful. A visible
+Nothing else in the original brightens them but the scene glow (§3.2): fire cards are flagged,
+so their texels above alpha 32 / 255 are marked and glow. There is no MODULATE2X, and the Fire
+class spawns no sprites. The faint flames in the port are therefore faithful. A visible
 difference from the original would point to the cards' draw order or depth, not their
 colour. In 4b the port drew dark rectangles around the bushes behind the fires both before
 and after this change. These are not the fire cards (a magenta test of the fire meshes does
@@ -1054,6 +1107,24 @@ MODULATE, z test and z write on, and culling off.
   dword of the .mdu header entry, masked 0x1c3c000 by the loader 0x483850) has bit 23. Hermes'
   model 10:92 has it. The window glass 9:2089 and the gas tank 9:2085 do not, so both are drawn
   two-sided. The glass is two layers facing opposite ways, so both of its faces add their light.
+  - The static draw 0x4930f0 is the draw of every object the list (0x4a15c0) does not send to
+    0x492b40 (object +0x10 bit 8 with setting 6 off), skinned characters included (it reads the
+    skin instance +0xec). 0x492b40 never sets bit 6. Killjoy's 10:90 (0x1cc8012) and his
+    figures 10:162 / 10:196 cull; the port draws a skinned model with the bit front faces only
+    (`app/character.ts`, `tests/projector.test.ts`).
+- **Translucent objects.** Both draws pass "translucent" to the pass builder when the object's
+  opacity (+0xd0) is below 0.99 or +0xc bit 7 is set (0x4933b1, 0x493719, 0x492c3b). Then
+  ALPHABLENDENABLE is on, and a mode 0 / 8 pass draws as mode 1 with the > 2 test. The depth
+  write of pass 0 is still decided by the layer's own mode (0x48fc70 reads layer +8, not the
+  substituted 1), unless object +0xc bit 31 is set (no setter found). So a fading figure with an
+  opaque first pass writes depth: within its draw a farther face drawn after a nearer one is
+  rejected, and with culling only its nearer front faces show. There is no depth pre-pass
+  (`render-data.ts translucentPassState`).
+- **Hidden channels.** When the skin instance has hidden nodes (+8 bit 0x4000000, set by the
+  animator request 0x100010 at 0x470bc6), the draw ORs `0x4914a0(channel, LOD)` (the channel's
+  LOD word, model +0xc8 / .mdu type-8 channel table) of each hidden channel into a mask
+  (0x493698..0x4936d2), and the object draw skips mesh partition k when bit k is set (arg 13,
+  0x498ee3). Killjoy's cone channels 86..90 hold bits 1..0x10 (game-logic.md §15.7.8).
 
 **Draw order [strong].** The object list (0x4a1650..0x4a18c8) groups objects by model in 128
 buckets (+0x64 & 0x7f) and draws each group. Objects flagged +0xc bit 7 (distance-faded, which
@@ -1089,7 +1160,7 @@ the lighting and the glass were already as the engine has them:
   flag raises the additive alpha test to 32 / 255.
 - **Readers of the frame.** The screen effects read and write gamma (`insanity/effects.ts`).
   The monitor warp card decodes the gamma frame it samples (`monitor-view.ts`).
-- **Not drawn yet.** The glow pass itself.
+- **The glow pass** reads the mark: §3.2 (`scene-glow.ts`).
 
 **Checked in the browser** (headless Brave, `tools/playthrough.mjs --level 1a --keep`, same
 views before (HEAD) and after):

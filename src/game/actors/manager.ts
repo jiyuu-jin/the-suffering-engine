@@ -12,14 +12,14 @@ import { Actor, sourceId, type ActorEnv, type ActorProfile, type AiNoise, type D
 import { KindLibrary } from './kinds';
 import { CHARACTER_CLASSES } from './classes';
 import { NavGraph, NO_NAV_TYPE } from './nav';
-import { readDormancy, type ClipRef } from './clipmap';
+import { CHARACTER_MELEE_SLOT, readDormancy, type ClipRef } from './clipmap';
 import { BehaviorLibrary, CHAR, templateList, templateProp, type Behavior, type NoiseSpec } from './behaviors';
 import { decodeTemplateProps, readObjectTemplate, type PropValue } from '../../formats/entities';
 import { bodyVisible, pointsVisible, sightBlocked, spreadPoints, type SeeThrough } from './sight';
 import { skipMatricesWhileHidden } from '../../app/matrix-pass';
 import { readHitTables } from './hit-react';
 import { readMeleeWeapons } from './npc-melee';
-import { resistanceMultiplier } from '../fx/gas';
+import { resistanceForceMultiplier, resistanceMultiplier } from '../fx/gas';
 import { ENGINE_UNITS, THROWN_GRAVITY } from '../weapons/data';
 
 export interface ActorHit {
@@ -39,6 +39,11 @@ export interface ActorHitInfo {
   special?: ResRef;
   /** Damage over time: the per-frame amount the hit reaction is picked by (hit-react.ts). */
   frameAmount?: number;
+  /**
+   * Impact force of the blow before resistances (damage record +0x1c: Missile p28..p31, Melee
+   * Weapon p69 x Attack p7, Radius Damage p2..p3): what the hit reaction is picked by.
+   */
+  force?: number;
 }
 
 /**
@@ -157,7 +162,10 @@ export class ActorManager {
           this.unknown.add(e.className);
           console.debug(`[actors] ${e.className}: not in the class registry, handled generically`);
         }
-        const kind = this.kinds.creature(e.template);
+        // A placement's own MeleeAttackBehavior (p87 overridden) gives it the clips of that one.
+        const m = e.overridden.includes(CHARACTER_MELEE_SLOT) ? e.values[CHARACTER_MELEE_SLOT] : undefined;
+        const melee = m && typeof m === 'object' && !Array.isArray(m) ? { pkg: m.pkg, id: m.id } : undefined;
+        const kind = this.kinds.creature(e.template, melee);
         if (!kind) continue;
         const a = new Actor(kind, feet(e), yawOf(e), e.scale?.[0] ?? 1, e);
         a.profile = this.profile(e.values, classByHash(e.classHash)?.types ?? []);
@@ -288,6 +296,18 @@ export class ActorManager {
         p.ladder = { up: two(v[2], v[3]), down: two(v[4], v[5]), exitTop: r(v[8]), exitBottom: r(v[9]) };
       }
     }
+    // KillMeleeBehavior (p85): the wait p2..p3 after each melee attack [verified: 0x1007cf10].
+    // Only the generic class: the creatures' own KillMelee kinds come from their specials.
+    const km = templateProp(values, types, CHAR.killMelee);
+    if (km) {
+      const t = readObjectTemplate(this.pkgs, km);
+      const c = t ? classByHash(t.classHash) : undefined;
+      if (t && c?.name === 'KillMeleeBehavior') {
+        const v = decodeTemplateProps(c, t);
+        const lo = typeof v[2] === 'number' ? v[2] : 0, hi = typeof v[3] === 'number' ? v[3] : lo;
+        if (hi > 0) p.meleePause = [lo, Math.max(lo, hi)];
+      }
+    }
     const od = templateProp(values, types, CHAR.openDoor);
     if (od) {
       const t = readObjectTemplate(this.pkgs, od);
@@ -319,8 +339,8 @@ export class ActorManager {
       return t && c ? { cls: c.name, v: decodeTemplateProps(c, t) } : undefined;
     };
     // Missile p16: the InvestigateSound of the shot (27 m, level 2 for the guards' bullets) [data].
-    const missile = (m: { v: PropValue[] }, count = 1) => ({ damage: n(m.v[26], 6) * count, speed: n(m.v[1], 200000) / 2048, noise: this.behaviors.noise(list(m.v[16])[0]) });
-    let shot: { damage: number; speed: number; spread?: number; flash?: ResRef; noise?: NoiseSpec } | undefined;
+    const missile = (m: { v: PropValue[] }, count = 1) => ({ damage: n(m.v[26], 6) * count, speed: n(m.v[1], 200000) / 2048, noise: this.behaviors.noise(list(m.v[16])[0]), type: n(m.v[32], 1) });
+    let shot: { damage: number; speed: number; spread?: number; flash?: ResRef; noise?: NoiseSpec; type?: number } | undefined;
     let thrown: RangedProfile['thrown'];
     for (const r of [...list(values[CHAR.weapons]), ...list(values[55])]) {
       const w = decode(r);
@@ -392,7 +412,7 @@ export class ActorManager {
     // Pause between attacks: p19..p20 (port reading; the original reads them only with p18 set,
     // 0x100f2cc0, and otherwise leaves the timing to the parent KillProjectile / reposition
     // behaviour, which is not modelled).
-    return { attacks, cooldownMin: n(b.v[19], 2), cooldownMax: Math.max(n(b.v[19], 2), n(b.v[20], 4)), range, damage: shot.damage, speed: shot.speed, spread: shot.spread ?? 0, flash: shot.flash, noise: shot.noise, thrown, track, aim };
+    return { attacks, cooldownMin: n(b.v[19], 2), cooldownMax: Math.max(n(b.v[19], 2), n(b.v[20], 4)), range, damage: shot.damage, type: shot.type, speed: shot.speed, spread: shot.spread ?? 0, flash: shot.flash, noise: shot.noise, thrown, track, aim };
   }
 
   /**
@@ -510,6 +530,14 @@ export class ActorManager {
   ambientHit?: (a: Actor, amount: number, from: THREE.Vector3Like | undefined, by: DamageSource | undefined) => boolean;
   /** Dead bodies a shot stops at (raycast 'cuttable'): those with Part Caps left. */
   cuttable?: (a: Actor) => boolean;
+  /** CapLimb (message 451) without a bone: the Character's p17 list (system.ts -> dismember.ts). */
+  capLimb?: (a: Actor) => void;
+  /**
+   * A blow on a body that is dead after it (a corpse, or the killing blow): explosions throw it,
+   * Gonzo / claw blows gib it (system.ts -> gibs.ts: the hit reaction 0x100e6480 runs before the
+   * Part Cap test, which still sees the body). True when the body goes.
+   */
+  corpseHit?: (a: Actor, amount: number, from: THREE.Vector3Like | undefined, by: DamageSource | undefined, hit: ActorHitInfo | undefined) => boolean;
 
   /**
    * Damage an actor (from: attacker position; by: attacking actor, 'player' / omitted, or a
@@ -522,7 +550,10 @@ export class ActorManager {
     // A dead body still takes the blow's part-cap test (Character damage 0x100e7390 runs on
     // corpses too; dismember.ts), nothing else.
     if (!a.alive) {
-      if (amount > 0) this.partHit?.(a, amount, from, by, hit);
+      if (amount > 0) {
+        this.corpseHit?.(a, amount, from, by, hit);
+        this.partHit?.(a, amount, from, by, hit);
+      }
       return false;
     }
     // Special-move hook (specials/*): hit location / type rules (heads, weak spots, immunity).
@@ -533,10 +564,20 @@ export class ActorManager {
     // fires its Damaged (Relay 2d51: the asylum's last scenes) in the middle of Killjoy's fight.
     // Characters without p5 keep the port's rule (no resistances outside the specials and gas).
     if (hit?.type !== undefined && a.entity && typeof a.entity.values[5] === 'number' && a.entity.values[5] !== 0) amount *= resistanceMultiplier(this.pkgs as never, a.entity.values, hit.type);
-    if (!(amount > 0)) return false;
+    // The hit reaction is picked by the blow's impact force times the resistance's force factor,
+    // and the attack stimulus goes out for blows of 0 damage too (Character damage 0x100e776b,
+    // amount >= 0) [verified]: Hermes takes no damage from anything, but fire and wind make him
+    // react (8b: his reaction's Triggered passes the stove Relay 1f0d).
+    const react = hit?.force !== undefined ? hit.force * (hit.type !== undefined && a.entity ? resistanceForceMultiplier(this.pkgs as never, a.entity.values, hit.type) : 1) : undefined;
+    if (!(amount > 0) && !(react !== undefined && react > 0)) return false;
+    amount = Math.max(0, amount);
     const actor = by instanceof Actor ? by : undefined;
-    const killed = a.damage(amount, this.env, from ?? actor?.position, by, hit && { special: hit.special, frameAmount: hit.frameAmount });
-    // Part Caps after the health change and the kill (0x100e76e1 follows them).
+    const killed = a.damage(amount, this.env, from ?? actor?.position, by, hit && { special: hit.special, frameAmount: hit.frameAmount, react });
+    if (!(amount > 0)) return killed;
+    // The killing blow's gibs (the stimulus' hit reaction), then Part Caps after the health
+    // change and the kill (0x100e76e1 follows them).
+    // The body's removal is deferred (system.ts), so the Part Cap test still runs on it.
+    if (killed) this.corpseHit?.(a, amount, from ?? actor?.position, by, hit);
     if (!a.invulnerable) this.partHit?.(a, amount, from ?? actor?.position, by, hit);
     const info: ActorDamageInfo = { amount, killed, source: sourceId(by), by: actor };
     this.emit('damage', a, info);
@@ -894,6 +935,8 @@ export class ActorManager {
     else if (message === slot(13, 90)) a.invulnerable = true;
     else if (message === slot(14, 91)) a.invulnerable = false;
     else if (message === a.wakeMessage || message === 1) a.wake(env);
+    // CapLimb (451, a fixed input of the Character map: 0x100e3e19): the p17 list (dismember.ts).
+    else if (message === 451 && this.capLimb) this.capLimb(a);
     else return false;
     return true;
   }

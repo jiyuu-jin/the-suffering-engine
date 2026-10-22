@@ -5,10 +5,15 @@
 //     every blow of >= 0 damage reaches the character's default handler unless a behaviour on
 //     the stack consumes it (Stomp, TransitAnim, a JumpBehavior before its launch, a
 //     CeilingFloorTransition in transit). The handler calls the hit-reaction virtual (vt 72,
-//     0x100e6480) with the damage record: the amount after resistances, for damage over time
+//     0x100e6480) with the damage record: its amount is the blow's IMPACT FORCE (record +0x1c,
+//     read at message +0x2a), not its damage: the stimulus is a copy of the record whose force
+//     is multiplied by the matching Damage Resistance's p2 (0 when none matches and GameObject
+//     p6 is set; fx/gas.ts resistanceForceMultiplier), sent for blows of 0 damage too. Sources
+//     that give no force (NPC blows in the port) fall back to the damage; for damage over time
 //     the per-frame share (a Particle Fountain's p18 x frame time, a Damage Action Object's
 //     p4 / 30), and the Special Hit Reaction template the damage carries (+0x48: Radius Damage
 //     2:736, a Damage Action Object's p7 2:545, melee Attacks' p8 2:439 / 2:430 / 2:440).
+//   * A whole-body reaction's start sends its p11 to the character's links (Hermes: 6).
 //   * The picker 0x1009e650 reads two lists of the character: vt 65 -> p71 ("special" hit
 //     reactions) and vt 64 -> p70 (hit reactions by damage; a CartWheeler on a ceiling uses
 //     p175 / p177 instead). A special entry is chosen when its p3 equals the blow's Special Hit
@@ -63,6 +68,12 @@ export interface HitReactDef {
   rate: [number, number];
   /** p10: turn to the attacker. */
   face: boolean;
+  /**
+   * p11: message the character sends to its own links when the whole-body reaction starts
+   * (HitReactBehavior start 0x100ebd80 -> 0x100ebfa0, the dispatcher's send-to-links); 0 none.
+   * Hermes' 10:1228 sends Triggered (6): 8b's stove Relay 1f0d [verified].
+   */
+  message: number;
   /** p12: layer bone of a partial-body flinch, -1 = whole body. */
   layerBone: number;
   /** p13: bone whose height splits p7 (attacker above) from p14 / p15 (sides), -1 = none. */
@@ -104,6 +115,7 @@ export function hitReactOf(r: ResRef, v: readonly PropValue[]): HitReactDef {
     clips: refs(v[7]),
     rate: [num(v[8], 1), num(v[9], 1)],
     face: num(v[10]) !== 0,
+    message: num(v[11]),
     layerBone: num(v[12], -1),
     sideBone: num(v[13], -1),
     side: [ref(v[14]), ref(v[15])],

@@ -396,11 +396,11 @@ export class Props implements DamageablePropSet {
     }
     if (t.cls === 'Radius Damage') {
       // p0 damage at the centre falling to p1 at the edge, p5 radius (m), p10 damage type
-      // (p2 / p3 are force, not radii).
+      // (p2 / p3 are the impact force at the centre / edge, what hit reactions read).
       const p = new THREE.Vector3().setFromMatrixPosition(M);
       const v = t.values;
       // Defer one frame so the source prop is gone before the blast is applied.
-      setTimeout(() => this.env.damage()?.apply({ point: p, amount: num(v[0]), minAmount: num(v[1]), innerRadius: 0, radius: num(v[5]), kind: num(v[10]) }), 0);
+      setTimeout(() => this.env.damage()?.apply({ point: p, amount: num(v[0]), minAmount: num(v[1]), innerRadius: 0, radius: num(v[5]), kind: num(v[10]), force: num(v[2]), minForce: num(v[3]) }), 0);
       return true;
     }
     void ctx;

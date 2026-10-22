@@ -68,6 +68,7 @@ import {
   vec4,
   vertexColor,
 } from 'three/tsl';
+import { ENHANCED } from './enhanced/config';
 
 // TSL node types are deeply generic; the helpers below pass nodes around untyped.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -399,7 +400,55 @@ export function engineLitColor(tex: N, opts: EngineLightOptions): N {
   // scene geometry under a caster's shadow (0x4ce1a0), and a character receiving its own
   // silhouette darkened its legs and lap in patches [inferred: no self-shadowing in the
   // original's cinematics].
+  if (enhancedShading.finish) return enhancedShading.finish(toLinear(lit), opts);
   return toLinear(opts.lightSet ? lit : lit.mul(engineShadowFactor()));
+}
+
+/**
+ * Final colour (linear) of a lit surface pass stack (surface-material.ts): the projected-shadow
+ * receiver pass darkens it on gamma values; Enhanced mode adds its specular / shadow terms.
+ */
+export function engineSurfaceFinish(rgb: N, opts: EngineLightOptions): N {
+  if (enhancedShading.finish) return enhancedShading.finish(rgb, opts);
+  return toLinear(toSrgb(rgb).mul(engineShadowFactor()));
+}
+
+/**
+ * Enhanced graphics mode hooks, installed by src/app/enhanced/shading.ts before any material is
+ * built (docs/enhanced.md). Unset in Original mode, where every function here builds exactly the
+ * faithful graph.
+ */
+export const enhancedShading: {
+  /** Per-pixel light factor (gamma, ≥ 0, may exceed 1) from the vertex light L (light units). */
+  lightFactor?(L: N, opts: EngineLightOptions): N;
+  /** Final linear colour of a lit surface from its engine-lit colour (linear). */
+  finish?(rgb: N, opts: EngineLightOptions): N;
+  /** Fogged output (linear) from the material output, the fog amount and the fog colour (gamma). */
+  fog?(out: N, f: N, fogColor: N): N;
+  /**
+   * Per-surface nodes (normal, roughness, specular) from a surface's generated maps, sampled by
+   * `sample(texture)` at the surface's base-layer coordinates `coords` (surface-material.ts
+   * enhancedMaps).
+   */
+  surface?(maps: EnhancedMaps, sample: (t: THREE.Texture) => N, coords: N): unknown;
+} = {};
+
+/**
+ * Generated per-texture maps for Enhanced mode (docs/enhanced.md "Extension points"): a
+ * tangent-space normal map (OpenGL convention, +Y up), a roughness map (R) and a specular /
+ * cavity map (R). All optional; ignored in Original mode.
+ */
+export interface EnhancedMaps {
+  normal?: THREE.Texture;
+  roughness?: THREE.Texture;
+  specular?: THREE.Texture;
+  /** Normal map strength (default 1). */
+  normalScale?: number;
+}
+
+/** Uniforms and light arrays the Enhanced mode reads (src/app/enhanced/*). */
+export function engineLightInternals() {
+  return { u, lightData, data, pointA, pointB, spotA, spotB, spotC, dirA, dirB, MAX_POINTS, P_A, P_B };
 }
 
 /**
@@ -414,6 +463,8 @@ export function engineLightFactor(opts: EngineLightOptions): N {
   const base = opts.precomputed ? bakedBase(P, Nrm) : set ? objectBase(P, Nrm) : dynamicBase(P, Nrm);
   const points = Fn(() => (set ? chosenPointLights(P, Nrm) : pointLights(P, Nrm, opts.precomputed ? u.bakedPoints : u.points)))();
   const light: N = varying(base.add(points).add(spotLights(P, Nrm)), 'v_engineLight');
+  // Enhanced mode (docs/enhanced.md): per-pixel factor with the flashlight, lamp shadows, HDR.
+  if (enhancedShading.lightFactor) return enhancedShading.lightFactor(light, opts);
   return clamp(light.min(LIGHT_CLAMP).mul(0.5), 0, 1);
 }
 
@@ -426,6 +477,8 @@ export function engineLightFactor(opts: EngineLightOptions): N {
 export interface EngineLightOptions {
   precomputed: boolean;
   lightSet?: boolean;
+  /** Enhanced mode only: per-surface nodes from generated maps (enhancedShading.surface). */
+  surface?: unknown;
 }
 
 /** Gamma factor of the projected-shadow receiver pass (alpha-blended darkening). */
@@ -438,8 +491,11 @@ export function engineShadowFactor(): N {
  * current colour to itself, saturated (render-data.ts WORLD_STAGE_GAIN, 0x48c4d7).
  */
 export function engineStages(stage0: N): N {
-  return stage0.mul(WORLD_STAGE_GAIN).min(1);
+  return stage0.mul(WORLD_STAGE_GAIN).min(STAGE_MAX);
 }
+
+/** Saturation of a pass (1, the back buffer's); Enhanced keeps HDR headroom for bloom. */
+const STAGE_MAX = ENHANCED ? 16 : 1;
 
 /** Gamma-encode / decode helpers for materials composing engine passes. */
 export const gammaEncode = toSrgb;
@@ -498,10 +554,12 @@ const sharedEngineColor = new Map<string, N>();
 export const engineFogFactor: N = clamp(positionView.z.negate().sub(u.fogNear).div(u.fogFar.sub(u.fogNear).max(1e-3)), 0, 1);
 
 /** Gamma-space linear fog (xvsHeaderFog.vsh: oFog = 1 − (z − start) / (end − start)). */
-export const engineFogNode: N = Fn(() => {
-  const rgb = toLinear(mix(toSrgb(output.rgb), vec3(u.fogColor), engineFogFactor));
-  return vec4(rgb, output.a);
-})();
+export const engineFogNode: N = ENHANCED
+  ? Fn(() => enhancedShading.fog!(output, engineFogFactor, u.fogColor))()
+  : Fn(() => {
+      const rgb = toLinear(mix(toSrgb(output.rgb), vec3(u.fogColor), engineFogFactor));
+      return vec4(rgb, output.a);
+    })();
 
 /**
  * The back buffer holds gamma values, as the engine's did (docs/re/renderer.md §5.1).
@@ -521,7 +579,7 @@ export const engineFogNode: N = Fn(() => {
  * Shaders that write the frame themselves (`fragmentNode` quads: the screen effects) and
  * anything sampling the frame (the monitor warp card) work on gamma values directly.
  */
-export const GAMMA_BACK_BUFFER = !LEGACY_LIGHTING;
+export const GAMMA_BACK_BUFFER = !LEGACY_LIGHTING && !ENHANCED;
 
 /** Colour buffer type of the frame target (and of targets that share its passes). */
 export const BACK_BUFFER_TYPE: THREE.TextureDataType = GAMMA_BACK_BUFFER ? THREE.UnsignedByteType : THREE.HalfFloatType;
@@ -545,8 +603,12 @@ export function backBufferOutput(node: N): N {
 export function additiveEffectColor(rgb: N, a: N, opts: { fog?: boolean } = {}): N {
   let s: N = toSrgb(vec3(rgb)).mul(a);
   if (opts.fog !== false) s = s.mul(float(1).sub(engineFogFactor));
+  // Enhanced: fire, sparks and arcs keep HDR headroom so they bloom (docs/enhanced.md).
+  if (ENHANCED) return toLinear(s.clamp(0, 1)).mul(ADDITIVE_HDR);
   return toLinear(s.clamp(0, 1));
 }
+/** Enhanced: gain of additive effects in the HDR frame. */
+const ADDITIVE_HDR = 1.6;
 
 // ---------------------------------------------------------------------------
 // CPU side
@@ -639,6 +701,12 @@ class EngineLightRig {
   private readonly t = { v: new THREE.Vector3(), d: new THREE.Vector3(), c: new THREE.Color(), q: new THREE.Quaternion() };
   /** Flashlight spot definitions (beam + spill). */
   flashlight = FLASHLIGHT_SPOTS;
+  /** Enhanced mode lights the flashlight per pixel (src/app/enhanced/shading.ts): not a rig spot. */
+  perPixelFlashlight = false;
+  /** Directional lights uploaded this frame (Enhanced: the moonlight shafts). */
+  get directionals(): readonly EngineDirectional[] {
+    return this.dirList;
+  }
   stats = { points: 0, bakedPoints: 0, candidates: 0, spots: 0, fx: 0, shadows: 0 };
   /**
    * Graphics "Shadows" option as the engine stores it (0x5c6d00: 0 off, 1 player only,
@@ -1005,7 +1073,7 @@ class EngineLightRig {
 
     // Spot lights: the flashlight (beam + spill), dimmed with the lamp's intensity (battery).
     let s = 0;
-    if (flashlight && flashlight.visible && flashlight.intensity > 0 && flashlight.parent) {
+    if (flashlight && flashlight.visible && flashlight.intensity > 0 && flashlight.parent && !this.perPixelFlashlight) {
       const k = flashlight.intensity / FLASHLIGHT_BASE_INTENSITY;
       const pos = flashlight.getWorldPosition(this.t.d).clone();
       // The beam follows the view axis (the SpotLight sits off-centre and aims 1 m ahead).

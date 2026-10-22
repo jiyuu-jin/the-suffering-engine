@@ -29,6 +29,8 @@ import type { Actor, ActorEnv } from './actor';
 import type { ActorManager } from './manager';
 import type { Behavior } from './behaviors';
 import type { ActorFx } from './fx';
+import type { Character } from '../../app/character';
+import { linkTree, treeFromParents, type ArcEndpoints, type ArcHandle, type ArcTarget } from '../fx/electric-arc';
 import { dialogHit, dialogKillPoints, dialogRepRules, newDialogRepState, type DialogRepState } from '../insanity/reputation';
 import * as THREE from 'three/webgpu';
 
@@ -51,6 +53,10 @@ export interface DirectorHooks {
   log(msg: string): void;
   /** A positional sound (one of `keys`); returns its length (s), 0 when none played. */
   sound?(keys: string[], at: { x: number; y: number; z: number }): number;
+  /** Put an Electric Arc Effect on a target (services.fx.arcEffect, src/game/fx/electric-arc.ts). */
+  arcEffect?(ref: ResRef, target: ArcTarget): ArcHandle | undefined;
+  /** The player's third-person body (the bones an effect on the player crackles over). */
+  playerBody?(): Character | undefined;
 }
 
 interface Cloner {
@@ -162,13 +168,8 @@ export class Director {
   private speech = new Map<number, Speech>();
   private dialogs = new Map<number, ActionDialog>();
   private damageObjs = new Map<number, Entity>();
-  /**
-   * Electric Arc Effects running on their targets: the template's p0 is how long it lasts (s;
-   * 999 on Horace's 3:2230: for as long as he is there), p4 its Electric Arc (3:2231: p0 the
-   * interval between bursts, p1 the bolts per burst) [inferred from the data: the effect's
-   * per-target timer counts down p0 (RFL update 0x100b75d0); the bolt timing was not traced].
-   */
-  private shocks: { to: () => THREE.Vector3Like | undefined; base: () => THREE.Vector3Like | undefined; alive: () => boolean; left: number; every: number; bolts: number; next: number }[] = [];
+  /** Electric Arc Effects started on targets (the fx system runs them; tests / overlay). */
+  readonly arcEffects: { at: number; effect: string; target: number; handle?: ArcHandle }[] = [];
   private drops = new Map<number, { x: number; y: number; z: number }[]>();
   private noosemen: { a: Actor; group: number; timer: number }[] = [];
   private ambient = new Map<number, Ambient>();
@@ -704,8 +705,9 @@ export class Director {
   //
   // [verified from the class code, RFL 0x1008e910] p4 damage, p3 = 1 per second (scaled by
   // the frame time), p5 damage type, p6 impact force, p7 the attack stimulus template (an
-  // InvestigateSound, 2:545) carried by the damage, p8 an effect template spawned at the target
-  // (Electric Arc Effect: an arc from this object to the target); inputs p1 (On) apply,
+  // InvestigateSound, 2:545) carried by the damage, p8 an effect template spawned on each target
+  // (an Electric Arc Effect over its bones or its linked objects, fx/electric-arc.ts; the
+  // decorations of 1a's door and chair room are such trees); inputs p1 (On) apply,
   // p2 Destroy. p0 picks the targets [data]: 0 the sender of the message (Detectors pass the
   // object that entered: the player falling into a death pit), 2 the linked objects (arcs at
   // Horace, a prisoner, a decoration), 1 both.
@@ -720,14 +722,9 @@ export class Director {
     const mode = num(v[0], 2);
     const targets = [...(mode !== 2 ? [from] : []), ...(mode !== 0 ? e.links : [])];
     const amount = num(v[4]) * (num(v[3]) === 1 ? 1 / 30 : 1);
-    const effect = refs(v[8])
-      .map((r) => readObjectTemplate(this.pkgs, r))
-      .find((t) => !!t && /Arc/.test(classByHash(t.classHash)?.name ?? ''));
-    const arc = !!effect;
-    // Electric Arc Effect: lasts its p0; its p4 Electric Arc sets the burst rhythm.
-    const ev = effect && classByHash(effect.classHash)?.name === 'Electric Arc Effect' ? decodeTemplateProps(classByHash(effect.classHash), effect) : undefined;
-    const boltT = ev ? refs(ev[4]).map((r) => readObjectTemplate(this.pkgs, r)).find(Boolean) : undefined;
-    const bolt = boltT ? decodeTemplateProps(classByHash(boltT.classHash), boltT) : undefined;
+    // p8: an effect template spawned on each target (0x1008e910 hands it the target twice):
+    // the Electric Arc Effects (electric-arc.ts) [verified].
+    const effect = refs(v[8]).find((r) => /Arc/.test(classByHash(readObjectTemplate(this.pkgs, r)?.classHash ?? 0)?.name ?? ''));
     const src = pos(e);
     for (const u of targets) {
       if (!u) continue;
@@ -739,30 +736,14 @@ export class Director {
         // electrocution, hit-react.ts) [verified].
         else if (a && !a.template) this.manager.damage(a, amount, src, e.uid, { type: num(v[5]), special: refs(v[7])[0] });
       }
-      if (arc) {
-        // The effect is spawned on the target itself (both ends of the arc are the target
-        // [verified: the effect gets the target twice]): crackling over the body.
-        const ent = this.byUid.get(u);
-        // A body on the floor: the bolts run along it instead of up to its head.
-        const at = () => (a ? (a.alive ? { x: a.position.x, y: a.bottom + a.height * 0.85, z: a.position.z } : { x: a.position.x - Math.sin(a.yaw) * a.height * 0.6, y: a.bottom + 0.25, z: a.position.z - Math.cos(a.yaw) * a.height * 0.6 }) : isPlayer ? { ...this.hooks.player(), y: this.hooks.player().y + 1.5 } : ent ? pos(ent) : undefined);
-        const base = a ? { x: a.position.x + 0.3, y: a.bottom + 0.15, z: a.position.z - 0.2 } : at();
-        if (base) for (let k = 0; k < 2; k++) this.fx.arc({ x: base.x + (Math.random() - 0.5) * 0.6, y: base.y, z: base.z + (Math.random() - 0.5) * 0.6 }, at, 0.6);
-        const last = ev ? num(ev[0], 0) : 0;
-        if (last > 0.6 && (a || ent)) {
-          const baseOf = () => (a ? { x: a.position.x, y: a.bottom + 0.15, z: a.position.z } : at());
-          this.shocks.push({
-            to: at,
-            base: baseOf,
-            // The effect stays on the target for its p0 whatever happens to it: a character the
-            // same shock kills (1a guard 609e at the electrified door: Damage Action Objects 75dd
-            // and 8185 at once) keeps crackling on the floor.
-            alive: () => (a ? !a.hidden && !!a.ch.root.parent : !!ent && !this.hooks.isDestroyed(u)),
-            left: last,
-            every: Math.max(0.1, num(bolt?.[0], 0.5)),
-            bolts: Math.max(1, Math.min(4, num(bolt?.[1], 2))),
-            next: 0.5,
-          });
-        }
+      if (effect && this.hooks.arcEffect) {
+        // The effect stays on its target for its p0 whatever happens to it: a character the same
+        // shock kills (1a guard 609e at the electrified door: Damage Action Objects 75dd and
+        // 8185 at once) keeps crackling on the floor.
+        const target = this.arcTarget(u, isPlayer);
+        const handle = target ? this.hooks.arcEffect(effect, target) : undefined;
+        this.arcEffects.push({ at: this.time, effect: key(effect), target: u, handle });
+        if (this.arcEffects.length > 64) this.arcEffects.shift();
       }
     }
     this.note(`DamageAction#${e.uid.toString(16)} ${amount ? amount.toFixed(0) + ' dmg ' : ''}-> ${targets.map((u) => (u === this.hooks.playerUid ? 'player' : `#${u.toString(16)}`)).join(',')}`);
@@ -917,21 +898,43 @@ export class Director {
     for (const sp of this.speech.values()) this.updateSpeech(sp);
     this.updateNoosemen(dt);
     if (this.aimers.size) this.updateAimers(dt);
-    if (this.shocks.length) this.updateShocks(dt);
   }
 
-  /** Electric Arc Effects that last: a burst of bolts over the body every interval. */
-  private updateShocks(dt: number) {
-    this.shocks = this.shocks.filter((s) => {
-      s.left -= dt;
-      if (s.left <= 0 || !s.alive()) return false;
-      s.next -= dt;
-      if (s.next > 0) return true;
-      s.next = s.every * (0.6 + Math.random() * 0.8);
-      const b = s.base();
-      if (b) for (let k = 0; k < s.bolts; k++) this.fx.arc({ x: b.x + (Math.random() - 0.5) * 0.6, y: b.y + Math.random() * 1.2, z: b.z + (Math.random() - 0.5) * 0.6 }, s.to, Math.min(0.5, s.every));
-      return true;
-    });
+  /**
+   * What an Electric Arc Effect crackles over (electric-arc.ts ArcTarget): a character's bones
+   * (effect p2 = 0) and the object with the objects it links to, recursively (p2 = 1).
+   */
+  private arcTarget(u: number, isPlayer: boolean): ArcTarget | undefined {
+    const a = this.manager.get(u);
+    const ent = this.byUid.get(u);
+    const ch = a?.ch ?? (isPlayer ? this.hooks.playerBody?.() : undefined);
+    let bones: ArcEndpoints | undefined;
+    if (ch?.skeleton) {
+      const list = ch.skeleton.bones;
+      const tree = treeFromParents(ch.skinned.skeleton.bones.map((b) => b.parent));
+      bones = { ...tree, positions: (out) => list.forEach((b, i) => out[i]?.setFromMatrixPosition(b.matrixWorld)) };
+    }
+    let links: ArcEndpoints | undefined;
+    if (ent) {
+      const lt = linkTree(u, (x) => this.byUid.get(x)?.links);
+      if (lt) {
+        const at = lt.uids.map((x) => {
+          const xe = this.byUid.get(x)!;
+          const xa = this.manager.get(x);
+          return () => (xa ? { x: xa.position.x, y: xa.bottom + xa.height * 0.5, z: xa.position.z } : xe ? pos(xe) : undefined);
+        });
+        links = { ...lt.tree, positions: (out) => at.forEach((f, i) => { const p = f(); if (p) out[i].set(p.x, p.y, p.z); }) };
+      }
+    }
+    if (!bones && !links) return undefined;
+    return {
+      bones,
+      links,
+      label: isPlayer ? 'player' : `#${u.toString(16)}`,
+      visible: () => (a ? !a.hidden && a.ch.root.visible : ch ? ch.root.visible : true),
+      // A character goes with its actor (a death swaps the body's parent for a moment).
+      alive: () => (a ? this.manager.get(u) === a : isPlayer ? true : !this.hooks.isDestroyed(u)),
+    };
   }
 
   /**

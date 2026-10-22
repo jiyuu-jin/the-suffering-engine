@@ -354,3 +354,30 @@ test('retail guard 10:3: whole-body reactions from 2, none of them partial', { s
   assert.equal(pickHitReact(t.hits, 4)!.max, 7, 'p5 -1: up to the next p4');
   assert.equal(pickHitReact(t.hits, 0.4, { specials: t.specials, special: R(545, 2) }), undefined, 'no 2:545 entry: an arc frame does nothing');
 });
+
+test('a whole-body reaction sends its p11 to the links; a blow of no damage reacts by its force', () => {
+  // 8b's Hermes copies: HitReactBehavior 10:1228 (p4 1, p11 Triggered) and a link to the stove
+  // Relay 1f0d. He takes no damage (Damage Resistances x0) but fire's force passes (their p2 1).
+  const { a, e } = make([{ ...def(1, 10001), message: 6 }]);
+  Object.assign(a, { entity: { uid: 0x2419, links: [0x1f0d], values: [] } });
+  const sent: [number, number][] = [];
+  e.send = (to, msg) => void sent.push([to, msg]);
+  a.damage(0, e, { x: 0, y: 0, z: 3 }, 'player');
+  assert.notEqual(a.state, 'hurt', 'no damage and no force: nothing');
+  assert.deepEqual(sent, []);
+  a.damage(0, e, { x: 0, y: 0, z: 3 }, 'player', { react: 0.5 });
+  assert.notEqual(a.state, 'hurt', 'a force below the band: nothing');
+  a.damage(0, e, { x: 0, y: 0, z: 3 }, 'player', { react: 18 });
+  assert.equal(a.state, 'hurt', 'the Molotov blast\'s force: a whole-body reaction');
+  assert.deepEqual(sent, [[0x1f0d, 6]], 'Triggered to his links as it starts');
+  assert.equal(a.health, 1000, 'and no damage');
+});
+
+test('the reaction reads the force when the blow carries one, not the damage', () => {
+  const { a, e } = make(CW());
+  a.damage(4, e, { x: 0, y: 0, z: 3 }, 'player', { react: 20 });
+  assert.equal(a.state, 'hurt', 'a shotgun pellet at close range (4 damage, 20 force): the 15..25 band');
+  const b = make(CW());
+  b.a.damage(8, b.e, { x: 0, y: 0, z: 3 }, 'player', { react: 0 });
+  assert.notEqual(b.a.state, 'hurt', 'a revolver bullet past its force range (force 0): no reaction');
+});

@@ -10,7 +10,7 @@ import { loadPackages } from '../src/app/loader';
 import { dirname } from '../src/app/gamefs';
 import { readLevelHeader } from '../src/formats/level';
 import type { EntityPackageSet, PropValue } from '../src/formats/entities';
-import { Emitter, Fx, Generator, generatorInRange, generatorInterval, GENERATOR_STOP_LIFE } from '../src/game/world/fx';
+import { Emitter, Fx, Generator, generatorInRange, generatorInterval, GENERATOR_STOP_LIFE, readTemplate } from '../src/game/world/fx';
 
 /** Generator values: p5, p6, p7, p8, p21, p22, p24, p28.. set by key. */
 function gen(o: Record<number, PropValue>): PropValue[] {
@@ -175,4 +175,66 @@ test('retail: a broken chair-room generator (12:715) leaves one endless 12:775 (
   assert.ok(most <= 4, `at most a handful at once (${most})`);
   const fountains = made.get('Particle Fountain') ?? 0;
   assert.ok(fountains > 20 && fountains < 60, `12:775 -> 12:768 about once a second (${fountains})`);
+});
+
+test('Object Generator p23: no spawn while p23 of its spawns still exist; gone ones free their slots (0x100b52a0 / 0x100b61fa)', () => {
+  const fx = new Fx({ packages: {} as EntityPackageSet, dyn: {} as never, collision: null, playSound: () => undefined, timeScale: () => 1 });
+  const alive: { on: boolean }[] = [];
+  fx.spawn = () => {
+    const o = { on: true };
+    alive.push(o);
+    return () => o.on;
+  };
+  const g = new Generator(gen({ 0: [{ pkg: 1, id: 1 }, { pkg: 1, id: 2 }], 2: 1, 6: 2, 7: 0.1, 21: 0, 23: 3 }), new THREE.Matrix4(), fx);
+  g.trigger();
+  run(g, 2);
+  assert.equal(alive.length, 3, 'three spawns, then the cap');
+  alive[0].on = false;
+  run(g, 0.2);
+  assert.equal(alive.length, 4, 'one slot freed, one spawn');
+  const free = new Generator(gen({ 2: 1, 7: 0.1, 21: 0, 23: 0 }), new THREE.Matrix4(), fx);
+  free.trigger();
+  run(free, 1);
+  assert.ok(alive.length >= 13, 'p23 0: no limit');
+});
+
+test('retail: 1a lobby sparks 81f2 (3:2642, p7 0.1 endless, p23 3) keep one looping hum 4:297, not a new one every 0.1 s', { skip }, async () => {
+  const path = 'LEVELS/1 PrisonDeathRow/1a PrisonDeathRow.lvl';
+  const warn = console.warn;
+  console.warn = () => {};
+  const packages = (await loadPackages(nodeFS(), dirname(path), readLevelHeader(readSrsc(path)).dependencies, () => {})) as EntityPackageSet;
+  console.warn = warn;
+  const voices: { key: string; loop?: boolean; on: boolean }[] = [];
+  const fx = new Fx({
+    packages,
+    dyn: {} as never,
+    collision: null,
+    playSound: (keys, _p, opts) => {
+      const h = { key: keys[0], loop: opts?.loop, on: true };
+      voices.push(h);
+      return { stop: () => void (h.on = false) };
+    },
+    timeScale: () => 1,
+    playerPos: () => [0, 0, 0],
+  });
+  // The spark fountains (3:2643 / 3:2644) are not built here: each lives its 1.5 s burst.
+  let clock = 0;
+  const spawn = fx.spawn.bind(fx);
+  let fountains = 0;
+  fx.spawn = (r, M, ctx) => {
+    if (r.pkg === 3 && (r.id === 2643 || r.id === 2644)) {
+      fountains++;
+      const end = clock + 1.5;
+      return () => clock < end;
+    }
+    return spawn(r, M, ctx);
+  };
+  const g = new Generator(readTemplate(packages, { pkg: 3, id: 2642 })!.values, new THREE.Matrix4(), fx);
+  assert.equal(g.endless, true);
+  g.trigger();
+  for (; clock < 30; clock += 1 / 30) g.update(1 / 30, true, [0, 0, 0]);
+  const hums = voices.filter((v) => v.key === '4:297');
+  assert.equal(hums.length, 1, `one hum (Sound Effect 4:1159 lives on), not ${hums.length}`);
+  assert.equal(hums[0].loop, true, '4:1159 play mode 1 repeats it');
+  assert.ok(fountains > 20, `the sparks go on as their fountains burn out (${fountains})`);
 });

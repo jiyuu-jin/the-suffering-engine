@@ -13,6 +13,7 @@ import * as THREE from 'three/webgpu';
 import type { DecodedTexture } from '../formats/types';
 import { Blend, findEntry, TDU_TEXTURE, type PackageSet, type SurfaceMaterial } from '../formats/model';
 import { decodeTexture } from '../formats/texture';
+import { modelCullsBackFaces } from '../formats/render-data';
 import { boneSubtree, MAX_INFLUENCES, type Skeleton, type SkinnedModel } from '../formats/skeleton';
 import { blendInto, guessClipLabel, type AnimClipData } from '../formats/animation';
 import { instanceRotation, toOutputSpace, type LevelObject } from '../formats/level';
@@ -146,6 +147,10 @@ export function buildSkinnedMesh(
   const materials: (THREE.MeshStandardNodeMaterial | THREE.MeshBasicNodeMaterial)[] = [];
   const disposables: { dispose(): void }[] = [geometry];
   const texCache = new Map<string, THREE.DataTexture>();
+  // Back faces: the object draw (SUFFERING.EXE 0x493410) culls them for a model whose header flag
+  // word has bit 23, characters included (Killjoy 10:90, Hermes 10:92); every other model is
+  // drawn two-sided (docs/re/renderer.md §5.1) [verified].
+  const side = modelCullsBackFaces(m.headerFlags ?? 0) ? THREE.FrontSide : THREE.DoubleSide;
   let o = 0;
   m.submeshes.forEach((s, i) => {
     for (let t = 0; t + 2 < s.indices.length; t += 3) {
@@ -167,7 +172,7 @@ export function buildSkinnedMesh(
         return t;
       };
       const { material } = createSurfaceMaterial(
-        { material: s.material, textureKey: s.textureKey, vertexColors: false, hasUvs: true, side: THREE.DoubleSide },
+        { material: s.material, textureKey: s.textureKey, vertexColors: false, hasUvs: true, side },
         { texture: (key) => tex(key), missing: missingTexture, hasAlpha: (key) => !!textures.get(key)?.hasAlpha },
       );
       materials.push(material);
@@ -188,7 +193,7 @@ export function buildSkinnedMesh(
       map,
       roughness: 0.85,
       metalness: 0,
-      side: THREE.DoubleSide,
+      side,
       alphaTest: src?.hasAlpha ? 0.5 : 0,
     });
     mat.name = s.textureKey ?? 'untextured';

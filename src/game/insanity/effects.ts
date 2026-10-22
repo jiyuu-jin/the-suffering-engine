@@ -196,7 +196,13 @@ export class ScreenEffects {
 
     const prevTarget = r.getRenderTarget();
     r.setRenderTarget(this.sceneRT);
-    r.render(this.view.scene, this.view.camera);
+    // Enhanced mode: its whole graded frame (linear) is the scene (docs/enhanced.md).
+    if (this.view.enhanced) this.view.enhanced.renderInto();
+    else {
+      r.render(this.view.scene, this.view.camera);
+      // The engine's scene glow over the frame (app/scene-glow.ts) before the screen effects.
+      this.view.glow?.apply(this.sceneRT);
+    }
 
     const [prev, cur] = this.fb;
     this.prevTex.value = prev.texture;

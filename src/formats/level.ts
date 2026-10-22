@@ -60,6 +60,7 @@
 
 import type { SrscFile } from './srsc';
 import { inflateZlib } from './inflate';
+import { faceMaterialIndex, moverCollisionMesh, rayOnlyCollisionMesh, readModelCollision, type CollisionMesh } from './model-collision';
 import { hasSkeleton } from './skeleton';
 import type { LevelData, MeshPart } from './types';
 import type { LoadTimeSet, StaticLighting } from './static-light';
@@ -167,6 +168,13 @@ export interface LevelExtras {
    */
   moverPassUids?: Set<number>;
   /**
+   * How a placed object of the static geometry collides (docs/game-logic.md §14.10): null = not
+   * at all. With this set, LevelData.collision holds the original's collision geometry (the
+   * models' type-7 trees, formats/model-collision.ts, and the floor layers) instead of the drawn
+   * triangles.
+   */
+  collisionOf?: (o: LevelObject) => ObjectCollision | null;
+  /**
    * Visibility zone of each object / floor layer by uid (formats/visgraph.ts buildLevelZoning).
    * Geometry is bucketed per zone so the renderer can hide zones the camera cannot see.
    */
@@ -177,6 +185,16 @@ export interface LevelExtras {
    * geometry is only split when its zone is wider than two cells. Default 48; 0 = off.
    */
   chunkSize?: number;
+}
+
+/** LevelExtras.collisionOf: COLLISION_LAYER bits (src/app/physics.ts) per geometry. */
+export interface ObjectCollision {
+  /** Layers of the geometry movers and rays share (formats/model-collision.ts). */
+  layers: number;
+  /** Layers of the geometry only rays hit (a sphere tree without nodes: the drawn faces). */
+  rayLayers: number;
+  /** AI sight passes the object (template bit 10 / instance 0x1000000). */
+  sightPass: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -500,6 +518,28 @@ interface VisGroup {
 // Start small: a level has a few thousand buckets once split per zone / cell.
 const BUCKET_START = 256;
 
+/** Collision triangles of one surface / layer set (LevelData.collision), unindexed. */
+class CollisionBucket {
+  pos: number[] = [];
+  constructor(
+    readonly textureKey: string | undefined,
+    readonly material: SurfaceMaterial | undefined,
+    readonly layers: number,
+    readonly sightPass: boolean,
+  ) {}
+  tri(P: Float32Array, a: number, b: number, c: number) {
+    for (const i of [a, b, c]) this.pos.push(P[3 * i], P[3 * i + 1], P[3 * i + 2]);
+  }
+  build(): MeshPart {
+    const positions = Float32Array.from(this.pos);
+    const indices = new Uint32Array(positions.length / 3);
+    for (let i = 0; i < indices.length; i++) indices[i] = i;
+    const part: MeshPart = { positions, indices, textureKey: this.textureKey, material: this.material, layers: this.layers };
+    if (this.sightPass) part.sightPass = true;
+    return part;
+  }
+}
+
 class Bucket {
   pos = new Float32Array(3 * BUCKET_START);
   nrm = new Float32Array(3 * BUCKET_START);
@@ -640,6 +680,16 @@ export function parseLevel(lvl: SrscFile, name: string, extras: LevelExtras = {}
     if (pass) moverPass.add(b);
     return b;
   };
+  // Collision geometry (LevelExtras.collisionOf): placed objects' collision models by surface,
+  // layers and sight flag, and the floor layers' buckets as drawn.
+  const collisionBuckets = new Map<string, CollisionBucket>();
+  const collisionBucket = (key: string | undefined, material: SurfaceMaterial | undefined, layers: number, sightPass: boolean) => {
+    const k = `${key ?? ''}|${material?.key ?? ''}|${layers}|${sightPass ? 1 : 0}`;
+    let c = collisionBuckets.get(k);
+    if (!c) collisionBuckets.set(k, (c = new CollisionBucket(key, material, layers, sightPass)));
+    return c;
+  };
+  const landscape = new Set<Bucket>();
   // Visibility group of a uid at an output-space position.
   const zoneOf = extras.zoneOf;
   const chunk = extras.chunkSize ?? 48;
@@ -766,6 +816,37 @@ export function parseLevel(lvl: SrscFile, name: string, extras: LevelExtras = {}
         b.idx[b.ni++] = flip ? c2 : c1;
       }
       b.nv += used.length;
+    }
+
+    // The original's collision geometry of the object (docs/game-logic.md §14.10).
+    const how = solid ? extras.collisionOf?.(o) : null;
+    const mdu = how ? pkgs.get(modelRef.pkg)?.mdu : undefined;
+    if (how && mdu) {
+      const sMax = Math.max(Math.abs(s[0]), Math.abs(s[1]), Math.abs(s[2]));
+      // Box leaves take the material of the model's largest submesh (the surface footsteps and
+      // impacts read) [inferred].
+      const main = m.submeshes.reduce((a, sm) => (sm.indices.length > (a?.indices.length ?? -1) ? sm : a), m.submeshes[0] as (typeof m.submeshes)[number] | undefined);
+      const bySlot = new Map(m.submeshes.map((sm) => [sm.materialIndex, sm]));
+      const emit = (mesh: CollisionMesh | undefined, layers: number) => {
+        if (!mesh || !layers) return;
+        const P = mesh.positions;
+        const world = new Float32Array(P.length);
+        for (let k = 0; k < P.length; k += 3) {
+          const px = P[k], py = P[k + 1], pz = P[k + 2];
+          world[k] = ox + M[0] * px + M[1] * py + M[2] * pz;
+          world[k + 1] = oy + M[3] * px + M[4] * py + M[5] * pz;
+          world[k + 2] = oz + M[6] * px + M[7] * py + M[8] * pz;
+        }
+        for (let t = 0; t < mesh.faces.length; t++) {
+          const fi = mesh.faces[t];
+          const sm = fi >= 0 ? (bySlot.get(faceMaterialIndex(mdu, modelRef.id, fi)) ?? main) : main;
+          collisionBucket(sm?.textureKey, sm?.material, layers, how.sightPass).tri(world, mesh.indices[3 * t], mesh.indices[3 * t + 1], mesh.indices[3 * t + 2]);
+        }
+      };
+      if (readModelCollision(mdu, modelRef.id)) {
+        emit(moverCollisionMesh(mdu, modelRef.id, sMax), how.layers);
+        emit(rayOnlyCollisionMesh(mdu, modelRef.id), how.rayLayers);
+      }
     }
   }
 
@@ -906,6 +987,7 @@ export function parseLevel(lvl: SrscFile, name: string, extras: LevelExtras = {}
       });
       const ok = splat.length > 0 && b.cols === b.x1 - b.x0 + 1;
       const bk = bucket(atlasKey, atlasMat, ok ? splat : undefined, groupOf(L.uid, L.x + (x0 + x1) / 2, L.z + (z0 + z1) / 2));
+      landscape.add(bk);
       emitCells(bk, x0, x1, z0, z1, take, ok
         ? (i, j, out, o) => {
             const g = (j - b.z0) * b.cols + (i - b.x0);
@@ -917,7 +999,9 @@ export function parseLevel(lvl: SrscFile, name: string, extras: LevelExtras = {}
     let rest = false;
     for (let k = 0; k < W * H && !rest; k++) rest = !!cell[k] && !claimed[k];
     if (rest) {
-      emitCells(bucket(atlasKey, atlasMat, undefined, groupOf(L.uid, L.x + W / 2, L.z + H / 2)), 0, W, 0, H, (i, j) => !!cell[j * W + i] && !claimed[j * W + i]);
+      const bk = bucket(atlasKey, atlasMat, undefined, groupOf(L.uid, L.x + W / 2, L.z + H / 2));
+      landscape.add(bk);
+      emitCells(bk, 0, W, 0, H, (i, j) => !!cell[j * W + i] && !claimed[j * W + i]);
     }
   }
 
@@ -925,12 +1009,24 @@ export function parseLevel(lvl: SrscFile, name: string, extras: LevelExtras = {}
     spawn = { position: toOutputSpace(header.camera.position), yaw: 0 };
   }
 
+  const built = new Map<Bucket, MeshPart>();
+  const parts = [...buckets.values()].filter((b) => b.ni > 0).map((b) => {
+    const part = b.build();
+    built.set(b, part);
+    return nonSolid.has(b) ? { ...part, solid: false as const } : moverPass.has(b) ? { ...part, moveSolid: false as const } : part;
+  });
+  // With collisionOf: the floor layers as drawn, and the objects' collision models.
+  const collision = extras.collisionOf
+    ? [
+        ...[...landscape].flatMap((b) => (built.has(b) ? [built.get(b)!] : [])),
+        ...[...collisionBuckets.values()].filter((c) => c.pos.length).map((c) => c.build()),
+      ]
+    : undefined;
+
   return {
     name: header.title ? `${name} — ${header.title}` : name,
-    parts: [...buckets.values()].filter((b) => b.ni > 0).map((b) => {
-      const part = b.build();
-      return nonSolid.has(b) ? { ...part, solid: false } : moverPass.has(b) ? { ...part, moveSolid: false } : part;
-    }),
+    parts,
+    collision,
     spawn,
   };
 }

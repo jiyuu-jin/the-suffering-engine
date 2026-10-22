@@ -293,6 +293,21 @@ async function main() {
         60_000,
         `(() => { const v = window.__view; return !!v && v.renderer.info.render.triangles > 10000; })()`,
       );
+      // Graphics Mode (docs/enhanced.md): the default page is the faithful Original renderer:
+      // no Enhanced module loaded, the engine's 8-bit gamma back buffer (LinearToneMapping: a saturate).
+      await check(
+        'Original graphics mode by default (no Enhanced pipeline)',
+        `/?skipintro&level=${LEVEL}`,
+        60_000,
+        `(() => { const v = window.__view; if (!v || !(v.renderer.info.render.triangles > 10000)) return false; return !window.__enhanced && v.enhanced === null && v.renderer.toneMapping === 1 && window.__lighting && !window.__lighting.legacy; })()`,
+      );
+      // Enhanced mode boots, renders through its pipeline and logs no errors (?gfx= override).
+      await check(
+        'Enhanced graphics mode renders (gfx=enhanced&tier=low)',
+        `/?skipintro&gfx=enhanced&tier=low&level=${LEVEL}`,
+        90_000,
+        `(() => { const v = window.__view; return !!v && !!window.__enhanced && v.enhanced?.tier === 'low' && v.renderer.info.render.triangles > 10000; })()`,
+      );
       await check(
         'player spawns on the ground',
         `/?skipintro&level=${LEVEL}`,

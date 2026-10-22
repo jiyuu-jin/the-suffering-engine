@@ -19,6 +19,10 @@
 //   actor      the actor object itself (an entry of services.actors.list()) for hits on actors
 //              without a level uid (spawned creatures); wins like targetUid
 //   dir        attack direction (unit), used for debris when no attacker position is known
+//   force / minForce   impact force (damage record +0x1c: Missile p28..p31, Melee Weapon p69 x
+//              Attack p7, Radius Damage p2 at the centre to p3 at the edge, falling off as the
+//              amount does): what a character's hit reaction is picked by (actors/hit-react.ts);
+//              absent: the reaction reads the damage
 //
 // Routing: props the world system owns (Breakable, Light Housing, Security Monitor, Phone, ...,
 // see props.ts) take the damage themselves; character targets are forwarded to
@@ -49,6 +53,8 @@ export interface DamageEvent {
   minAmount?: number;
   actor?: unknown;
   dir?: { x: number; y: number; z: number };
+  force?: number;
+  minForce?: number;
 }
 
 /** Damage at distance `d` of a radius event: Radius Damage falloff (inner / min) or linear. */
@@ -60,6 +66,12 @@ export function splashAmount(e: DamageEvent, d: number): number {
   if (d <= inner) return e.amount;
   const min = e.minAmount ?? 0;
   return e.amount - ((d - inner) / Math.max(1e-6, r - inner)) * (e.amount - min);
+}
+
+/** Impact force at distance `d` of a radius event: p2 at the centre to p3 at the edge, as the amount. */
+export function splashForce(e: DamageEvent, d: number): number | undefined {
+  if (e.force === undefined) return undefined;
+  return splashAmount({ ...e, amount: e.force, minAmount: e.minForce ?? e.force }, d);
 }
 
 export interface DamageHit {
@@ -106,11 +118,13 @@ interface ActorLike {
   position: { x: number; y: number; z: number };
   dead?: boolean;
   alive?: boolean;
+  /** A corpse an explosion still throws or gibs (Character p117: actors/gibs.ts). */
+  corpseBlows?: boolean;
 }
 interface ActorsLike {
   list(): readonly ActorLike[];
   get(uid: number): ActorLike | undefined;
-  damage(actor: ActorLike, amount: number, from?: { x: number; y: number; z: number }, by?: unknown, hit?: { point?: { x: number; y: number; z: number }; type?: number }): boolean;
+  damage(actor: ActorLike, amount: number, from?: { x: number; y: number; z: number }, by?: unknown, hit?: { point?: { x: number; y: number; z: number }; type?: number; force?: number }): boolean;
 }
 
 export function createDamageService(props: DamageablePropSet, actors: () => ActorsLike | undefined): DamageService {
@@ -128,13 +142,15 @@ export function createDamageService(props: DamageablePropSet, actors: () => Acto
         const r = props.damage(uid, amount, type, e);
         hits.push({ uid, kind: 'prop', damage: r.damage, killed: r.killed });
       };
-      const hitActor = (a: ActorLike, amount: number) => {
+      const hitActor = (a: ActorLike, amount: number, force = e.force) => {
         const svc = actors();
         if (!svc) return;
         // Attacker: an actor by uid, a hazard uid, else the player.
         const by = typeof e.source === 'number' ? (svc.get(e.source) ?? e.source) : 'player';
         // The hit point and damage type let specials route blows (heads, weak spots: actors/specials).
-        const killed = svc.damage(a, amount, fromOf(e) ?? (by && typeof by === 'object' ? by.position : undefined), by, { point: e.radius ? undefined : e.point, type });
+        // A blast throws a corpse away from its centre (actors/gibs.ts).
+        const from = e.radius && (a.dead || a.alive === false) ? e.point : (fromOf(e) ?? (by && typeof by === 'object' ? by.position : undefined));
+        const killed = svc.damage(a, amount, from, by, { point: e.radius ? undefined : e.point, type, force });
         hits.push({ uid: a.entity?.uid ?? 0, kind: 'actor', damage: amount, killed });
       };
 
@@ -144,10 +160,13 @@ export function createDamageService(props: DamageablePropSet, actors: () => Acto
           if (amount > 0) hitProp(uid, amount);
         }
         for (const a of actors()?.list() ?? []) {
-          if (a.dead || a.alive === false) continue;
+          // Corpses only when the blast still does something to them (thrown, gibbed).
+          if ((a.dead || a.alive === false) && !a.corpseBlows) continue;
           const d = Math.hypot(a.position.x - e.point.x, a.position.y + 0.9 - e.point.y, a.position.z - e.point.z);
           const amount = splashAmount(e, d);
-          if (amount > 0) hitActor(a, amount);
+          // A blast of no damage at that distance still pushes (a hit reaction by its force).
+          const force = splashForce(e, d);
+          if (amount > 0 || (force !== undefined && force > 0 && d < (e.radius ?? 0))) hitActor(a, Math.max(0, amount), force);
         }
         return { hits };
       }

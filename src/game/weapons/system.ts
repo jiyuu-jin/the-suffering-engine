@@ -91,7 +91,7 @@ import { AttachService } from './attach';
 import { buildHeldModel, buildStaticModel, flashCards, type HeldModel } from './models';
 import { weaponFx } from './fx';
 import { NpcWeapons, type NpcLike } from './npc';
-import { THROWN_GRAVITY, ammoDef, ammoLabel, bounceHit, bounceSound, explosionDamage, thrownDefOf, flashlightLampOn, holdsFlashlight, keyOf, projectileDamage, readPlayerWeaponProps, templateClass, tpl, weaponDef, type ProjectileDef, type SurfaceProps, type ThrownDef, type WeaponDef } from './data';
+import { THROWN_GRAVITY, ammoDef, ammoLabel, bounceHit, bounceSound, explosionDamage, thrownDefOf, flashlightLampOn, holdsFlashlight, keyOf, projectileDamage, projectileForce, readPlayerWeaponProps, templateClass, tpl, weaponDef, type ProjectileDef, type SurfaceProps, type ThrownDef, type WeaponDef } from './data';
 import { hudBus } from '../hud/bus';
 import { migrateItemKey, registerSave } from '../save/providers';
 import { byNameOnce } from '../world/inventory';
@@ -140,6 +140,9 @@ interface DamageLike {
     minAmount?: number;
     actor?: unknown;
     dir?: THREE.Vector3Like;
+    /** Impact force (centre / edge for a radius): world/damage.ts. */
+    force?: number;
+    minForce?: number;
   }): { hits: { uid: number; kind: string; damage: number; killed: boolean }[] };
 }
 interface InventoryLike {
@@ -711,7 +714,8 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     hudBus.hitKill = killed;
   };
 
-  const hitActor = (a: ActorLike, amount: number, at: THREE.Vector3, kind?: number, dir?: THREE.Vector3, suite?: ResRef) => {
+  // `force`: the blow's impact force (damage record +0x1c), what the hit reaction reads.
+  const hitActor = (a: ActorLike, amount: number, at: THREE.Vector3, kind?: number, dir?: THREE.Vector3, suite?: ResRef, force?: number) => {
     // Every player hit goes through the world's damage router (services.damage, world/damage.ts:
     // outOnDamaged, kill credit, resistances stay in one place): by uid for placed actors and
     // clones, by the actor object for spawned creatures without one. Only without the router
@@ -720,7 +724,7 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     const dmg = damageSvc();
     let killed: boolean;
     if (dmg) {
-      const r = dmg.apply({ point: at, amount, kind, source: view.player.position.clone(), dir, ...(uid !== undefined && actors()?.get(uid) ? { targetUid: uid } : { actor: a }) });
+      const r = dmg.apply({ point: at, amount, kind, force, source: view.player.position.clone(), dir, ...(uid !== undefined && actors()?.get(uid) ? { targetUid: uid } : { actor: a }) });
       killed = r.hits.some((h) => h.killed);
     } else killed = actors()?.damage(a, amount, view.player.position) ?? false;
     hitMarker(killed);
@@ -837,7 +841,7 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
       const a = actors()?.raycast(o, s.dir, w ? w.distance : step, 'cuttable');
       if (a) {
         s.travelled += a.distance;
-        hitActor(a.actor, projectileDamage(s.def, s.travelled), a.point, s.def.damageType, s.dir, s.weapon.bloodSuite);
+        hitActor(a.actor, projectileDamage(s.def, s.travelled), a.point, s.def.damageType, s.dir, s.weapon.bloodSuite, projectileForce(s.def, s.travelled));
       } else if (w) {
         s.travelled += w.distance;
         const point = new THREE.Vector3(...w.point);
@@ -851,7 +855,7 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
           if (!fx.spawn(wf.gen, point, normal)) puffs(point, false);
           if (wf.decalModel && w.dynamic === undefined) decal(wf.decalModel, point, normal);
         }
-        const r = damageSvc()?.apply({ point, normal, amount: projectileDamage(s.def, s.travelled), kind: s.def.damageType, source: 'player', body: w.dynamic, dir: s.dir });
+        const r = damageSvc()?.apply({ point, normal, amount: projectileDamage(s.def, s.travelled), kind: s.def.damageType, force: projectileForce(s.def, s.travelled), source: 'player', body: w.dynamic, dir: s.dir });
         if (r?.hits.length) hitMarker(r.hits.some((h) => h.killed));
       } else {
         s.pos.addScaledVector(s.dir, step);
@@ -872,10 +876,12 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     min: number;
     max: number;
     type?: number;
+    /** Melee Weapon p69 impact force (x the Attack's p7, RFL 0x100caa7d). */
+    force?: number;
     suite?: ResRef;
     fx: ResRef[];
   }
-  const strikeOf = (def: WeaponDef): Strike => ({ pwp: def.pwp, swing: def.swingSounds, hit: def.hitSounds, min: def.damageMin, max: def.damageMax, type: def.damageType, suite: def.bloodSuite, fx: def.meleeFx });
+  const strikeOf = (def: WeaponDef): Strike => ({ pwp: def.pwp, swing: def.swingSounds, hit: def.hitSounds, min: def.damageMin, max: def.damageMax, type: def.damageType, force: def.force, suite: def.bloodSuite, fx: def.meleeFx });
   const unarmed: Strike = {
     pwp: readPlayerWeaponProps(epk, (tpl(epk, PLAYER_TEMPLATE)?.v[143] as ResRef | undefined) ?? undefined),
     swing: [],
@@ -899,7 +905,7 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     const arm = (atk && clipMarks(pkgs, atk.clip).find((m) => m.param === 100)?.time) ?? dur * 0.4;
     const mult = atk?.mult ?? 1;
     play(st.swing, undefined, 0.8);
-    after(Math.max(0.05, arm), () => meleeHit(st, mult));
+    after(Math.max(0.05, arm), () => meleeHit(st, mult, atk?.forceMult ?? 1));
     const rec = atk?.recovery;
     const myCombo = combo;
     if (rec && b) after(dur, () => {
@@ -912,7 +918,7 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
   };
   let lastStrike: { at: number; unarmed: boolean } | null = null;
 
-  const meleeHit = (st: Strike, mult: number) => {
+  const meleeHit = (st: Strike, mult: number, forceMult = 1) => {
     const p = view.player.position;
     const yaw = view.player.yaw;
     const fwdX = -Math.sin(yaw), fwdZ = -Math.cos(yaw);
@@ -933,7 +939,7 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     if (best) {
       const at = new THREE.Vector3(best.position.x, best.bottom + best.height * 0.6, best.position.z);
       play(st.hit, at);
-      hitActor(best, amount, at, st.type, undefined, st.suite);
+      hitActor(best, amount, at, st.type, undefined, st.suite, st.force !== undefined ? st.force * forceMult : undefined);
       return;
     }
     // Props in reach (breakables): the world's damage router.
@@ -1059,7 +1065,7 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     for (const x of t.explosions.length ? t.explosions : [e]) {
       if (x.maxDamage <= 0 && x.minDamage <= 0) continue;
       if (dmg) {
-        const r = dmg.apply({ point: at, amount: x.maxDamage, minAmount: x.minDamage, innerRadius: 0, radius: x.outerRadius, kind: x.damageType, source: thrownSource(by) });
+        const r = dmg.apply({ point: at, amount: x.maxDamage, minAmount: x.minDamage, innerRadius: 0, radius: x.outerRadius, kind: x.damageType, force: x.maxForce, minForce: x.minForce, source: thrownSource(by) });
         if (r.hits.length) hitMarker(r.hits.some((h) => h.killed));
       } else {
         for (const a of actors()?.list() ?? []) {

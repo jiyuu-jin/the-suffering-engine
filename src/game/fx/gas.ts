@@ -188,6 +188,27 @@ export function resistanceMultiplier(pkgs: EntityPackageSet, values: readonly Pr
   return num(values[5]) !== 0 ? 0 : 1;
 }
 
+/**
+ * Impact-force multiplier of a game object for a damage type, what the hit reaction is picked
+ * by [verified: Character damage 0x100e7390]: the record's copy that becomes the attack stimulus
+ * (0x2001, 0x100e779b) has its force (+0x1c) times the matching Damage Resistance's p2
+ * (0x100e77e9; same lookup 0x100a2950 as the damage, the global list's 2:655 / 2:464 have p2 = 0),
+ * or 0 when none matches and GameObject p6 is set (0x100e7801), else 1. Hermes (p5 = p6 = 1,
+ * 2:779 type 5 / 2:656 type 14 with p1 = 0 and p2 = 1) takes no damage at all but is pushed by
+ * fire and wind.
+ */
+export function resistanceForceMultiplier(pkgs: EntityPackageSet, values: readonly PropValue[], type: number): number {
+  for (const r of refs(values[7])) {
+    const t = readObjectTemplate(pkgs, r);
+    const c = t ? classByHash(t.classHash) : undefined;
+    if (!t || c?.name !== 'Damage Resistance') continue;
+    const v = decodeTemplateProps(c, t);
+    if (num(v[0], -1) === type) return num(v[2], 1);
+  }
+  if (GLOBAL_ZERO.has(type)) return 0;
+  return num(values[6]) !== 0 ? 0 : 1;
+}
+
 /** Something the gas can hurt this frame. */
 export interface GasTarget {
   /** Stable key (accumulators): 'player' or an actor id. */

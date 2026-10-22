@@ -13,11 +13,16 @@
 //                  backend when skinned casters were created / disposed).
 //   textureFiltering 0 Off (point) / 1 Bilinear / 2 Trilinear (+ anisotropy) on level textures.
 //   frameCap       engine addition: 0 off, 30, 60 fps (LevelRenderer.frameCap).
+//   gfxMode        engine addition: 0 Original / 1 Enhanced (docs/enhanced.md). Read once at page
+//                  load (src/app/enhanced/config.ts): a change applies on the next start.
+//   gfxTier        engine addition: Enhanced quality 0 Auto / 1 Low / 2 Medium / 3 High / 4 Ultra,
+//                  applied at once (LevelRenderer.enhanced.setTierSetting).
 // Use Defaults restores GRAPHICS_DEFAULTS.
 
 import type { Settings } from './settings';
 import { engineLights } from '../engine-light';
 import { ShadowMode } from '../../formats/render-data';
+import { TIER_SETTINGS, type TierSetting } from '../enhanced/config';
 
 export const GRAPHICS_DEFAULTS: Record<string, number> = {
   vsync: 0,
@@ -27,6 +32,8 @@ export const GRAPHICS_DEFAULTS: Record<string, number> = {
   shadows: 0,
   textureFiltering: 2,
   frameCap: 0,
+  gfxMode: 0,
+  gfxTier: 0,
 };
 
 /** The parts of LevelRenderer the options touch (see renderer.ts graphics hooks). */
@@ -36,6 +43,8 @@ export interface GraphicsView {
   frameCap: number;
   textureFilter: 'off' | 'bilinear' | 'trilinear';
   setTextureFiltering(mode: 'off' | 'bilinear' | 'trilinear'): void;
+  /** Enhanced graphics mode (null in Original mode). */
+  readonly enhanced?: { setTierSetting(t: TierSetting): void } | null;
 }
 
 export function graphicsValue(s: Settings, id: string): number {
@@ -67,6 +76,7 @@ export function applyGraphics(s: Settings, view: GraphicsView | undefined): void
   view.frameCap = graphicsValue(s, 'frameCap');
   const filter = FILTERS[graphicsValue(s, 'textureFiltering')] ?? 'trilinear';
   if (filter !== view.textureFilter) view.setTextureFiltering(filter);
+  view.enhanced?.setTierSetting(TIER_SETTINGS[graphicsValue(s, 'gfxTier')] ?? 'auto');
 }
 
 let currentRatio = 0;

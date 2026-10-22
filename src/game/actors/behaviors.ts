@@ -546,6 +546,11 @@ export const CHAR = {
   raiseDead: 175,
   idle: 81,
   kill: 82,
+  /**
+   * KillMeleeBehavior: the melee fight a KillEnemies runs (behaviour type 0x4d -> p85 in the
+   * Character slot map 0x100e17c0; CartWheelers map it to p182) [verified].
+   */
+  killMelee: 85,
   projectile: 88,
   /** InvestigateBehavior: reaction to AI noises (guards, prisoners, Slayers, Burrowers). */
   investigate: 97,

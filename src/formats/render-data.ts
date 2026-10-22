@@ -300,6 +300,83 @@ export interface SceneGlow {
 /** Engine defaults of the glow state (0x5ba0a4: 0xffffffff, 2, 0, 0) [verified]. */
 export const DEFAULT_GLOW: SceneGlow = { color: 0xffffff, alpha: 1, blend: 2, flag: 0 };
 
+/**
+ * The level-0 down-sample keeps a frame texel only when its destination alpha (the glow mask,
+ * 0x49c030) is > 5 / 255: the pass state there has ALPHAREF 5, ALPHAFUNC GREATER, and
+ * 0x49a940 enables the test whenever the reference is non-zero [verified, 0x48d264..0x48d28f].
+ * (A non-zero glow flag p3, +0xc, or engine property 0x39 = 2 set the reference to 0 instead:
+ * no test, the whole frame glows. No retail template or setting does.)
+ */
+export const GLOW_MASK_REF = 5 / 255;
+
+/**
+ * Does a material mark the pixels it draws for the scene glow? Each pass whose layer flag 4
+ * (Advanced p5 / Animating p7, the decoder's `depthWrite`) is set draws with STENCILPASS =
+ * REPLACE; an opaque first pass without it with ZERO, every other pass KEEP (0x48fb55..0x48fbc3)
+ * [verified]. So the last marking pass of a material wins: marked when any layer carries the
+ * flag. In the retail data all 120 flagged materials are tinted (unlit): lamp glass and bulbs
+ * (4:1374, 7:1863, 9:5742...), glowing panels, fire and effect cards.
+ */
+export function glowMarked(layers: readonly { blend: number; depthWrite?: boolean }[] | undefined): boolean {
+  return !!layers?.some((l) => l.depthWrite);
+}
+
+/**
+ * Alpha a marking pass needs to touch the stencil: the pass's own alpha test (passAlphaRef with
+ * the mark, so > 32 / 255 for an additive pass), cut-out > 200 / 255; null = every pixel drawn.
+ */
+export function glowMarkAlphaRef(blend: number): number | null {
+  return passAlphaRef(blend, true);
+}
+
+/**
+ * CPU reference of the glow chain (0x48d0a0) on one 256² image of the masked frame: `src` holds
+ * gamma rgb per texel (0..1, already masked: 0 where the mask fails). Returns the accumulation
+ * target C (gamma rgb, 256²) that the composite adds to the back buffer (× colour × alpha).
+ * Per level f (256, 128, 64, 32): B = 0.5 × (src or the previous level's A, halved), A = Σ taps
+ * of B at the pixel offsets of GLOW_TAPS × weight / 255, saturated per tap; C = A0 + up(A1) +
+ * up(A2) + up(A3), saturated per add. Sampling is nearest / box here (the engine filters
+ * bilinearly); the port's GPU version (src/app/scene-glow.ts) samples bilinearly.
+ */
+export function sceneGlowReference(src: Float32Array, size: number = GLOW_LEVELS[0]): Float32Array {
+  const sat = (x: number) => (x > 1 ? 1 : x < 0 ? 0 : x);
+  const C = new Float32Array(size * size * 3);
+  let prev = src, prevSize: number = size;
+  for (let l = 0; l < GLOW_LEVELS.length; l++) {
+    const f = size >> l;
+    // Down-sample: level 0 copies the masked frame, later levels average 2 x 2 of the last A.
+    const B = new Float32Array(f * f * 3);
+    const k = prevSize / f;
+    for (let y = 0; y < f; y++)
+      for (let x = 0; x < f; x++)
+        for (let c = 0; c < 3; c++) {
+          let s = 0;
+          for (let j = 0; j < k; j++) for (let i = 0; i < k; i++) s += prev[((y * k + j) * prevSize + x * k + i) * 3 + c];
+          B[(y * f + x) * 3 + c] = sat((s / (k * k)) * GLOW_DOWNSAMPLE);
+        }
+    // Blur: seven additive taps (a quad drawn at the offset reads B at p - offset).
+    const A = new Float32Array(f * f * 3);
+    for (let y = 0; y < f; y++)
+      for (let x = 0; x < f; x++)
+        for (const t of GLOW_TAPS) {
+          const sx = Math.round(x - t.dx), sy = Math.round(y - t.dy);
+          if (sx < 0 || sy < 0 || sx >= f || sy >= f) continue;
+          for (let c = 0; c < 3; c++) A[(y * f + x) * 3 + c] = sat(A[(y * f + x) * 3 + c] + B[(sy * f + sx) * 3 + c] * (t.weight / 255));
+        }
+    // Accumulate, stretched over the 256² target.
+    const u = size / f;
+    for (let y = 0; y < size; y++)
+      for (let x = 0; x < size; x++)
+        for (let c = 0; c < 3; c++) {
+          const i = (y * size + x) * 3 + c;
+          C[i] = sat(C[i] + A[((Math.floor(y / u)) * f + Math.floor(x / u)) * 3 + c]);
+        }
+    prev = A;
+    prevSize = f;
+  }
+  return C;
+}
+
 export function decodeSceneGlow(v: ArrayLike<unknown>): SceneGlow {
   const n = (x: unknown, d: number) => (typeof x === 'number' && Number.isFinite(x) ? x : d);
   return {
@@ -554,6 +631,26 @@ export function modelCullsBackFaces(headerFlags: number): boolean {
  */
 export function passDepthWrite(firstPassBlend: number): boolean {
   return firstPassBlend === 0 || firstPassBlend === 8;
+}
+
+/** Below this object opacity the draws blend the whole object (0x4933b1 / 0x492c3b: fcomp 0.99). */
+export const TRANSLUCENT_OPACITY = 0.99;
+
+/**
+ * Pass state of a material on an object drawn at `opacity` [verified, 0x48fab0 with the
+ * translucent argument, from 0x4933b1 / 0x493719: opacity < 0.99 or object +0xc bit 7]:
+ * every pass blends (ALPHABLENDENABLE), an opaque or cut-out first pass as mode 1 with the
+ * > 2 / 255 alpha test; ZWRITEENABLE still follows the first pass's own mode (0x48fc70 reads the
+ * layer's mode, not the substituted one), so a fading figure whose first pass is opaque keeps
+ * writing depth and its farther faces behind nearer ones are not drawn over. At full opacity
+ * the material's own state (`base`) applies.
+ */
+export function translucentPassState(
+  base: { transparent: boolean; depthWrite: boolean; alphaTest: number },
+  opacity: number,
+): { transparent: boolean; depthWrite: boolean; alphaTest: number } {
+  if (opacity >= TRANSLUCENT_OPACITY || base.transparent) return { ...base };
+  return { transparent: true, depthWrite: base.depthWrite, alphaTest: Math.max(base.alphaTest, BLEND_ALPHA_REF) };
 }
 
 /**

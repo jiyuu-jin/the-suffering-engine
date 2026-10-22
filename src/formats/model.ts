@@ -579,6 +579,11 @@ export interface RiotModel {
   uvs: Float32Array;
   submeshes: ModelSubmesh[];
   materials: ResRef[];
+  /**
+   * The header entry's flag word (first u32 of .mdu type 0), when read: bit 23 makes the
+   * engine cull back faces (render-data.ts modelCullsBackFaces) [verified].
+   */
+  headerFlags?: number;
 }
 
 /**

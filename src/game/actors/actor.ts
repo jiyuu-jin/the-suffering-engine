@@ -100,6 +100,8 @@ export interface RangedProfile {
   aim?: { bones: number[]; split: number; origin: number; min: number; max: number };
   /** Damage per shot (Missile p28 x projectiles per shot) [data]. */
   damage: number;
+  /** Damage type of the shot (Missile p32: 1 bullets, 13 pellets) [data]. */
+  type?: number;
   /** Projectile speed (m/s, Missile p1); slow ones (thrown needles) fly visibly. */
   speed: number;
   /** Ranged Weapon p75 spread (degrees). */
@@ -166,6 +168,11 @@ export interface ActorProfile {
   hostileRetry?: [number, number];
   /** Melee Weapons on their bones (p51 / p52; npc-melee.ts). */
   melee?: NpcMeleeWeapon[];
+  /**
+   * KillMeleeBehavior p2..p3 (Character p85): seconds the melee fight waits after each attack
+   * before the next (child-finished handler 0x1007cf10) [verified].
+   */
+  meleePause?: [number, number];
   /** Killjoy: his FleeBehavior (p77) and KilljoyRaiseDeadBehavior (p175), run by KilljoyRoot. */
   flee?: Extract<Behavior, { kind: 'flee' }>;
   raiseDead?: Extract<Behavior, { kind: 'raiseDead' }>;
@@ -180,6 +187,22 @@ export interface ActorBlow {
    * damage over time applies its per-second rate x the frame time every frame.
    */
   frameAmount?: number;
+  /**
+   * The blow's impact force after the resistance's force factor (record +0x1c, the amount the
+   * hit reaction is picked by: hit-react.ts header), when the source gives one. A blow of no
+   * damage still reacts by it (Hermes and fire).
+   */
+  react?: number;
+}
+
+/**
+ * Where a character's blow or shot landed on its victim and its damage type: the blade's
+ * contact (npc-melee.ts sweepSpheres), the shot's point on the target. Part Caps read the
+ * struck hit sphere from it (dismember.ts).
+ */
+export interface NpcBlowHit {
+  point?: THREE.Vector3Like;
+  type?: number;
 }
 
 /** What an actor needs from the outside world each frame. */
@@ -197,8 +220,16 @@ export interface ActorEnv {
   time: number;
   actors: readonly Actor[];
   behaviors?: BehaviorLibrary;
-  damagePlayer(amount: number, from: Actor): void;
-  damageActor(target: Actor, amount: number, from: Actor): void;
+  /** `hit`: where the blow landed and its damage type (Part Caps: dismember.ts). */
+  damagePlayer(amount: number, from: Actor, hit?: NpcBlowHit): void;
+  damageActor(target: Actor, amount: number, from: Actor, hit?: NpcBlowHit): void;
+  /** A corpse brought back (Killjoy's RaiseDead): its p3 Part Caps grow back (dismember.ts). */
+  resurrected?(a: Actor): void;
+  /**
+   * HitReactBehavior's knockdown (0x100ef7a8): a body that would bleed out while its get-up clip
+   * (s) plays dies on the floor instead. True when it died.
+   */
+  bleedsOut?(a: Actor, getUpLength: number): boolean;
   /**
    * A level object a KillEnemiesBehavior lists in p3 (explicit targets) that is not a character:
    * where it is while it stands (bounds centre, bottom, horizontal radius) and its GameObject
@@ -1280,6 +1311,24 @@ export class Actor {
     if (this.state !== 'fall' && this.state !== 'dead') this.enterState('idle');
   }
 
+  /**
+   * An explosion throws the corpse (gibs.ts, the p112 BouncingObject): clip `clip` once, the body
+   * turned to face along `vel` (the BouncingObject's -Z) and launched at it (m/s); the motor
+   * flies it, keeping its speed in the air, and the dead update lets it fall and land.
+   */
+  throwCorpse(clip: number, vel: THREE.Vector3Like) {
+    if (this.state !== 'dead') return;
+    this.collapse = 1;
+    if (clip >= 0) this.play(clip, { loop: false, fade: 0.05 });
+    this.yaw = Math.atan2(-vel.x, -vel.z);
+    this.ch.root.rotation.set(0, this.yaw, 0, 'YXZ');
+    this.motor.cfg.airAccel = 0;
+    this.motor.velocity.x = vel.x;
+    this.motor.velocity.y = vel.y;
+    this.motor.velocity.z = vel.z;
+    this.motor.onGround = false;
+  }
+
   /** Corpse placed at start: dead, showing the end of its death clip, no messages. */
   makeCorpse(env: ActorEnv, b: Extract<Behavior, { kind: 'death' }>) {
     const clips = b.clips.map((r) => env.clip(this, r)).filter((i) => i >= 0);
@@ -1363,10 +1412,13 @@ export class Actor {
       this.die(env);
       return true;
     }
-    this.fleeHit(amount, env);
-    this.bark(env, this.barks?.hurt ?? [], this.barks?.hurtChance ?? 0);
+    if (amount > 0) {
+      this.fleeHit(amount, env);
+      this.bark(env, this.barks?.hurt ?? [], this.barks?.hurtChance ?? 0);
+    }
     if (posed) return false;
-    const stimulus = blow?.frameAmount ?? amount;
+    // The hit reaction reads the blow's impact force when the source gives one (hit-react.ts).
+    const stimulus = blow?.react ?? blow?.frameAmount ?? amount;
     if (this.ceiling) {
       if (!this.crawler) this.startFall();
       else if (stimulus > (this.blowsTaken?.amount ?? -1) || blow?.special) this.blowsTaken = { amount: Math.max(stimulus, this.blowsTaken?.amount ?? 0), special: blow?.special ?? this.blowsTaken?.special };
@@ -1468,6 +1520,9 @@ export class Actor {
       this.anim = -1;
       this.action = undefined;
     }
+    // HitReactBehavior p11 to the character's links as it starts (0x100ebfa0) [verified]: 8b's
+    // Hermes copies send Triggered to the stove Relay 1f0d.
+    if (d.message) this.fireLinks(env, d.message);
   }
 
   /** A blow while knocked down: the down time starts again (p23 when it has one) [inferred]. */
@@ -1494,6 +1549,8 @@ export class Actor {
       }
       r.steps.shift();
       const up = env.clip(this, k.getUp);
+      // A bleeder that would bleed out while getting up dies down here (0x100ef7a8).
+      if (up >= 0 && env.bleedsOut?.(this, this.clipLen(up))) return true;
       if (up >= 0) this.play(up, { loop: false, fade: 0.15 });
       return true;
     }
@@ -1516,6 +1573,7 @@ export class Actor {
     r.steps.shift();
     const up = env.clip(this, k.getUp);
     if (up < 0) return r.steps.length > 0;
+    if (env.bleedsOut?.(this, this.clipLen(up))) return true;
     this.play(up, { loop: false, fade: 0.15 });
     return true;
   }
@@ -2190,8 +2248,9 @@ export class Actor {
    *     failed. Without the clip playing and within p3 m of the corpse, the clip starts again.
    * Port: the Flee is runFlee with his p77 (10:568 never completes: p2 / p10 / p13 / p15 are 0);
    * the LookAt turns the body to the player while the flee stands; a MoveTo that makes no way
-   * for 3 s has failed (as runFlee's). The original also re-attaches the corpse's broken body
-   * parts as the clip plays (0x10118930 / 0x101189e0) [not ported].
+   * for 3 s has failed (as runFlee's). The resurrection itself grows back the corpse's Part
+   * Caps with p3 set and stops its bleed (0x100eda37 -> 0x10118930 / 0x101189e0;
+   * env.resurrected -> dismember.ts regrow).
    */
   private runKilljoy(b: Extract<Behavior, { kind: 'killjoy' }>, dt: number, env: ActorEnv) {
     const st = (this.b.kj ??= { list: [...b.corpses] });
@@ -2230,7 +2289,7 @@ export class Actor {
       this.faceTowards(c.position.x - this.position.x, c.position.z - this.position.z, dt, TURN_RATE);
       const playing = r.clip >= 0 && this.state === 'act' && this.anim === r.clip;
       if (playing && this.actionDone()) {
-        c.resurrect?.(env);
+        if (c.resurrect?.(env)) env.resurrected?.(c);
         return back();
       }
       if (!playing) {
@@ -2239,7 +2298,7 @@ export class Actor {
         if (r.clip < 0 || near) {
           const i = env.clip(this, rd?.clip);
           if (i < 0) {
-            c.resurrect?.(env);
+            if (c.resurrect?.(env)) env.resurrected?.(c);
             return back();
           }
           r.clip = i;
@@ -2571,7 +2630,10 @@ export class Actor {
         if (t && this.targetAlive(t, env) && this.canHit(env, a, t)) this.hitTarget(env, t, a.damage);
       }
     if (this.actionDone() || this.stateTime > 4) {
-      if (this.meleePause) this.attackDelay = rand(this.meleePause[0], this.meleePause[1]);
+      // The KillMelee's wait after an attack: a special's own KillMelee (the CartWheeler's p182)
+      // or the Character's p85 KillMeleeBehavior (guards: 10:578, 0.5..1.5 s).
+      const pause = this.meleePause ?? this.profile.meleePause;
+      if (pause) this.attackDelay = rand(pause[0], pause[1]);
       this.enterState('chase');
     }
   }
@@ -2737,17 +2799,21 @@ export class Actor {
         if (sightBlocked(env.world, pos.x, p[1], pos.z, p[0], p[1], p[2], 0.02)) continue;
         const onTarget = !this.target || (v === 'player' ? !!this.target.player : this.target.actor === v);
         const dmg = npcBlowDamage(win.weapon, a.scale ?? 1, onTarget);
-        if (v === 'player') env.damagePlayer(dmg, this);
-        else env.damageActor(v, dmg, this);
+        // The contact and the weapon's p70 type go with the blow: Part Caps cut by them.
+        const hit: NpcBlowHit = { point: { x: p[0], y: p[1], z: p[2] }, type: win.weapon.type };
+        if (v === 'player') env.damagePlayer(dmg, this, hit);
+        else env.damageActor(v, dmg, this, hit);
       }
     }
   }
 
   /** A blow or shot lands on the target. */
-  private hitTarget(env: ActorEnv, t: Target, damage: number) {
-    if (t.player) env.damagePlayer(damage, this);
+  private hitTarget(env: ActorEnv, t: Target, damage: number, hit?: NpcBlowHit) {
+    // Without a contact (a blow with no weapon spheres): the aim point stands for it [port].
+    const h = hit ?? { point: this.aimPoint(env, t) };
+    if (t.player) env.damagePlayer(damage, this, h);
     else if (t.prop !== undefined) env.damageProp?.(t.prop, damage, this, this.aimPoint(env, t));
-    else env.damageActor(t.actor!, damage, this);
+    else env.damageActor(t.actor!, damage, this, h);
   }
 
   /** Projectiles in flight (slow missiles): they hit what is still near the aim point on arrival. */
@@ -2761,7 +2827,7 @@ export class Actor {
       if (!this.targetAlive(s.target, env)) continue;
       const p = this.aimPoint(env, s.target);
       if (Math.hypot(p.x - s.at.x, p.z - s.at.z) > 0.9) continue; // dodged
-      this.hitTarget(env, s.target, s.damage);
+      this.hitTarget(env, s.target, s.damage, { point: p, type: this.profile.ranged?.type });
     }
   }
 
@@ -2794,10 +2860,16 @@ export class Actor {
     // [verified]; whether the deflected ray meets the body is the port's box test (its radius
     // across, its half height up). Thrown missiles keep the port's distance rule [guess].
     let hit: boolean;
+    // Where the round meets the target (the deflected ray at the aim point's distance): the
+    // struck hit sphere for the Part Caps [port].
+    let at: THREE.Vector3Like = aim;
     if (r.speed > 0 && r.speed < 60) hit = clear && Math.random() < Math.max(0.25, 0.9 - d * (0.02 + r.spread * 0.002));
     else {
       const half = t.player ? 0.9 : t.actor ? t.actor.height * 0.5 : 0.5;
-      hit = clear && spreadShotHits(r.spread * (this.shot?.attack.spreadScale ?? 1), Math.hypot(d, aim.y - muzzle.y), this.targetRadius(t, env), half, Math.random(), Math.random());
+      const cone = r.spread * (this.shot?.attack.spreadScale ?? 1), dist = Math.hypot(d, aim.y - muzzle.y);
+      const u1 = Math.random(), u2 = Math.random();
+      hit = clear && spreadShotHits(cone, dist, this.targetRadius(t, env), half, u1, u2);
+      at = spreadShotPoint(muzzle, aim, cone, dist, u1, u2);
     }
     const end = hit ? aim : { x: aim.x + (Math.random() - 0.5) * 1.2, y: aim.y + (Math.random() - 0.3) * 0.8, z: aim.z + (Math.random() - 0.5) * 1.2 };
     const slow = r.speed > 0 && r.speed < 60;
@@ -2807,7 +2879,7 @@ export class Actor {
       this.inFlight.push({ t: env.time + Math.hypot(d, aim.y - muzzle.y) / r.speed, target: t, at: { x: p.x, y: p.y, z: p.z }, damage: r.damage });
       return;
     }
-    this.hitTarget(env, t, r.damage);
+    this.hitTarget(env, t, r.damage, { point: at, type: r.type });
   }
 
   // --- doors -----------------------------------------------------------------
@@ -3724,6 +3796,20 @@ export function spreadShotHits(coneDeg: number, dist: number, radius: number, ha
   const off = dist * Math.tan((u1 * coneDeg * Math.PI) / 180);
   const roll = u2 * 2 * Math.PI;
   return Math.abs(off * Math.cos(roll)) <= radius && Math.abs(off * Math.sin(roll)) <= half;
+}
+
+/**
+ * Where that deflected round passes the aim point's distance (the same u1 / u2 as
+ * spreadShotHits): the aim point moved sideways by off cos(roll) and up by off sin(roll).
+ */
+export function spreadShotPoint(muzzle: THREE.Vector3Like, aim: THREE.Vector3Like, coneDeg: number, dist: number, u1: number, u2: number): THREE.Vector3Like {
+  const off = dist * Math.tan((u1 * coneDeg * Math.PI) / 180);
+  const roll = u2 * 2 * Math.PI;
+  const dx = aim.x - muzzle.x, dz = aim.z - muzzle.z;
+  const l = Math.hypot(dx, dz) || 1;
+  const sx = -dz / l, sz = dx / l;
+  const h = off * Math.cos(roll), v = off * Math.sin(roll);
+  return { x: aim.x + sx * h, y: aim.y + v, z: aim.z + sz * h };
 }
 
 /** Horizontal root velocity of a clip (m/s, character space) when it travels noticeably. */

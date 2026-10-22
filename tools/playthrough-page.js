@@ -425,6 +425,8 @@
       // kind).
       const onAlly = !!a.target?.actor?.alive && COMPANIONS.includes(a.target.actor.entity?.uid) && ['chase', 'attack', 'shoot'].includes(a.state);
       if (!(a.hostile || a.provoked || onAlly) || isCompanion(a)) continue;
+      // A step's `spare` list: characters a player leaves alone (the Prelude's fleeing guards).
+      if ((window.__ptSpare ?? []).includes(a.entity?.uid)) continue;
       if (area && Math.hypot(a.motor.position.x - area[0], a.motor.position.z - area[1]) > area[2]) continue;
       if ((ap.memo?.get(a.id)?.until ?? 0) > performance.now()) continue;
       // Allies (the escort guard) fight creatures, not the player.

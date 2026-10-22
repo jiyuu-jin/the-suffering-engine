@@ -376,7 +376,9 @@ restores the engine defaults): Resolution = render scale of the window (50 / 67 
 the value text shows the render size); Pixel Shaders = post effects (insanity screen effects)
 on / off; Gamma = an sRGB gamma ramp over the game view and the menus; Texture Filtering =
 point / bilinear / trilinear + anisotropy on the level textures; an engine-added Frame Rate
-Limit row (off / 30 / 60). Vertical Sync is stored only (browsers always sync to the display).
+Limit row (off / 30 / 60), and the engine-added Graphics Mode (Original / Enhanced, applied on the
+next start) and Enhanced Quality (Auto / Low / Medium / High / Ultra, applied at once) rows
+(docs/enhanced.md). Vertical Sync is stored only (browsers always sync to the display).
 Shadows are stored only: flashlight shadows of skinned characters break three r186's WebGPU
 backend (destroyed buffers when casters are created / disposed or a shadow is turned off).
 Gameplay: turn and pitch sensitivity multipliers, Invert Pitch (`PlayerController.invertY`),

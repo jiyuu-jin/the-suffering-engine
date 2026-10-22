@@ -19,7 +19,9 @@
 //                       reaching up to p2 units, each leaving a splat where it lands [inferred]
 //   Water Ripple        model grown from p2 to p1 times its size over p3 s, fading; p4 repeats
 //                       [inferred]
-//   Electric Arc        p1 bolt length (model units, clamped), crackling for ~0.4 s [inferred]
+//   Electric Arc        a bare bolt template: the arc model crackling between a point and a few
+//                       around it for its longest life (electric-arc.ts burst) [port]; Electric Arc
+//                       Effects on targets are electric-arc.ts (ElectricArcs, decoded)
 //   Particle Smoke      p0 puffs (<= 24) of the p19 flipbook (frame by age), life p4..p5 ms,
 //                       colour p16, size p13 / 10 m [inferred]
 
@@ -38,6 +40,7 @@ import type { CameraShaker } from './shake';
 import { CameraShaker as Shaker } from './shake';
 import type { Surfaces } from './surfaces';
 import { refKey, refsOf } from './surfaces';
+import { arcTemplateFrom, ElectricArcs } from './electric-arc';
 
 const num = (v: PropValue | undefined, d = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
 const isRef = (v: unknown): v is ResRef => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -83,12 +86,14 @@ export class Effects {
   private lightBusy: number[] = [];
   private looks = new Map<string, Look | null>();
   readonly fires: FireObj[] = [];
-  private readonly arcMat = new THREE.LineBasicNodeMaterial({ color: 0xbfe0ff, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+  /** Electric Arc Effects on their targets and template-free bursts (electric-arc.ts). */
+  readonly arcs: ElectricArcs;
   private bloodDrops: { p: THREE.Vector3; v: THREE.Vector3; life: number; look: Look | null; size: number }[] = [];
   private readonly counts = new Map<string, number>();
 
   constructor(private readonly env: EffectsEnv) {
     this.group.name = 'fx-effects';
+    this.arcs = new ElectricArcs({ pkgs: env.fx.env.packages, dyn: env.dyn, texture: (r) => env.fx.texture(r), camera: env.camera, group: this.group, log: env.log });
     // Fixed light pool: adding / removing lights recompiles every lit material.
     for (let i = 0; i < 4; i++) {
       const l = new THREE.PointLight(0xffffff, 0, 6, 1.6);
@@ -99,7 +104,7 @@ export class Effects {
   }
 
   stats() {
-    return { timed: this.timed.length, fires: this.fires.filter((f) => f.lit).length, drops: this.bloodDrops.length, spawned: Object.fromEntries(this.counts) };
+    return { timed: this.timed.length, fires: this.fires.filter((f) => f.lit).length, drops: this.bloodDrops.length, arcs: this.arcs.count, spawned: Object.fromEntries(this.counts) };
   }
 
   private count(cls: string) {
@@ -213,9 +218,12 @@ export class Effects {
       case 'Water Ripple':
         this.ripple(t.model, v, M);
         break;
-      case 'Electric Arc':
-        this.arc(at, num(v[1], 1.5), 0.4);
+      case 'Electric Arc': {
+        // A bare bolt template spawned at a point (no target to put it on) [port].
+        const arc = arcTemplateFrom(v, t.model);
+        this.arcs.burst(at, arc, arc.life[1]);
         break;
+      }
       case 'Particle Smoke':
         this.smoke(v, at);
         break;
@@ -322,40 +330,14 @@ export class Effects {
     }, () => this.env.dyn.remove(d.uid));
   }
 
-  /** Crackling bolts from a point (Electric Arc) - jagged lines re-drawn every other frame. */
+  /**
+   * Crackling bolts at a point for `seconds` (template-free 'electric' hits: Horace's shots): the
+   * retail bolt of the Lightning projectile's impact effect (3:2209 -> Electric Arc 3:2210) between
+   * the point and a few points around it [port: the original puts that effect on the target hit].
+   */
   arc(at: THREE.Vector3, length: number, seconds: number) {
-    const len = Math.min(4, Math.max(0.4, length));
-    const N = 10, bolts = 3;
-    const lines: { g: THREE.BufferGeometry; pos: Float32Array; dir: THREE.Vector3; mat: THREE.LineBasicNodeMaterial; line: THREE.Line }[] = [];
-    for (let b = 0; b < bolts; b++) {
-      const pos = new Float32Array(N * 3);
-      const g = new THREE.BufferGeometry();
-      g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-      const mat = this.arcMat.clone();
-      const line = new THREE.Line(g, mat);
-      line.frustumCulled = false;
-      this.group.add(line);
-      lines.push({ g, pos, dir: new THREE.Vector3().randomDirection(), mat, line });
-    }
+    this.arcs.burst(at, { pkg: 3, id: 2210 }, seconds, Math.max(0.3, length / 1.5));
     this.flash(at, 0x9fc8ff, 5, seconds, 8);
-    let tick = 0;
-    this.add(seconds, (k) => {
-      if (tick++ % 2) return;
-      for (const L of lines) {
-        if (Math.random() < 0.3) L.dir.randomDirection();
-        for (let i = 0; i < N; i++) {
-          const t = i / (N - 1);
-          const j = i === 0 ? 0 : len * 0.12;
-          L.pos[3 * i] = at.x + L.dir.x * len * t + (Math.random() - 0.5) * j;
-          L.pos[3 * i + 1] = at.y + L.dir.y * len * t + (Math.random() - 0.5) * j;
-          L.pos[3 * i + 2] = at.z + L.dir.z * len * t + (Math.random() - 0.5) * j;
-        }
-        L.g.attributes.position.needsUpdate = true;
-        L.mat.opacity = (0.5 + 0.5 * Math.random()) * (1 - k);
-      }
-    }, () => {
-      for (const L of lines) (L.line.removeFromParent(), L.g.dispose(), L.mat.dispose());
-    });
   }
 
   /** Template-free sparks: short additive streaks thrown off a surface with gravity. */
@@ -448,6 +430,7 @@ export class Effects {
       }
     }
     this.updateDrops(dt);
+    this.arcs.update(dt);
     // Fires: scale ramps, camera facing, damage, the nearest two burning ones get a light.
     const cam = this.env.camera.position;
     const player = this.env.player();
@@ -511,7 +494,7 @@ export class Effects {
     this.timed = [];
     for (const f of this.fires) this.env.dyn.remove(f.d.uid);
     this.fires.length = 0;
-    this.arcMat.dispose();
+    this.arcs.dispose();
     this.group.removeFromParent();
   }
 }

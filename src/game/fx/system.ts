@@ -39,6 +39,9 @@
 //   effect(kind, point, normal?, { scale?, dir? })   template-free effects:
 //                                  'sparks' | 'dust' | 'smoke' | 'blood' | 'electric' | 'flash' | 'shake'
 //   muzzleFlash(ref, parent, local?)   Muzzle Flash template on an object (weapon bone).
+//   arcEffect(ref, target)        put an Electric Arc Effect (Damage Action Object p8) on a target:
+//                                  its bones or the objects it links to (electric-arc.ts ArcTarget);
+//                                  returns a handle (alive, stop()) or undefined when it cannot run.
 //   shake({ a, b, time, fade?, inner?, outer?, at? })   camera shake (Camera Shake p0..p5 units)
 //   surfaceAt(hitOrPoint)         { type: Material Type "pkg:id" | null, material? }
 //   footstep(kind, feet, effects) play FootStep kind 0..5 (Light, Heavy, Scuff, Sneak, Land,
@@ -71,6 +74,7 @@ import { Surfaces, refKey, refsOf, waterSurfaces, type SurfaceInfo } from './sur
 import { Decals } from './decals';
 import { CameraShaker, type ShakeParams } from './shake';
 import { Effects } from './effects';
+import type { ArcHandle, ArcTarget } from './electric-arc';
 import { EnvironmentReverb, reverbParams } from './reverb';
 import { AmbientZones } from './ambient';
 import { FlyingSounds } from './flying';
@@ -118,6 +122,7 @@ export interface FxService {
   decal(look: { model?: ResRef; material?: ResRef }, point: V3, normal: V3, size: number, life?: number): boolean;
   effect(kind: FxKind, point: V3, normal?: V3, opts?: { scale?: number; dir?: V3 }): void;
   muzzleFlash(ref: ResRef, parent?: THREE.Object3D, local?: THREE.Matrix4): void;
+  arcEffect(ref: ResRef, target: ArcTarget): ArcHandle | undefined;
   shake(p: Partial<ShakeParams> & { a: number; b: number; time: number }): void;
   surfaceAt(hitOrPoint: Pick<RayHit, 'part' | 'dynamic' | 'point'> | V3): SurfaceInfo;
   footstep(kind: number, feet: V3, effects: PropValue | undefined): void;
@@ -165,7 +170,8 @@ export async function createFxSystem(ctx: GameContext): Promise<GameSystem> {
   };
 
   const surfaces = new Surfaces(wfx.env.packages, ctx.loaded.level, collision, dyn);
-  const decals = new Decals(collision, (p, parts) => {
+  // Decals lie on the drawn triangles, not the collision models (docs/game-logic.md §14.10).
+  const decals = new Decals(() => view.drawn ?? view.collision, (p, parts) => {
     const c = surfaces.lightAt(p, parts, bakedGain.value as number);
     return new THREE.Color(c.r, c.g, c.b);
   });
@@ -550,6 +556,7 @@ export async function createFxSystem(ctx: GameContext): Promise<GameSystem> {
           break;
       }
     },
+    arcEffect: (ref, target) => effects.arcs.start(ref, target),
     muzzleFlash: (ref, parent, local) => {
       const t = surfaces.template(ref);
       if (t?.cls === 'Muzzle Flash') effects.muzzleFlash(t.values, local ?? new THREE.Matrix4(), parent);

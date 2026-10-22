@@ -6,7 +6,8 @@
 //
 // --tmp holds the browser profile and the dev server's config / cache (deleted at exit);
 // --level starts that level through the developer deep link (no menus, no carried inventory)
-// and runs its steps only. --difficulty picks the New Game difficulty (0 Easy .. 3 Impossible,
+// and runs its steps only (--level 0, the Prelude: New Game through the menus with the profile's
+// prelude unlock, as after Game Finished; --direct deep-links it). --difficulty picks the New Game difficulty (0 Easy .. 3 Impossible,
 // default 1 Medium) with the arrow keys, or passes it to the deep link.
 //
 // Boot page -> start gate (mouse click) -> logo movie (Esc) -> copyright -> main menu (Enter) ->
@@ -65,6 +66,8 @@ const WATCH = Number(opt('--watch', '15'));
 // --level 1b: start that level through the developer deep link (no menus) and run its steps.
 const startLevel = opt('--level');
 const DIFFICULTY = Math.max(0, Math.min(3, Number(opt('--difficulty', '1')) | 0));
+// --query 'gfx=enhanced&tier=high': extra URL parameters for every page load (docs/enhanced.md).
+const EXTRA_QUERY = opt('--query', '');
 const DIFFICULTY_NAMES = ['Easy', 'Medium', 'Hard', 'Impossible'];
 // --deaths: steps after which the player dies on purpose (checkpoint restore check). Each point
 // follows a checkpoint by a few steps: 1a after the first CartWheeler fight and in the gas
@@ -256,7 +259,7 @@ const ROUTE = [
     shot: true,
   },
   { id: '1a.junction', obj: 'back to the junction (the Winded Guard trigger)', do: 'walk', to: [435, 97.7, 536] },
-  { id: '1a.gaurd', obj: 'watch the trapped guard (Gaurd scene)', do: 'look', at: [428.1, 99.3, 538.1], then: { cine: true }, expect: { played: [0x6045, 0x6206] }, shot: true },
+  { id: '1a.gaurd', obj: 'watch the trapped guard (Gaurd scene)', do: 'look', at: [428.1, 99.3, 538.1], then: { cine: true }, expect: { played: [0x6045, 0x6206], aliveAtStart: [[0x6206, 0x609f]] }, shot: true },
   {
     // Shortcut (services.actors.damage, 15 blows over ~3 s): a body killed by a script stays dead
     // when hit - no hit reaction, no fighting back (docs/game-logic.md §15.12).
@@ -315,6 +318,22 @@ const ROUTE = [
   { id: '1a.crates', obj: 'smash the crates blocking the way west', do: 'break', uids: [0x8153, 0x80eb, 0x80ee], from: [424.3, 88.7, 539.5], expect: { destroyed: [0x8153] } },
   { id: '1a.cp2', obj: 'second checkpoint (lower west corridor)', do: 'walk', to: [396, 88.7, 535.5], then: { wait: 2 }, expect: { checkpoint: 0x8395 } },
   { id: '1a.north', obj: 'north along the lower corridor into the lobby', do: 'walk', to: [395.7, 88.7, 488] },
+  // The lobby's metal detector (docs/re/audio.md §12): walking through gate Detector 8956 ->
+  // Relay 813e -> Sound Effect 8147, the alarm 3:297 repeating until Count Down 814b stops it
+  // 15 s later. Heard means a live voice in the mixer, not only a play call: the lobby sparks'
+  // generator 81f2 used to start a looping hum every 0.1 s, the 48 voices filled up and the alarm
+  // was dropped (Object Generator p23, src/game/world/fx.ts). Before the booth statue (Relay 895b
+  // destroys the gates).
+  {
+    id: '1a.metal-detector',
+    obj: 'walk west through the metal detector gate: the alarm sounds',
+    do: 'stroll',
+    gait: 'walk',
+    turn: 3.5,
+    via: [[386, 88.7, 494.8], [378, 88.7, 494.8], [372, 88.7, 494.8]],
+    settle: 1,
+    expect: { heard: [[0x8147, '3:297']] },
+  },
   { id: '1a.lobby-health', obj: 'Xombium bottles in the lobby', do: 'pick', uid: 0x77c7, optional: true },
   { id: '1a.statue', obj: 'push a lobby statue off its pillar ...', do: 'push', uid: 0x75d5, stand: [389.5, 88.66, 488.4], dir: [0, -1], secs: 2.5 },
   {
@@ -630,7 +649,10 @@ const ROUTE = [
   // The guard desk button 208d swaps the doors 1e0f / 5a0; the barricade 2f94 (13 health) blocks
   // the doorway behind 5a0.
   { id: '3b.desk', obj: 'the guard desk button opens the east door', do: 'use', uid: 0x208d, then: { wait: 2 }, expect: { open: [0x5a0] } },
-  { id: '3b.barricade', obj: 'smash the barricade in the doorway', do: 'break', from: [396.6, 98.16, 286.5], uids: [0x2f94], expect: { destroyed: [0x2f94] } },
+  // Both crates: with 2f94 gone the barrel 2f93 lying on 2f92 / 2f95 still overhangs the gap at
+  // head height (their collision boxes, docs/game-logic.md §14.10); breaking 2f95 brings 2f92 and
+  // 2f93 down (its p21 message 11 to its links).
+  { id: '3b.barricade', obj: 'smash the barricade in the doorway', do: 'break', from: [396.6, 98.16, 286.5], uids: [0x2f94, 0x2f95], expect: { destroyed: [0x2f94, 0x2f95] } },
   { id: '3b.cp3', obj: 'east into the cell block: checkpoint', do: 'walk', to: [404, 98.2, 285.4], then: { fight: 30 }, expect: { checkpoint: 0x2d77 } },
   // The lever 13d5 opens the eight cells; cell 1ee has a hole down to the basement.
   { id: '3b.cells', obj: 'the cell lever opens the cells', do: 'use', uid: 0x13d5, then: { wait: 3 }, expect: { open: [0x1ee] } },
@@ -1243,9 +1265,28 @@ const ROUTE = [
   // (Door1 / Door2 25e4 / 25ef), its collision box SwitchBus 2a15 lands in the gateway; at its end
   // Relays 1da0 (Clamber Points 26e0 / 26e1 / 26e3 on the wagon enabled) and 28df (the ambush
   // cloners Off), 29db (the gate's blockers 29d3.. Off).
-  // Run for the wagon: the ambush only ends with it (Relay 28df turns the cloners Off).
-  { id: '8a.ambush', obj: 'run to the paddy wagon (Detectors 2914 / 28fc: the ambush starts, the wagon can be hit)', do: 'walk', to: [376.5, 97.7, 556], tol: 0.8, run: true },
-  { id: '8a.wagon', obj: 'shoot the wagon\'s engine (1b80): "PaddyWagon" sends it through the gate', do: 'break', from: [376.5, 97.7, 556], uids: [0x1b80], then: { wait: 6, fight: 30 }, expect: { destroyed: [0x1b80], played: [0x1b7c] }, shot: true },
+  // The refuge the level is built round: the guard house roof (103.6, 6 m over the yard). Its
+  // east edge is Clamber Point 2288 (a box 8 m along z on the edge, top 103.7) and its south edge
+  // 2d2c; a clamber allows 2.5..4.5 m from the feet to the ledge, so the way up is the crate 193a
+  // (Pushable 7:457, 2 m tall) in the corner south of the alley: pulled west against the guard
+  // house's line, pushed north up the alley under 2288, jumped onto (the first-person jump,
+  // Player p215 10 m/s under p214 24.4: 2.05 m) and clambered from (4.0 m). On the roof Detector
+  // 27fc (the top of 2288) switches the pit CartWheelers' Behavior Changers 27ee / 27f0 off,
+  // 1cb0 starts the ambush (Relays 28da / 28dc) and kills the guard (2d3b), 28fd makes the
+  // wagon's engine 1b80 and fuel can 25b3 vulnerable: it is shot from up there and "PaddyWagon"
+  // turns the cloners Off (Relay 28df).
+  { id: '8a.crate', obj: 'pull the crate 193a west, out of the corner (Pushable 7:457)', do: 'push', uid: 0x193a, stand: [413.45, 97.7, 521.3], rel: [-1.35, 0], dir: [-1, 0], key: 'KeyS', secs: 5, until: `__pt.center(0x193a)[0] < 413.4` },
+  { id: '8a.crate2', obj: 'push it north up the alley under Clamber Point 2288', do: 'push', uid: 0x193a, stand: [412.64, 97.7, 519.9], rel: [0, -1.35], dir: [0, 1], secs: 30, until: `__pt.center(0x193a)[2] > 531.6` },
+  { id: '8a.crate-jump', obj: 'jump onto the crate (first person: 2.05 m)', do: 'route', relTo: 0x193a, pts: [[0, 97.7, -2.4], [0, 99.65, 0]], jumpAt: [0, -1.9, 0.3], timeout: 8 },
+  { id: '8a.roof', obj: 'clamber from the crate onto the guard house roof (Clamber Point 2288, 4 m): Detectors 27fc / 1cb0 / 28fd', do: 'clamber', here: true, face: [[410.5, 104.2, 533]], shot: true },
+  // On the roof the pit CartWheelers flee (27fc -> Relay 27f3 Disable -> Behavior Changer 27ee
+  // with FleeBehavior 27ef enabled, 27f0 with KillEnemies 27f1 (the player as p3 target) disabled;
+  // Timer 29e7 -> Relay 2806 hands them out; the yard grid 27fd.. does the reverse). The Slayers
+  // (Object Cloner 274d, two at a time, and the placed 2756 by the alley) still shoot up at him:
+  // they are fought from up there first.
+  { id: '8a.roof-fight', obj: 'fight the yard\'s Slayers from the roof (the CartWheelers flee)', do: 'arena', stand: [406.5, 103.63, 546], hold: 12, until: `!__pt.hostiles(30).filter((a) => ['chase', 'attack', 'shoot'].includes(a.st)).length`, timeout: 150 },
+  { id: '8a.wagon', obj: 'from the roof\'s north edge shoot the wagon\'s engine (1b80, 25 m): "PaddyWagon" sends it through the gate', do: 'break', from: [405.5, 103.63, 554.3], uids: [0x1b80], then: { wait: 6, fight: 20 }, expect: { destroyed: [0x1b80], played: [0x1b7c] }, shot: true },
+  { id: '8a.roof-down', obj: 'down off the roof\'s north edge into the yard (6 m: no fall damage under 6.5 m)', do: 'walk', to: [392, 97.7, 559.5], drop: 6.2, then: { fight: 30 } },
   // Over the wagon wedged in the gateway (Clamber Point 26e0, its east side) and off its north
   // end: Detector 2cf6 -> Timer 2d06 (3 s) -> Autosave 1e08.
   { id: '8a.wagon-climb', obj: 'climb onto the wagon in the gateway (Clamber Point 26e0)', do: 'clamber', from: [387.7, 94.7, 594], face: [[385.5, 99, 594]] },
@@ -1326,16 +1367,27 @@ const ROUTE = [
   // East along the cave: Detector 11fd -> Relay 1897 -> Autosave 1898; Burrowers (Detectors 1792 /
   // 1be8), Cloner 1bd3's CartWheelers; the ravine (Detector 1793 -> Relay 1794: the Slayers 16f4 /
   // 18ef, the Burrower 16f5); up Ladder d05 to the walkway: Detector 25f9 -> Autosave 25fa.
+  // Jimmy (1738), freed: Relay 174e -> 1751 -> Behavior Changer 174f: SimpleConversation 1752
+  // (walks up, line 40:20) -> WaypointBehavior 1753, which escorts the player (p8 [the Player],
+  // a leg only while he is within p9 10 m, beckoning beyond p10 20 m) 1754 .. 1757 -> Simple-
+  // Conversation 1758 (waits for him within 30 m, 40:21) -> WaypointBehavior 1759 175a .. 175c by
+  // the ravine's ladder -> SimpleConversation 1760 (40:312) -> WaypointBehavior 189f straight to
+  // Waypoint 1ea5 in Hermes' room (up Ladder d05; p3 2: he never fights on it). On the walkway
+  // Detector 26b5 (filter 1) -> Instance Message Filter 26b6 (sender Jimmy) -> Relay 1ea3 -> 24e9:
+  // Relay 1edf off, 24e8 on, so the room's scene is his "Camera" 1eb1 (76 s), not 1ed5.
+  { id: '8b.jimmy-free', obj: 'Jimmy, freed, talks (SimpleConversation 1752)', do: 'wait', until: `[0x1753, 0x1758, 0x1759, 0x1760, 0x189f].includes(__actors.manager.get(0x1738)?.behavior?.uid)`, timeout: 90 },
+  { id: '8b.jimmy-east', obj: 'follow Jimmy east through the broken wall (WaypointBehavior 1753)', do: 'follow', uid: 0x1738, until: `[0x1758, 0x1759, 0x1760, 0x189f].includes(__actors.manager.get(0x1738)?.behavior?.uid)`, timeout: 300, fight: true },
   { id: '8b.east', obj: 'east through the broken wall: checkpoint (Detector 11fd -> Autosave 1898)', do: 'walk', to: [241.2, 91.2, 141.5], then: { wait: 2, fight: 30 }, expect: { checkpoint: 0x1898 } },
-  { id: '8b.burrowers', obj: 'on east: Burrowers and CartWheelers', do: 'walk', to: [287.3, 91.7, 163.4], then: { wait: 2, fight: 30 } },
-  { id: '8b.ravine', obj: 'the ravine (Detector 1793: Slayers, a Burrower)', do: 'walk', to: [239.7, 89.7, 232.6], then: { wait: 2, fight: 30 } },
+  { id: '8b.jimmy-ravine', obj: 'follow Jimmy on east and round into the ravine (WaypointBehavior 1759: Burrowers, CartWheelers, the ravine\'s Slayers)', do: 'follow', uid: 0x1738, until: `[0x1760, 0x189f].includes(__actors.manager.get(0x1738)?.behavior?.uid)`, timeout: 600, fight: true },
+  { id: '8b.ravine', obj: 'the ravine (Detector 1793: Slayers, a Burrower)', do: 'walk', to: [282, 90.4, 240], tol: 1.5, then: { wait: 2, fight: 30, until: `__actors.manager.get(0x1738)?.behavior?.uid === 0x189f`, timeout: 60 } },
   { id: '8b.ladder', obj: 'up Ladder d05 to the walkway', do: 'ladder', from: [289.2, 90.5, 245.3], face: [292, 93, 245.3], top: 103.5 },
   { id: '8b.cp3', obj: 'the walkway: checkpoint (Detector 25f9 -> Autosave 25fa)', do: 'walk', to: [305.5, 103.7, 223.2], tol: 0.4, expect: { checkpoint: 0x25fa } },
+  { id: '8b.jimmy-walkway', obj: 'Jimmy up the ladder and along the walkway: Detector 26b5 sees him (Relay 24e8 enabled: his scene)', do: 'wait', until: `!!__world.world.get(0x24e8)?.enabled`, timeout: 120 },
   // Hermes' gas room: Detector 1eaf -> Relay 1efd -> Relay 1edf -> "Camera" 1ed5 (48 s; with
   // Jimmy alive and unhurt, "Camera" 1eb1, 76 s, through Relay 24e8). Its end (Relay 1ed7): the
   // gas on (Mechanism 1fa3, Volumetric Fogs, Damage Action Objects 24fc / 24da / 24db / 249c, one
   // per difficulty, 3.5..10 a second) and the room's breakables made vulnerable (Relay 25c4).
-  { id: '8b.hermes', obj: 'into Hermes\' gas room ("Camera" 1ed5)', do: 'walk', to: [322, 105.9, 219.8], tol: 0.4, then: { cine: true, wait: 2 }, expect: { played: [0x1ed5] }, shot: true },
+  { id: '8b.hermes', obj: 'into Hermes\' gas room (Jimmy\'s "Camera" 1eb1: Hermes kills him, Behavior Changer 25d5 -> DeathBehavior 10:350)', do: 'walk', to: [322, 105.9, 219.8], tol: 0.4, then: { cine: true, wait: 2 }, expect: { played: [0x1eb1] }, shot: true },
   // The four gas valves: Switch -> Disarm (the rotation group's p64) -> its Mechanism turns 160 deg
   // and at rest sends p58 Off (props.ts mechArrivalOutput) -> Relays 1fa7 / 1fab / 1fad / 1faf ->
   // Count Down 1fa9: at zero the gas stops (Mechanism 1fa3 Off, the Damage Action Objects Off) and
@@ -1344,12 +1396,24 @@ const ROUTE = [
   { id: '8b.valve2', obj: 'close the gas valve 2157', do: 'use', uid: 0x2157, stand: [338, 105.9, 212.2], then: { wait: 2 } },
   { id: '8b.valve3', obj: 'close the gas valve 21cf', do: 'use', uid: 0x21cf, stand: [340.8, 105.9, 242.8], then: { wait: 2 } },
   { id: '8b.valve4', obj: 'close the gas valve 213d: the gas stops (Count Down 1fa9)', do: 'use', uid: 0x213d, stand: [318.8, 105.9, 243.1], then: { wait: 4 }, expect: { destroyed: [0x1fa9] } },
-  // Hermes at the stove: a copy near the stove (Detector 2565, filter 1) enables Relay 1f0d; the
-  // relay passes Triggered (6) to Relay 2496 -> "Hermes" 1f0f (the gas into the stove) -> Count
-  // Down 1f15; its zero -> Relay 26ae -> "Camera" 24e7, Timers 251c / 25da -> "Door" 24ff. What
-  // sends Triggered to 1f0d was not decoded (no Hermes output carries 6; docs/playthrough.md "8
-  // Bluff"): after the wait the logic's own next message is sent (logged).
-  { id: '8b.hermes-fight', obj: 'Hermes at the stove: "Hermes" 1f0f, then the end scene 24e7 and the door', do: 'wait', until: `!!__world.world.get(0x24e7)?.s.played`, timeout: 120, force: { why: 'the message that passes Relay 1f0d (Triggered) was not decoded: Relay 26ae (Count Down 1f15 at zero) sent On', js: `(() => { __world.world.send(0x26ae, 1, 0); return 1; })()` }, then: { cine: true, wait: 8 } },
+  // Hermes at the stove. Six spots each with a Hermes copy (Object Cloners 2411.., a gas jet 3:3251,
+  // a lamp stand); the player blocks them: crates 2404 / 1f8d onto Detectors 2458 / 245e (filter
+  // 3), the hanging lamps 250e.. shot down (Mechanisms 2509 / 24a0 / 24ae). Each block -> Relay 2718
+  // -> 2716 -> Behavior Changer 20c5: every copy walks to Waypoint 20c3 at the stove. A copy there
+  // (Detector 2565, filter 1) enables Relay 1f0d. Hermes takes no damage (p5, Damage Resistances
+  // 2:779 type 5 / 2:656 type 14 at x0) but their p2 = 1 passes the force of fire and wind: a
+  // Molotov's blast (Radius Damage 4:248, force 20..13) makes him react, and his HitReactBehavior
+  // 10:1228 sends its p11, Triggered, to his links: 1f0d -> 2496 -> "Hermes" 1f0f (the gas into the
+  // stove) -> Count Down 1f15 (2 -> 1) and Timer 1f13 (8 s: he comes out again, the door opens).
+  // Closing the stove door 1e37 (p36: starts open; p65 Decrement) brings 1f15 to zero -> Relay
+  // 26ae -> "Camera" 24e7, Timers 251c / 25da -> "Door" 24ff.
+  { id: '8b.jet', obj: 'push the crate 2404 onto the gas jet by it (Detector 2458): the copies go to the stove', do: 'push', uid: 0x2404, stand: [329, 105.9, 224.35], rel: [0, 1.35], dir: [0, -1], secs: 8, until: `__pt.center(0x2404)[2] < 220.3` },
+  // Pushed past it (the push stops a poll late): pulled back north over it.
+  { id: '8b.jet-back', obj: 'pull the crate back onto the jet if it went past', do: 'push', uid: 0x2404, stand: [329, 105.9, 218], rel: [0, 1.3], dir: [0, 1], key: 'KeyS', secs: 6, skipDone: true, until: `__pt.center(0x2404)[2] > 219.45` },
+  { id: '8b.lamps', obj: 'shoot down the hanging lamps over three more jets (2510 -> 250e -> Mechanism 2509; 24be -> 24a6; 250b -> Mechanism 24a0)', do: 'break', from: [333, 105.9, 228.6], uids: [0x2510, 0x24be, 0x250b], expect: { destroyed: [0x2415, 0x241c, 0x2420] } },
+  { id: '8b.molotov', obj: 'a Molotov at the Hermes copy by the stove: he reacts (Triggered -> Relay 1f0d -> "Hermes" 1f0f)', do: 'throw', select: '4:249', cls: 'Hermes', near: [340.6, 105.9, 229.5, 2], ready: `!!__world.world.get(0x1f0d)?.enabled`, from: [334, 105.9, 230.5], aimY: 0.2, until: `!!__world.world.get(0x1f0f)?.s.played`, timeout: 120, then: { until: `!!__world.world.get(0x1f13)?.s?.running || !!__world.world.get(0x1f0f)?.s.done`, timeout: 15 }, shot: true },
+  { id: '8b.stove-door', obj: 'close the stove door 1e37 before Hermes gets out (Count Down 1f15 -> Relay 26ae)', do: 'use', uid: 0x1e37, stand: [341.6, 105.9, 228.4], then: { until: `!!__world.world.get(0x24e7)?.s.played`, timeout: 20 }, expect: { played: [0x24e7] } },
+  { id: '8b.hermes-end', obj: 'the end scene "Camera" 24e7 and "Door" 24ff', do: 'wait', until: `!!__world.world.get(0x24e7)?.s.played`, timeout: 30, then: { cine: true, wait: 8 } },
   // Up the ladder 1ec7 through the hatch: Detector 1f2f -> Level Transition 1798 (9 Lighthouse;
   // it carries Jimmy, 1738, when he is alive).
   { id: '8b.exit', obj: 'up the ladder to the hatch: Detector 1f2f -> Level Transition 1798 to 9 Lighthouse', do: 'ladder', from: [346.5, 105.9, 209.6], face: [346.5, 108, 210.5], top: 111.5, then: { level: '9 Lighthouse' }, expect: { level: '9 Lighthouse' }, shot: true },
@@ -1522,6 +1586,57 @@ const ROUTE = [
   { id: '10.ending', obj: 'the ending: movie, boat scene, picture, Game Finished', do: 'wait', strip: 6, until: `!!window.__campaign?.state?.ending || (!!window.__menu && __menu.frontend.stack.some((t) => t.screen.id === 'gameFinished'))`, timeout: 300, shot: true },
   { id: '10.finish', obj: 'Game Finished (Save Settings), then the credits', do: 'finish', timeout: 60, endings: { good: [0xb39, 0x1089, 0x123b], neutral: [0xb26, 0x108a, 0x123e], evil: [0xb3a, 0x108b, 0x123f] }, bonus: [0x13b2] },
   // ---- end of 9 Lighthouse / 10 Docks ----
+  // ---- 0 Prelude Docks (block owned by the Prelude route) ----
+  // The Prelude is New Game's level once the game was finished (Main Menu p18 while engine flag
+  // 0x400 is set; --level 0 boots through the menus with the profile's unlock). Timer 11c3 starts
+  // "Camera" 10e9 (41.7 s: the PoliceBoat brings Torque in) and forbids the insanity (Allow Player
+  // Insanity Object 1143 p5). Its end (Relay 1114) starts the dock scene: Torque locked in the
+  // holding pen (x 451..460, z 218..232; gates 1185 / 1186 locked) with five inmates (ddd / de0 /
+  // de3 on their own team 10:301, dcb / dda prisoners 10:212), the guards 10e4..10e7 outside the
+  // west fence, the Archive page "The Island" (11fa), the move hints.
+  { id: '0.arrive', obj: 'New Game: the boat brings Torque to the docks ("Camera" 10e9); the dock scene starts', do: 'wait', until: `!!__world.world.get(0x10e9)?.s.played && __pt.msgs(600).includes(' 10e9 1114')`, timeout: 90, expect: { level: '0 Prelude Docks', played: [0x10e9] }, shot: true },
+  // Timer 12d9 / 12dc open Detector 12da by the pen's south-east corner for 4 s (Timer 12e3) while a
+  // gull (Ambient Creature 12d3) comes over: a player standing there sees "Hat!!" 12ea knock the
+  // inmate's hat off (Attachment 12e8) and the inmates talk on at once (Sound 12db -> Relay 12e6).
+  { id: '0.hat', obj: 'step to the pen\'s south-east corner as the gull comes: Detector 12da -> "Hat!!" 12ea', do: 'walk', to: [458.8, 97.7, 230.8], tol: 0.35, then: { until: `!!__world.world.get(0x12ea)?.s.played`, timeout: 40 }, expect: { played: [0x12ea] }, shot: true },
+  // The inmates' talk (Timers 129e..12ad) ends in Behavior Changers 112f / 1131 / 1133: de3 / de0 /
+  // ddd draw their weapons (Melee Weapon 4:766) (SpawnWeapons 153, clip 2:219) and go for Torque (KillEnemies
+  // dd8 / de2 / 12a9, the player's team among the enemies); dcb / dda flee to the pen's corners
+  // (FleeBehaviors ddf / de5, Flee Positions 11b8..11bb); Relay 1235 fills the insanity meter (Toggle 1141 p3) and starts Timer 119b.
+  // (Ends as Timer 12a4 starts 12a5, 1.5 s before Behavior Changer 112f: the step's own probes take
+  // a few seconds, and the blows start at once.)
+  { id: '0.talk', obj: 'the inmates talk until they are about to turn on Torque (Timer 12a5 -> Behavior Changer 112f)', do: 'wait', until: `__pt.msgs(600).split('; ').some((m) => m.split(' ')[3] === '12a5')`, timeout: 150, shot: true },
+  // Medium: 100 health, the Health Threshold Trigger 11e5 (120) never fires, so Timer 119b (17 s)
+  // brings the transformation (Relay 1173 -> Screen Fader 1174 -> Timer 12c2 -> Toggle 1141 On;
+  // "Shoe Left" 12c4, "Hat!!" 12e9) and the attack hints (Help Popups 11fb / 11fc). Three weapons
+  // (8 a blow, KillMelee 10:578 waits 0.5..1.5 s between blows) kill a Torque who stands still
+  // just before it: he keeps away from them round the pen.
+  { id: '0.beating', obj: 'beaten by the three inmates: keep away from them round the pen until the insanity takes him (Timer 119b)', do: 'evade', pts: [[455, 97.7, 220], [460.5, 97.7, 220], [460.5, 97.7, 230.5], [455, 97.7, 230.5]], until: `__insanity.model.form === 'creature'`, timeout: 45, shot: true },
+  // Count Down de6 counts the three attackers' deaths; then Count Down 1138 (Timer 1137 5 s later, or
+  // dcb and dda dead: Count Down 1136) enables Detector df6 (Relay df8) and starts Timer 12eb (20 s).
+  // Killing a fleeing inmate is a kill by the player (p169 QuestStart 350: Reputation Points Sender
+  // 11e1 -10, and Relays 11e3 / 11e4 destroyed); sparing both gives +10 each when the vision comes
+  // (Relay df9 -> 11e3 / 11e4 -> Sender 11e2).
+  { id: '0.fight', obj: 'as the creature, kill the three attackers (Count Down de6); spare the two inmates who flee', do: 'arena', stand: [457.5, 97.7, 225], hold: 14, prey: [0xddd, 0xde0, 0xde3], spare: [0xdcb, 0xdda], until: `__world.world.get(0xde6).s.count === 0`, timeout: 150, expect: { dead: [0xddd, 0xde0, 0xde3], actorAlive: [0xdcb, 0xdda] }, shot: true },
+  // Detector df6 (the pen) sends On on entering again to three Visiblity Message Filters: looking
+  // east (df7), south (1007) or north (100f) chooses which of three visions (Relays 115e / 1162 /
+  // 1160: Animating Statics df4.. / 1000.. / 1008.. behind Visibility Togglers) Screen Fader e00
+  // shows (Time Scale e01, Screen Blur 1157, Camera Shake e02, Adrenaline Sender 1159); Timer 12eb
+  // shows the east one after 20 s. Relay df9 also changes him back (Toggle 1141 Off) and pays the
+  // spared inmates' reputation.
+  { id: '0.vision', obj: 'in the pen (Detector df6), look east (filter df7): the vision', do: 'vision', stand: [457, 97.7, 225], tol: 1.5, at: [461.3, 99.3, 225.9], ready: `!!__world.world.get(0xdf6)?.enabled`, readyTimeout: 40, until: `__pt.msgs(600).split('; ').some((m) => m.split(' ')[3] === 'df9')`, timeout: 60, shot: true },
+  { id: '0.vision-end', obj: 'the vision plays out (its sounds end: Timer e05 -> Timer 115b)', do: 'wait', strip: 0.6, until: `__pt.msgs(600).split('; ').some((m) => m.split(' ')[3] === '115b')`, timeout: 20, shot: true },
+  // The vision's sounds end (Timer e05: the statics destroyed, Screen Fader e08), Relay 127c starts
+  // the guards' last lines (Behavior Changers 114f / 1151 / 1153 / 1155) and Timer 12f0 (17 s):
+  // Screen Fader 1171, then Timer 12ef (3 s) or the end of 1155's talk fires Level Transition 1172
+  // ("West Spawn", chapter 5:585).
+  { id: '0.exit', obj: 'human again; the guards talk, the screen fades: Level Transition 1172 to 1a', do: 'wait', strip: 4, until: `/1a PrisonDeathRow/i.test(__world.world.opts.levelPath ?? '') && __world.world.time > 0.5`, timeout: 120, noCineWait: true, expect: { level: '1a PrisonDeathRow' }, shot: true },
+  // The hand-off: 1a's Player Spawn Point 894e "West Spawn" (from the Prelude; its p6 is 1a's own
+  // map 4:668) is where New Game starts 1a (its Player object, 0.3 m away), so 1a opens as on a
+  // New Game: Timer 7ca4 starts "Goose" 7509, watched and skipped as in 1a.intro; the cell door
+  // gives way ("BustedDoor" 5b9e).
+  { id: '0.1a', obj: '1a from the Prelude, at West Spawn 894e: watch the opening, skip it (Enter); the cell door gives way', do: 'intro', watch: WATCH, then: { until: `!!__world.world.get(0x5b9e).s.played && Math.hypot(__player.position.x - 398.8, __player.position.z - 516.7) < 2`, timeout: 20, wait: 2 }, expect: { level: '1a PrisonDeathRow', played: [0x7509, 0x5b9e] }, shot: true },
+  // ---- end of 0 Prelude Docks ----
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -1586,7 +1701,8 @@ try {
     server = spawn('npx', ['vite', '--config', cfg, '--port', String(port), '--strictPort'], { cwd: ROOT, stdio: 'ignore', detached: true });
     base = `http://localhost:${port}`;
   }
-  await waitFor(async () => (await fetch(base)).ok, 60_000, 'dev server');
+  // (Generous: a machine shared with other runs can take minutes to start Vite and the browser.)
+  await waitFor(async () => (await fetch(base)).ok, 180_000, 'dev server');
   const dbg = await freePort();
   browser = spawn(
     bin,
@@ -1607,12 +1723,14 @@ try {
     ],
     { stdio: 'ignore' },
   );
-  const target = await waitFor(async () => (await (await fetch(`http://127.0.0.1:${dbg}/json`)).json()).find((t) => t.type === 'page'), 20_000, 'browser');
+  const target = await waitFor(async () => (await (await fetch(`http://127.0.0.1:${dbg}/json`)).json()).find((t) => t.type === 'page'), 90_000, 'browser');
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((r) => (ws.onopen = r));
   let id = 0;
   const pending = new Map();
   const logs = [];
+  // (The page's console, printed when the run dies before its report: a boot that never loads.)
+  globalThis.__ptLogs = logs;
   const problems = [];
   ws.onmessage = (m) => {
     const d = JSON.parse(m.data);
@@ -1891,6 +2009,9 @@ try {
   /** Transformed: press Insanity again (the key's own call: Q needs pointer lock). */
   const changeBack = async (why) => {
     if (!(await ev(`window.__insanity?.model?.form === 'creature'`).catch(() => false))) return;
+    // A scripted transformation the key cannot undo (Allow Player Insanity Object flag 0x80:
+    // the Prelude's creature form until its Toggle object changes him back).
+    if (await ev(`!!__insanity.model.s.noTransform`).catch(() => false)) return;
     shortcut('api', 'insanity change-back through the model\'s Insanity key handler (the Q key needs pointer lock)');
     note(`changed back (${why})`);
     await ev(`(() => { __insanity.model.pressInsanity(); return 1; })()`);
@@ -2270,6 +2391,18 @@ try {
       if (!r || r.start == null) out.push(`sequence #${hex(u)} not played`);
       else if (r.seen < min) out.push(`#${hex(r.uid)} on screen ${r.seen.toFixed(2)} s in #${hex(u)} (want >= ${min})`);
     }
+    // Characters a sequence must find alive when it starts (1a "Gaurd" #218: the guard 609f runs
+    // to the bars and is killed in the scene, not before it).
+    for (const [seq, u] of exp.aliveAtStart ?? []) {
+      const r = await ev(`(window.__ptSceneStart ?? {})[${seq}]?.[${u}] ?? null`);
+      if (r !== true) out.push(`#${hex(u)} ${r === false ? 'already dead' : 'not seen'} when sequence #${hex(seq)} started`);
+    }
+    // A placed Sound Effect started during the step with a voice of that sound in the mixer (a
+    // voice dropped for want of a free one does not count).
+    for (const [u, key] of exp.heard ?? []) {
+      const r = await ev(`(() => ({ started: !!__world.world.get(${u})?.s.playing, voice: !!window.__ptHeard?.has('${key}'), n: __audio.voices.size }))()`);
+      if (!r.started || !r.voice) out.push(`Sound Effect #${hex(u)} ${key} not heard (started ${r.started}, voice ${r.voice}, ${r.n} voices now)`);
+    }
     if (exp.weapon && (await ev(`__weapons.persist.current`)) !== exp.weapon) out.push(`weapon ${await ev(`__weapons.persist.current`)} (want ${exp.weapon})`);
     // checkpoint: true = one taken during the step; a uid = that Autosave taken by now (it can
     // fire during the step before: 1a 8397 on the way out of the sally port booth, 1b 8339 as the
@@ -2291,7 +2424,12 @@ try {
 
   console.log(`playthrough on ${base}`);
   const t0 = Date.now();
-  if (startLevel) {
+  // --level 0 (block owned by the Prelude route): the Prelude is New Game's level once the game
+  // was finished (Main Menu p18 instead of p17 while engine flag 0x400 is set; GUI Game Finished
+  // sets it, src/app/menu/profile.ts). The player profile is given that unlock (logged) and the
+  // run boots through the menus as a player's New Game does. --direct deep-links it instead.
+  const preludeViaMenu = startLevel === '0' && !has('--direct');
+  if (startLevel && !preludeViaMenu) {
     // A level that is entered through a transition (ARRIVALS) starts in the level before it and
     // fires that level's exit at once: the arrival (spawn point, Level Transition Msg Handlers,
     // carried companions) is the game's own. --direct starts the level itself instead.
@@ -2302,8 +2440,8 @@ try {
     /** The level arrived in (r1b / r1a: a chapter 1 level revisited). */
     const target = arrive?.level ?? startLevel;
     const path = levelPath(first);
-    await send('Page.navigate', { url: `${base}/?difficulty=${DIFFICULTY}&level=${encodeURIComponent(path).replace(/%2F/g, '/')}` });
-    await waitFor(() => ev(`!!window.__world?.world && __world.world.time > 1 && !!window.__actors?.combat`), 180_000, `level ${first}`);
+    await send('Page.navigate', { url: `${base}/?difficulty=${DIFFICULTY}&level=${encodeURIComponent(path).replace(/%2F/g, '/')}${EXTRA_QUERY ? `&${EXTRA_QUERY}` : ''}` });
+    await waitFor(() => ev(`!!window.__world?.world && __world.world.time > 1 && !!window.__actors?.combat`), 600_000, `level ${first}`); // a loaded machine (several runs) takes minutes
     shortcut('deep link', `started in ${first} through ?level= (no menus, no carried inventory)`);
     if (arrive) {
       // The kit is given in the level before, so it is carried through the transition and is in
@@ -2353,8 +2491,14 @@ try {
       shortcut('deep link', `carried kit (${arrive.kit}) given through services.weapons.give in ${arrive.from} before its transition: ${kit.items.map(([id, n]) => `${id} x${n}`).join(', ')}`);
     }
   } else {
-  await send('Page.navigate', { url: `${base}/` });
-  await waitFor(() => ev(`window.__menu?.frontend.currentMode === 'gate' && __menu.frontend.gateReady`), 60_000, 'start gate');
+  if (preludeViaMenu) {
+    await send('Page.navigate', { url: `${base}/${EXTRA_QUERY ? `?${EXTRA_QUERY}` : ''}` });
+    await waitFor(() => ev(`!!window.__menu`), 300_000, 'front end');
+    await ev(`(() => { localStorage.setItem('suffering.profile.v1', JSON.stringify({ pages: [], prelude: true })); return 1; })()`);
+    shortcut('profile', 'the player profile has the prelude unlock (as after Game Finished: engine flag 0x400), so New Game starts Main Menu p18, the Prelude');
+  }
+  await send('Page.navigate', { url: `${base}/${EXTRA_QUERY ? `?${EXTRA_QUERY}` : ''}` });
+  await waitFor(() => ev(`window.__menu?.frontend.currentMode === 'gate' && __menu.frontend.gateReady`), 300_000, 'start gate');
   await click(640, 360);
   const movie = await waitFor(() => ev(`(() => { const m = document.querySelector('video'); const fe = __menu.frontend.currentMode; return (m && !m.paused && m.currentTime > 0.2) ? 'movie' : fe === 'copyright' || fe === 'menu' ? fe : ''; })()`), 30_000, 'logo movie or copyright');
   if (movie === 'movie') {
@@ -2386,8 +2530,9 @@ try {
   await press('Enter');
   await sleep(800);
   if (await ev(`__menu.frontend.itemsHidden`)) await press('Escape'); // transition clip
-  await waitFor(() => ev(`__menu.inGame && !__menu.frontend.visible && !!window.__world?.world && !!window.__actors?.combat`), 180_000, 'level 1a');
-  console.log(`  1a loaded after ${((Date.now() - t0) / 1000).toFixed(1)} s, difficulty ${await ev(`__campaign.state.difficulty ?? __campaign.difficulty?.level ?? '?'`).catch(() => '?')}`);
+  await waitFor(() => ev(`__menu.inGame && !__menu.frontend.visible && !!window.__world?.world && !!window.__actors?.combat`), 420_000, preludeViaMenu ? 'level 0' : 'level 1a');
+  if (preludeViaMenu && !stem(await levelNow()).startsWith('0 ')) throw new Error(`New Game with the prelude unlocked started ${stem(await levelNow())}, not the Prelude`);
+  console.log(`  ${stem(await levelNow())} loaded after ${((Date.now() - t0) / 1000).toFixed(1)} s, difficulty ${await ev(`__campaign.state.difficulty ?? __campaign.difficulty?.level ?? '?'`).catch(() => '?')}`);
   }
   // --save without --level: a captured state restored in the menu session (New Game, then the
   // capture), so the front end's own screens (Game Finished, the credits) follow (logged).
@@ -2512,11 +2657,17 @@ try {
     try {
       await ensurePage();
       // Out of a fight: back to human form (climbing, using and pushing need it).
-      if (!(await inEndScreens())) await ev(`(() => { window.__ptAvoidWater = ${!!step.noWater}; window.__ptSaveRounds = ${!!step.saveRounds}; window.__ptFloor = ${step.sea ? step.sea[0] : 'null'}; return 1; })()`).catch(() => {});
+      if (!(await inEndScreens())) await ev(`(() => { window.__ptAvoidWater = ${!!step.noWater}; window.__ptSaveRounds = ${!!step.saveRounds}; window.__ptFloor = ${step.sea ? step.sea[0] : 'null'}; window.__ptSpare = ${JSON.stringify(step.spare ?? [])}; return 1; })()`).catch(() => {});
       fightFloor = step.sea ? step.sea[0] : null;
       if (step.do !== 'arena' && !(await inEndScreens())) await changeBack('the fight is over');
       const cpBefore = checkpointsTaken();
       stepCpBefore = cpBefore;
+      // expect.aliveAtStart: who of a sequence's characters was alive when it started (the
+      // world's sequence observer, wrapped once per world).
+      if (!(await inEndScreens())) await ev(`(() => { const w = __world?.world; const o = w?.stompObserver; if (!o || o.__ptStart) return 0; const b = o.begin; o.begin = (run) => { const m = (window.__ptSceneStart ??= {}); m[run.uid] = Object.fromEntries(run.seq.tracks.map((t) => [t.uid, __actors.manager.get(t.uid)?.alive]).filter((x) => x[1] !== undefined)); return b.call(o, run); }; o.__ptStart = true; return 1; })()`).catch(() => {});
+      // expect.heard: the sounds the mixer starts during the step (onPlay is not called for a
+      // voice dropped because none was free).
+      if (step.expect?.heard) await ev(`(() => { window.__ptHeard = new Set(); if (!__audio.__ptHeardHook) { const prev = __audio.onPlay; __audio.onPlay = (info, opts) => { window.__ptHeard?.add(info.key); return prev?.(info, opts); }; __audio.__ptHeardHook = true; } return 1; })()`).catch(() => {});
       // `unless` (JS): what the step does is done already (by another character): skipped.
       if (step.unless && (await ev(step.unless))) note(`skipped: already done (${step.unless})`);
       else switch (step.do) {
@@ -2921,8 +3072,12 @@ try {
           // Clamber Point in turn. Creatures that hunt the player there are fought first, as a
           // player would (1b: Detectors 6727 / 76d6 wake CartWheelers 6725 / 6726 on the way, and
           // their blows knocked the player off the first ledge), then the foot is walked to again.
-          await walk(step.from, step.tol ?? 0.3, 40);
-          if (await fight(40, false, true)) await walk(step.from, step.tol ?? 0.3, 40);
+          // `here`: from where the player stands (8a: on top of the crate 193a, a spot the planner
+          // cannot walk to).
+          if (!step.here) {
+            await walk(step.from, step.tol ?? 0.3, 40);
+            if (await fight(40, false, true)) await walk(step.from, step.tol ?? 0.3, 40);
+          }
           for (const [i, f] of step.face.entries()) {
             // Where to stand on a ledge for the next one (a corner landing faces the wrong side).
             if (step.stands?.[i] && (i || step.nudge)) {
@@ -2953,7 +3108,7 @@ try {
                 // A creature at the foot (1b's arena copies at the second ledge) turned the view
                 // or knocked him: fight it first, then back to the stand.
                 const fought = await fight(20, false, true);
-                if (!i) await walk(step.from, step.tol ?? 0.3, 20);
+                if (!i && !step.here) await walk(step.from, step.tol ?? 0.3, 20);
                 else if (fought && step.stands?.[i]) await walkRaw(step.stands[i], 0.25, 8);
                 await sleep(600);
               }
@@ -2977,14 +3132,22 @@ try {
         case 'route': {
           // A hand-laid line of points the grid planner does not take (drops of a few metres, a
           // jump up a mound): the autopilot steers along them, W held, Space when stuck.
-          const pts = [await ev('__pt.state().p'), ...step.pts];
+          // `relTo` uid: pts and jumpAt are offsets (x, z) from that object's centre where it is now
+          // (8a: the crate 193a, wherever the push left it).
+          let rpts = step.pts, rjump = step.jumpAt;
+          if (step.relTo) {
+            const c = await ev(`__pt.center(${step.relTo})`);
+            rpts = step.pts.map((q) => [c[0] + q[0], q[1], c[2] + q[2]]);
+            rjump = step.jumpAt && [c[0] + step.jumpAt[0], c[2] + step.jumpAt[1], step.jumpAt[2]];
+          }
+          const pts = [await ev('__pt.state().p'), ...rpts];
           await ev(`(() => { __pt.go(${JSON.stringify(pts)}, 0.35); return 1; })()`);
           await keyEv('keyDown', 'KeyW');
           const tEnd = Date.now() + (step.timeout ?? 25) * 1000;
           let jumps = 0;
           // `jumpAt` [x, z, r] (or a list of them, taken in order): a running jump (Space, W
           // held) once within r m of x / z (3a's leap off the shack roof, 4b's pallet).
-          const leaps = !step.jumpAt ? [] : Array.isArray(step.jumpAt[0]) ? step.jumpAt : [step.jumpAt];
+          const leaps = !rjump ? [] : Array.isArray(rjump[0]) ? rjump : [rjump];
           let leap = 0;
           while (Date.now() < tEnd) {
             await sleep(leap < leaps.length ? 25 : 120);
@@ -3004,12 +3167,45 @@ try {
           }
           await keyEv('keyUp', 'KeyW');
           await ev(`(() => { __pt.ap.active = false; return 1; })()`);
-          const end = step.pts[step.pts.length - 1];
+          const end = rpts[rpts.length - 1];
           await waitFor(() => ev('__player.onGround'), 3000, 'landing').catch(() => {});
           const st = await ev('__pt.state()');
           const d = Math.hypot(st.p[0] - end[0], st.p[2] - end[2]);
           if (d > 1.5 || Math.abs(st.p[1] - end[1]) > 1.2) cur.problems.push(`route: ended ${d.toFixed(1)} m from its last point`);
           if (jumps) note(`${jumps} jump(s) on the way`);
+          break;
+        }
+        case 'evade': {
+          // (Prelude route) Keep away from what attacks without fighting back: run round a loop of
+          // points (`pts`), W held, the next lap starting where the last ended, until `until`
+          // holds (the Prelude's guards beat the handcuffed Torque until the scripted
+          // transformation). Health and the attackers' distance are logged.
+          const end = Date.now() + (step.timeout ?? 40) * 1000;
+          let laps = 0;
+          let legAt = 0;
+          let minHp = await ev('__actors.combat.health');
+          await keyEv('keyDown', 'KeyW');
+          try {
+            while (Date.now() < end && !abortRun && !(await ev(step.until))) {
+              await checkDeath();
+              const ap = await ev(`(() => { const a = __pt.ap; return { done: !a.active || a.done, stuck: a.stuck }; })()`);
+              // A leg ends at its point, when blocked (an attacker in the way) or after 3 s.
+              if (ap.done || ap.stuck >= 1 || Date.now() - legAt > 3000) {
+                legAt = Date.now();
+                // Next lap from the point nearest ahead of the player.
+                const pts = await ev(`(() => { const p = __player.position, L = ${JSON.stringify(step.pts)}; let k = 0, bd = 1e9; L.forEach((q, i) => { const d = Math.hypot(q[0] - p.x, q[2] - p.z); if (d < bd) (bd = d), (k = i); }); return [...L.slice(k + 1), ...L.slice(0, k + 1)]; })()`);
+                await ev(`(() => { __pt.go(${JSON.stringify(pts)}, 0.6); return 1; })()`);
+                laps++;
+              }
+              minHp = Math.min(minHp, await ev('__actors.combat.health'));
+              await sleep(120);
+            }
+          } finally {
+            await keyEv('keyUp', 'KeyW');
+            await ev(`(() => { __pt.ap.active = false; return 1; })()`);
+          }
+          note(`evaded ${laps} leg(s), health down to ${Math.round(minHp)}`);
+          if (!(await ev(step.until))) cur.problems.push(`evade: ${step.until} not reached in ${step.timeout ?? 40} s`);
           break;
         }
         case 'throw': {
@@ -3019,19 +3215,36 @@ try {
           shortcut('api', 'Throw through services.weapons.throw (the right mouse button needs pointer lock)');
           const end = Date.now() + (step.timeout ?? 60) * 1000;
           if (step.from) await walk(step.from, 0.4, 60);
+          // `select`: the throwable to use (8b: the Molotov 4:249); `near` [x, y, z, r]: the target
+          // is whichever `cls` character (cloned copies have no level uid) stands within r of that
+          // spot, waited for until one does (8b: a Hermes copy at the stove).
+          if (step.select) await ev(`(() => { __weapons.service.selectThrowable(${JSON.stringify(step.select)}); return 1; })()`);
+          const pick = step.near
+            ? `(() => { const [x, , z, r] = ${JSON.stringify(step.near)}; let b = null, bd = r; for (const a of __actors.manager.actors) { if (!a.alive || a.hidden || (${JSON.stringify(step.cls ?? '')} && a.entity?.className !== ${JSON.stringify(step.cls ?? '')})) continue; const d = Math.hypot(a.position.x - x, a.position.z - z); if (d <= bd) (bd = d), (b = a); } return b; })()`
+            : `__actors.manager.get(${step.uid})`;
+          let throws = 0;
           while (Date.now() < end && !(await ev(step.until))) {
             await checkDeath();
             if (await cinematic()) {
               await waitCine();
               continue;
             }
-            await ev(`(() => { __pt.ap.follow = 0; __pt.ap.active = false; const a = __actors.manager.get(${step.uid}); if (a) __pt.aimAt(a.position.x, a.position.y + 1.2, a.position.z); return 1; })()`);
+            // `ready`: a further condition to throw on (8b: Relay 1f0d enabled, the copy in Detector 2565).
+            if (!(await ev(`!!${pick}`)) || (step.ready && !(await ev(step.ready)))) {
+              await sleep(250);
+              continue;
+            }
+            await ev(`(() => { __pt.ap.follow = 0; __pt.ap.active = false; const a = ${pick}; if (a) __pt.aimAt(a.position.x, a.position.y + 1.2, a.position.z); return 1; })()`);
             await sleep(150);
-            const ok = await ev(`(() => { const a = __actors.manager.get(${step.uid}); if (a) __pt.aimAt(a.position.x, a.position.y + 1.2, a.position.z); return __weapons.service.throw(); })()`);
-            if (ok) note(`threw ${await ev(`JSON.stringify(__weapons.service.throwable?.id ?? null)`)} at #${hex(step.uid)}`);
+            const ok = await ev(`(() => { const a = ${pick}; if (a) __pt.aimAt(a.position.x, a.position.y + ${step.aimY ?? 1.2}, a.position.z); return __weapons.service.throw(); })()`);
+            if (ok) {
+              throws++;
+              note(`threw ${await ev(`JSON.stringify(__weapons.service.throwable?.id ?? null)`)} at ${step.near ? `the ${step.cls ?? 'character'} by ${step.near.slice(0, 3).join(', ')}` : `#${hex(step.uid)}`}`);
+            }
             await sleep(2500);
+            if (step.max && throws >= step.max) break;
           }
-          if (!(await ev(step.until))) cur.problems.push(`throw at #${hex(step.uid)}: not done in ${step.timeout ?? 60} s`);
+          if (!(await ev(step.until))) cur.problems.push(`throw at ${step.near ? 'the target' : `#${hex(step.uid)}`}: not done in ${step.timeout ?? 60} s`);
           break;
         }
         case 'leap': {
@@ -3271,7 +3484,9 @@ try {
       if (then.wait) await sleep(then.wait * 1000);
       if (then.fight) await fight(then.fight, false, false, then.stay ?? null);
       if (step.loot) await loot(step.loot);
-      await waitCine();
+      // `noCineWait`: a cinematic the step ends in is left to the next step (the Prelude's exit
+      // ends in 1a's opening, which the next step watches and skips like 1a.intro).
+      if (!step.noCineWait) await waitCine();
       let missed = await checkExpect(step.expect, cpBefore);
       // A trigger plane crossed while the player was busy (a fight, a vision) can be missed by the
       // run: walk back over it and on again once (logged).
@@ -3397,6 +3612,8 @@ try {
   }
 } catch (e) {
   console.error(e);
+  const errs = (globalThis.__ptLogs ?? []).filter((l) => /^(error|warn|EXC)/i.test(l)).slice(-12);
+  if (errs.length) console.error(`last page errors / warnings:\n  ${errs.map((l) => l.slice(0, 400)).join('\n  ')}`);
   failures++;
   if (outPath) writeFileSync(outPath, JSON.stringify(report, null, 1));
 } finally {

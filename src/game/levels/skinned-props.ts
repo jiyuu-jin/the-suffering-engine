@@ -50,6 +50,7 @@ import * as THREE from 'three/webgpu';
 import type { CollisionWorld, DynamicParts } from '../../app/physics';
 import { Character, decodeCharacterTextures } from '../../app/character';
 import { readSkinnedModel, hasSkeleton } from '../../formats/skeleton';
+import { moverCollisionMesh } from '../../formats/model-collision';
 import type { PackageSet, ResRef } from '../../formats/model';
 import { loadClip } from '../actors/clipmap';
 import { instanceMatrix } from '../world/dynamic';
@@ -254,7 +255,11 @@ export class SkinnedProps {
       const bone = bones[h.bone];
       if (!model || !bone) continue;
       model.name = `crane-hung:${h.template.pkg}:${h.template.id}`;
-      const local = hungLocalParts(model);
+      // Its body is the model's collision tree (docs/game-logic.md §14.10): the "Crane Palette"
+      // 23:580 is one box under the pallet, not its cables.
+      const mdu = t?.model ? packages.get(t.model.pkg)?.mdu : undefined;
+      const tree = mdu && t?.model ? moverCollisionMesh(mdu, t.model.id) : undefined;
+      const local: DynamicParts = tree ? [{ positions: tree.positions, indices: tree.indices }] : [];
       bone.add(model);
       rig.hung.push(model);
       if (local.length) rig.bodies.push({ obj: model, local, at: new THREE.Matrix4() });
@@ -339,6 +344,11 @@ export class SkinnedProps {
         if (!box.isEmpty()) at.y = Math.min(at.y, box.min.y);
       }
       const col = this.collision?.();
+      // The object's bounds are its collision model's (type-7 box; docs/game-logic.md §14.10).
+      for (const b of c.bodies) {
+        const bb = b.body !== undefined ? col?.dynamicBounds(b.body) : undefined;
+        if (bb) at.y = Math.min(at.y, bb.min[1]);
+      }
       const own = c.bodies.filter((b) => b.body !== undefined && col?.isDynamicEnabled(b.body));
       for (const b of own) col!.setDynamicEnabled(b.body!, false);
       const d = below?.(at);

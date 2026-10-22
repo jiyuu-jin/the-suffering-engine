@@ -67,9 +67,11 @@ export const COLLISION_LAYER = {
   /** Missiles, BouncingObjects, Lightning (ISO p5). */
   projectile: 16,
   /**
-   * Static geometry of a class no mover's collide list names (MeshPart.moveSolid false:
-   * Decorations). The plain queries (sight, shots, the use ray) see it; a CharacterMotor's do not
-   * (its layers are `solid` plus its own), docs/game-logic.md §14.9.
+   * Geometry only the plain queries (sight, shots, the use ray) see; a CharacterMotor's do not
+   * (its layers are `solid` plus its own): a model's drawn faces when its collision tree is a
+   * sphere tree without nodes, and with `player` the classes only the player's collide list
+   * names (docs/game-logic.md §14.10). Without collision parts (LevelData.collision), Decorations
+   * (MeshPart.moveSolid false, §14.9).
    */
   decor: 32,
   /**
@@ -228,7 +230,7 @@ export class CollisionWorld {
     this.triPart = new Uint32Array(n);
     this.triLayers = new Uint8Array(n);
     const partLayers = level.parts.map((p) =>
-      p.moveSolid === false ? COLLISION_LAYER.decor : p.splat?.length ? COLLISION_LAYER.solid | COLLISION_LAYER.landscape : COLLISION_LAYER.solid,
+      p.layers ?? (p.moveSolid === false ? COLLISION_LAYER.decor : p.splat?.length ? COLLISION_LAYER.solid | COLLISION_LAYER.landscape : COLLISION_LAYER.solid),
     );
     for (let i = 0; i < n; i++) {
       const s = 9 * order[i], d = 9 * i;

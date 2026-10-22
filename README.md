@@ -32,6 +32,18 @@ Videos and sounds are stored in formats browsers can't play (WMV2 in ASF, raw PC
 `npm run bake` converts them once with `ffmpeg` (on `PATH` or `$FFMPEG`) into `game/converted/`.
 Without that step the game runs without cutscenes and sound.
 
+## Graphics modes
+
+- **Original** (the default) reproduces the engine's own look: gamma back buffer, vertex
+  lighting, the level's fog, and the engine's scene glow (the blurred halo around flagged
+  materials such as lamp glass, bulbs and fire; turned off with the Pixel Shaders option or
+  `?noglow`). See [docs/re/renderer.md](docs/re/renderer.md) §3.2.
+- **Enhanced** is an opt-in modern renderer on the same levels: physically based lighting,
+  real-time shadows, volumetric light and a filmic grade, with Low / Medium / High / Ultra
+  quality tiers (or Auto). Pick it on the Graphics page (Graphics Mode, applied on the next
+  start) or with `?gfx=enhanced&tier=high`. It uses no third-party assets. See
+  [docs/enhanced.md](docs/enhanced.md).
+
 ## Getting started
 
 Requires Node.js 22 or newer and a recent desktop browser (WebGPU, with a WebGL2 fallback).
@@ -85,7 +97,9 @@ player picks their install folder in the browser.
 - [docs/frontend.md](docs/frontend.md): menus, loading screens, HUD, controls
 - [docs/campaign.md](docs/campaign.md): campaign flow from New Game to the endings
 - [docs/levels.md](docs/levels.md): the levels outside chapter 1 and the level QA harness
-- [docs/playthrough.md](docs/playthrough.md): the chapter playthrough harness and its findings
+- [docs/playthrough.md](docs/playthrough.md): the chapter playthrough harness and its findings,
+  from the bonus 0 Prelude level (unlocked by finishing the game) through all three endings
+- [docs/enhanced.md](docs/enhanced.md): the optional Enhanced graphics mode
 - [docs/coverage.md](docs/coverage.md), [docs/coverage-chapter.md](docs/coverage-chapter.md):
   which object classes the engine handles
 - Reverse-engineering notes: [animation](docs/re/animation.md), [audio](docs/re/audio.md),

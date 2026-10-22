@@ -516,6 +516,7 @@ export function readSkinnedGeometry(pkgs: PackageSet, ref: ResRef): RiotModel | 
     uvs: Float32Array.from(uv),
     submeshes,
     materials,
+    headerFlags: eh && eh.size >= 4 ? mdu.data(eh).getUint32(0, true) : undefined,
   };
 }
 

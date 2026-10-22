@@ -144,7 +144,8 @@ export class Surfaces {
       const key = mat ? refKey(mat) : undefined;
       return { type: this.typeOfMaterial(key), material: key, gmp: this.gmpOfMaterial(key) };
     }
-    const part = this.level?.parts[hit.part];
+    // Static hits index the collision parts when the level has them (docs/game-logic.md §14.10).
+    const part = (this.level?.collision ?? this.level?.parts)?.[hit.part];
     if (!part) return { type: null };
     if (part.material?.key) {
       const t = this.typeOfMaterial(part.material.key);

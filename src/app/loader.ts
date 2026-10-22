@@ -14,7 +14,7 @@ import type { DecodedTexture, LevelData, MeshPart } from '../formats/types';
 import { SrscFile } from '../formats/srsc';
 
 import { decodeTextureJob, decodeTexturesInWorkers, type TextureJob } from './texture-decode';
-import { parseLevel, readLevelHeader } from '../formats/level';
+import { parseLevel, readLevelHeader, type LevelObject, type ObjectCollision } from '../formats/level';
 import { parseEntities } from '../formats/entities';
 import { staticLightingFromEntities, type StaticLighting } from '../formats/static-light';
 import { buildLevelZoning, lightRegions, parseSectorTree, type LightRegion } from '../formats/visgraph';
@@ -82,6 +82,13 @@ export const nonSolidObjectProviders: ((lvl: SrscFile, packages: PackageSet) => 
  */
 export const moverPassObjectProviders: ((lvl: SrscFile, packages: PackageSet) => Iterable<number>)[] = [];
 
+/**
+ * How placed objects of the static geometry collide (src/game/world/object-collision.ts, registered
+ * at import time): with one registered, LevelData.collision holds the original's collision
+ * geometry (docs/game-logic.md §14.10); without, the drawn triangles collide.
+ */
+export const objectCollisionProviders: ((lvl: SrscFile, packages: PackageSet) => (o: LevelObject) => ObjectCollision | null)[] = [];
+
 export async function loadLevel(
   fs: GameFS | null,
   lvlPath: string,
@@ -127,6 +134,15 @@ export async function loadLevel(
     }
   }
 
+  const collisionOf = (l: SrscFile, p: PackageSet) => {
+    try {
+      return objectCollisionProviders[0]?.(l, p);
+    } catch (err) {
+      console.warn('[loader] object collision provider failed:', err);
+      return undefined;
+    }
+  };
+
   onProgress('Building geometry…');
   // Visibility zones + portals (sector tree / zone graph); geometry is bucketed per zone.
   let zoning: ReturnType<typeof buildLevelZoning>;
@@ -161,6 +177,7 @@ export async function loadLevel(
     excludeUids: dynamicUids,
     nonSolidUids,
     moverPassUids,
+    collisionOf: collisionOf(lvl, packages),
     zoneOf: zoning?.zoneOf,
     chunkSize: chunkParam !== null ? Number(chunkParam) : undefined,
   });

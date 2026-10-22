@@ -9,10 +9,11 @@ import * as THREE from 'three/webgpu';
 import { loadPackages } from '../src/app/loader';
 import { readLevelHeader } from '../src/formats/level';
 import { parseEntities, type EntityPackageSet } from '../src/formats/entities';
-import { readSkinnedModel } from '../src/formats/skeleton';
+import { readSkeletonTrailer, readSkinnedModel } from '../src/formats/skeleton';
+import { BLEND_ALPHA_REF, modelCullsBackFaces, translucentPassState } from '../src/formats/render-data';
 import type { PackageSet } from '../src/formats/model';
-import { characterSurfaceBlend, decodeCharacterTextures } from '../src/app/character';
-import { projectorOpacity, projectorParams, ProjectorState, skinnedVertexFor } from '../src/game/actors/specials/projector';
+import { buildSkinnedMesh, characterSurfaceBlend, decodeCharacterTextures } from '../src/app/character';
+import { beamHidden, beamTriangles, projectorOpacity, projectorParams, ProjectorState, skinnedVertexFor } from '../src/game/actors/specials/projector';
 import { nodeFS, readSrsc, skip } from './helpers';
 
 test('Projector Effect inputs: On shows the target on the next update, Off hides it', () => {
@@ -96,4 +97,94 @@ test('1b: Killjoy is a hidden, projected figure; his model carries five light co
   // Every pass of those is decoded (the additive second pass 10:428 drew the placeholder).
   const tex = decodeCharacterTextures(sk, pkgs as unknown as PackageSet);
   for (const k of ['10:256', '10:232', '10:233', '10:234', '10:428']) assert.ok(tex.has(k), k);
+});
+
+test('beam visibility per update: gone hides, standing shows a hidden beam or hides at p8 %', () => {
+  assert.equal(beamHidden(false, false, 0, 50), true, 'a gone projector hides its beam');
+  assert.equal(beamHidden(true, true, 0, 50), false, 'a standing one shows it again');
+  assert.equal(beamHidden(false, true, 0, 0), false, 'p8 = 0 (retail): never flickers');
+  assert.equal(beamHidden(false, true, 25, 10), true, 'U(0, 100) < p8 hides it for an update');
+  assert.equal(beamHidden(false, true, 25, 40), false);
+  assert.equal(beamHidden(true, true, 100, 0), false, 'a hidden beam is always shown next');
+});
+
+test('beam triangles: the fan of each tip, disjoint', () => {
+  // Two fans: tip 0 with triangles 0, 1; tip 1 with triangle 3; triangle 2 is body.
+  const source = [0, 5, 6, 7, 1, 8, 9];
+  const index = [0, 1, 2, 2, 3, 0, 1, 2, 3, 4, 5, 6];
+  assert.deepEqual(beamTriangles(index, source, [1, 0]), [[3], [0, 1]]);
+});
+
+test('a translucent object: an opaque first pass blends, keeps its depth write, alpha test > 2', () => {
+  const opaque = { transparent: false, depthWrite: true, alphaTest: 0 };
+  assert.deepEqual(translucentPassState(opaque, 0.5), { transparent: true, depthWrite: true, alphaTest: BLEND_ALPHA_REF });
+  assert.deepEqual(translucentPassState(opaque, 0.99), opaque, 'at 0.99 and above the object draws opaque');
+  const additive = { transparent: true, depthWrite: false, alphaTest: BLEND_ALPHA_REF };
+  assert.deepEqual(translucentPassState(additive, 0.3), additive, 'a blended first pass never writes depth');
+  const cutout = { transparent: false, depthWrite: true, alphaTest: 200 / 255 };
+  assert.equal(translucentPassState(cutout, 0.5).alphaTest, 200 / 255);
+});
+
+test("Killjoy 10:90: back faces culled; each projector drives and hides the same cone", { skip }, async () => {
+  const lvl = readSrsc(L1B);
+  const pkgs = (await loadPackages(nodeFS(), dirname(L1B), readLevelHeader(lvl).dependencies, () => {})) as unknown as PackageSet;
+  const sk = readSkinnedModel(pkgs, { pkg: 10, id: 90 })!;
+  assert.equal(sk.model.headerFlags, 0x1cc8012);
+  assert.equal(modelCullsBackFaces(sk.model.headerFlags!), true);
+  const { mesh } = buildSkinnedMesh(sk);
+  const mats = mesh.material as THREE.Material[];
+  assert.ok(mats.every((m) => m.side === THREE.FrontSide), 'every pass culls back faces');
+  // The re-wound triangles face the way the stored normals do (front = CCW in three.js).
+  const pos = sk.model.positions, nrm = sk.model.normals;
+  let agree = 0, total = 0;
+  const idx = mesh.geometry.getIndex()!.array;
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), n = new THREE.Vector3();
+  for (let t = 0; t < idx.length; t += 3) {
+    a.fromArray(pos, 3 * idx[t]);
+    b.fromArray(pos, 3 * idx[t + 1]).sub(a);
+    c.fromArray(pos, 3 * idx[t + 2]).sub(a);
+    const g = b.cross(c);
+    if (g.lengthSq() < 1e-12) continue;
+    n.set(0, 0, 0);
+    for (let k = 0; k < 3; k++) n.add(new THREE.Vector3().fromArray(nrm, 3 * idx[t + k]));
+    total++;
+    if (g.dot(n) > 0) agree++;
+  }
+  assert.ok(agree / total > 0.95, `front faces agree with the normals: ${agree} / ${total}`);
+  // The cones lie in the face list in the order of tips 2, 0, 4, 3, 1 (every Killjoy projector's
+  // p12) and channels 86..90 carry partition bits 1, 2, 4, 8, 0x10: projector i hides cone i.
+  const cones = sk.model.submeshes[0].indices;
+  const order: number[] = [];
+  for (const ci of cones) {
+    const sv = sk.model.source[ci];
+    if (sv < 5 && !order.includes(sv)) order.push(sv);
+  }
+  assert.deepEqual(order, [2, 0, 4, 3, 1]);
+  const ch = readSkeletonTrailer(pkgs.get(10)!.mdu!, 90)!.channels.filter((x) => x.bone >= 86 && x.bone <= 90);
+  assert.deepEqual(ch.map((x) => [x.bone, x.bits[0]]), [[86, 1], [87, 2], [88, 4], [89, 8], [90, 0x10]]);
+  // Each beam is its tip's fan: five disjoint, non-empty triangle sets inside the cone submesh.
+  const beams = beamTriangles(idx, sk.model.source, [2, 0, 4, 3, 1]);
+  const all = new Set<number>();
+  for (const bt of beams) {
+    assert.ok(bt.length > 90, `a cone of ${bt.length} triangles`);
+    for (const t of bt) {
+      assert.ok(!all.has(t));
+      all.add(t);
+      assert.ok(3 * t < cones.length, 'in the cone submesh');
+    }
+  }
+});
+
+test('projectors without a model (1c, 10, 5b): the beam starts at their placement', { skip }, async () => {
+  // Breakables 7:330 carry no model: the engine's beam uses the object position (+0x44).
+  const L1C = 'LEVELS/1 PrisonDeathRow/1c PrisonDeathRow.lvl';
+  const lvl = readSrsc(L1C);
+  const pkgs = (await loadPackages(nodeFS(), dirname(L1C), readLevelHeader(lvl).dependencies, () => {})) as EntityPackageSet;
+  const by = new Map(parseEntities(lvl, pkgs, { resolveStrings: false }).map((e) => [e.uid, e]));
+  const p = projectorParams(by.get(0x7aba)!.values);
+  assert.equal(p.target, 0x7ab8);
+  const u = by.get(p.units[0])!;
+  assert.equal(u.className, 'Breakable');
+  assert.equal(u.modelRef, undefined, 'no model, no lens bone');
+  assert.equal(p.beamFlicker, 0);
 });

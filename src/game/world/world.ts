@@ -26,6 +26,9 @@ import { dynamicObjectProviders } from '../../app/loader';
 import { World, PICKUP_CLASSES, atCarryCap, templateClassName, type SoundPlayback, type SwitchMotion, type Vec3, type WorldEntity } from './logic';
 import { DynamicObjects, dynamicObjectUids, type DynamicObject } from './dynamic';
 import { InvisibleBlockers } from './blockers';
+import { switchBaseMaterials, switchBaseSwaps } from './switch-part';
+// Registers how placed objects collide with the loader (docs/game-logic.md §14.10).
+import './object-collision';
 import { NO_BATCH, StaticBatch } from '../../app/prop-batch';
 import { createWorldHud } from './hud';
 import { lipSyncService } from '../actors/lipsync';
@@ -99,6 +102,8 @@ export interface WorldService {
    * For sight tests (src/game/actors/sight.ts).
    */
   seeThrough(hit: RayHit): boolean;
+  /** Does the eye see through a hit on the drawn triangles (LevelRenderer.drawn: see-through surfaces)? */
+  eyeThrough(hit: RayHit): boolean;
 }
 
 // Carried across level loads: entries by item template ("pkg:id", inventory.ts).
@@ -228,6 +233,8 @@ export async function createWorldSystem(ctx: GameContext): Promise<GameSystem> {
         // Collision follows the door at rest; off while it swings so it can't shove the player.
         d.solid = !moving;
         dyn.refreshCollision(d, !moving);
+        // A p37 base shows the state at rest: p32 open, p33 closed (switch-part.ts, 0x101308a0).
+        if (d.stand && !moving && switchBaseSwaps(w.e.values)) dyn.setMaterials(d.stand.uid, switchBaseMaterials(w.e.values, !!w.s.open, d.stand.model?.materials.length ?? 0));
       },
       playSound: (uid, keys, position, opts) => {
         const ok = sfxKeys(keys);
@@ -572,6 +579,7 @@ export async function createWorldSystem(ctx: GameContext): Promise<GameSystem> {
 
   const ray = new THREE.Ray();
   const box = new THREE.Box3();
+  const standBox = new THREE.Box3();
   const hit = new THREE.Vector3();
   let target: { w: WorldEntity; d: DynamicObject | undefined; use?: UseTarget } | null = null;
 
@@ -626,6 +634,8 @@ export async function createWorldSystem(ctx: GameContext): Promise<GameSystem> {
       const dx = c[12] - eye.x, dy = c[13] - eye.y, dz = c[14] - eye.z;
       if (dx * dx + dy * dy + dz * dz > 36) continue;
       dyn.bounds(d, box);
+      // A lever's box (its p37 base) is looked at as the switch.
+      if (d.stand?.visible) box.union(dyn.bounds(d.stand, standBox));
       const p = ray.intersectBox(box, hit);
       if (!p) continue;
       const t = p.distanceTo(eye);
@@ -705,9 +715,21 @@ export async function createWorldSystem(ctx: GameContext): Promise<GameSystem> {
   const seeThroughStatic = () => {
     if (!staticSeeThrough) {
       const alpha = new Set((loaded.textures ?? []).filter((t) => t.hasAlpha).map((t) => t.key));
-      staticSeeThrough = seeThroughParts(loaded.level?.parts ?? [], (k) => alpha.has(k));
+      // Collision parts: AI sight passes an object with engine +8 bit 0x20000 (MeshPart.sightPass,
+      // docs/game-logic.md §14.10); the drawn parts (no collision parts): see-through surfaces.
+      const col = loaded.level?.collision;
+      staticSeeThrough = col ? Uint8Array.from(col, (p) => (p.sightPass ? 1 : 0)) : seeThroughParts(loaded.level?.parts ?? [], (k) => alpha.has(k));
     }
     return staticSeeThrough;
+  };
+  // Drawn parts the eye sees through (LevelRenderer.drawn hits; the actors' draw occlusion).
+  let drawnSeeThrough: Uint8Array | undefined;
+  const seeThroughDrawn = () => {
+    if (!drawnSeeThrough) {
+      const alpha = new Set((loaded.textures ?? []).filter((t) => t.hasAlpha).map((t) => t.key));
+      drawnSeeThrough = seeThroughParts(loaded.level?.parts ?? [], (k) => alpha.has(k));
+    }
+    return drawnSeeThrough;
   };
   const service: WorldService = {
     world,
@@ -748,6 +770,7 @@ export async function createWorldSystem(ctx: GameContext): Promise<GameSystem> {
       }
       return !!seeThroughStatic()[hit.part];
     },
+    eyeThrough: (hit) => (hit.dynamic !== undefined ? service.seeThrough(hit) : !!seeThroughDrawn()[hit.part]),
   };
   ctx.services.world = service;
   ctx.services.inventory = inventory;

@@ -398,13 +398,42 @@ function fromFrontEnd(fe: FrontEnd, readNode: (r: RefKey) => GuiNode | undefined
           place: shift(vs.place),
           choices: FRAME_CAPS.map((v) => ({ label: { text: v ? `${v}` : 'Off' }, value: v, place: vs.choices[0]?.place ? shift(vs.choices[0].place) : undefined })),
         };
-        // In the Use Defaults row's place (8 % below the last value row); Use Defaults moves
-        // down 5.5 % (it still clears Accept / Cancel at 84 %).
-        if (useDefaults >= 0) {
-          const ud = rows[useDefaults];
-          if (ud.place) ud.place = { ...ud.place, rect: { ...ud.place.rect, y: ud.place.rect.y + (5.5 * 480) / 100 } };
-          rows.splice(useDefaults, 0, capRow);
-        } else rows.push(capRow);
+        // Engine addition (docs/enhanced.md): Graphics Mode (Original / Enhanced, applied on the
+        // next start) and the Enhanced quality tier, 5.5 % apart under the frame cap.
+        const gap = (5.5 * 480) / 100;
+        const at = (p: Placed, k: number): Placed => ({ ...p, rect: { ...p.rect, y: p.rect.y + dy + k * gap } });
+        const valuePlace = (k: number) => (vs.choices[0]?.place ? at(vs.choices[0].place, k) : undefined);
+        const modeRow: MenuItem = {
+          type: 'choice',
+          label: { text: 'Graphics Mode' },
+          setting: 'x.gfxMode',
+          place: at(vs.place, 1),
+          choices: ['Original', 'Enhanced'].map((t, i) => ({ label: { text: t }, value: i, place: valuePlace(1) })),
+        };
+        const tierRow: MenuItem = {
+          type: 'choice',
+          label: { text: 'Enhanced Quality' },
+          setting: 'x.gfxTier',
+          place: at(vs.place, 2),
+          choices: ['Auto', 'Low', 'Medium', 'High', 'Ultra'].map((t, i) => ({ label: { text: t }, value: i, place: valuePlace(2) })),
+        };
+        if (useDefaults >= 0) rows.splice(useDefaults, 0, capRow, modeRow, tierRow);
+        else rows.push(capRow, modeRow, tierRow);
+        // Nine value rows do not fit the game's 8 % spacing above Accept / Cancel (84 %): the
+        // rows keep their first row's place and close up to 6 % apart; Use Defaults follows
+        // 7.5 % below the last one.
+        const values = rows.filter((r) => (r.type === 'choice' || r.type === 'slider') && r.place);
+        const y0 = values[0]?.place?.rect.y ?? 0;
+        const step = (6 * 480) / 100;
+        const move = <T extends { rect: Rect }>(q: T | undefined, d: number): T | undefined => (q ? { ...q, rect: { ...q.rect, y: q.rect.y + d } } : q);
+        values.forEach((r, k) => {
+          const d = y0 + k * step - r.place!.rect.y;
+          r.place = move(r.place, d);
+          if (r.type === 'choice') r.choices = r.choices.map((c) => ({ ...c, place: move(c.place, d) }));
+          if (r.type === 'slider') r.meter = move(r.meter, d);
+        });
+        const ud = rows.find((r) => r.type === 'button' && r.action.kind === 'graphicsDefaults');
+        if (ud?.place) ud.place = { ...ud.place, rect: { ...ud.place.rect, y: y0 + (values.length - 1) * step + (7.5 * 480) / 100 } };
       }
     }
     // Engine addition: master volume on the audio pages, below the game's rows.
