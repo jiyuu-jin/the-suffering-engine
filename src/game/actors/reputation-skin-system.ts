@@ -30,6 +30,7 @@ import type { EntityPackageSet, PropValue } from '../../formats/entities';
 import { readObjectTemplate } from '../../formats/entities';
 import { readModel, type PackageSet, type ResRef } from '../../formats/model';
 import { modelTexture } from '../weapons/models';
+import { enhancedTextures } from '../../app/surface-material';
 import { registerSave } from '../save/providers';
 import {
   bloodFromGenerator,
@@ -129,8 +130,10 @@ export function createReputationSkinSystem(ctx: GameContext): GameSystem {
     mats.forEach((m, i) => {
       const k = textures[slots[i]];
       if (slots[i] < 0 || !k || !('map' in m) || !m.map) return;
-      const tex = modelTexture(pkgs, k);
-      if (tex && m.map !== tex) m.map = tex;
+      const base = modelTexture(pkgs, k);
+      // Enhanced mode: the texture cache's upscaled albedo (surface-material.ts enhancedTextures).
+      const tex = base && enhancedTextures.texture ? enhancedTextures.texture(k, false, base) : base;
+      if (tex && m.map !== tex) (m.map = tex), enhancedTextures.bind?.(m, k);
     });
     ud.repSkin = sig;
   };

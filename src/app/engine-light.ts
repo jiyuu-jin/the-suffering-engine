@@ -48,6 +48,7 @@ import {
   int,
   materialColor,
   materialOpacity,
+  materialReference,
   mix,
   normalWorld,
   output,
@@ -395,7 +396,7 @@ const shadowTerm = Fn(([P, Nrm]: N[]) => {
  * (level geometry, .ldu props); otherwise ambient + directional lights stand in for them.
  */
 export function engineLitColor(tex: N, opts: EngineLightOptions): N {
-  const lit = engineStages(toSrgb(vec3(tex)).mul(engineLightFactor(opts)));
+  const lit = engineStages(engineAlbedo(toSrgb(vec3(tex))).mul(engineLightFactor(opts)));
   // Characters (light-set objects) are casters, not receivers: the receiver pass redraws the
   // scene geometry under a caster's shadow (0x4ce1a0), and a character receiving its own
   // silhouette darkened its legs and lap in patches [inferred: no self-shadowing in the
@@ -431,7 +432,50 @@ export const enhancedShading: {
    * enhancedMaps).
    */
   surface?(maps: EnhancedMaps, sample: (t: THREE.Texture) => N, coords: N): unknown;
+  /** Albedo (gamma) of a lit pass's texture colour (gamma): white is not a light source. */
+  albedo?(g: N): N;
+  /** Colour (linear) of a glow-marked surface (scene-glow.ts marks): an emitter in the HDR frame. */
+  glow?(rgb: N): N;
+  /** Textures every lit Enhanced graph samples in its fragment stage (its shadow maps). */
+  textures?: number;
 } = {};
+
+/**
+ * Sampled textures a fragment shader may bind: WebGPU's default maxSampledTexturesPerShaderStage
+ * (three.js requests no higher limit, and many adapters have no more). A pipeline over it fails
+ * to build and its objects are not drawn.
+ */
+export const MAX_FRAGMENT_TEXTURES = 16;
+/** Textures of the projected character shadows that every lit, non-light-set surface samples. */
+export const ENGINE_SHADOW_TEXTURES = MAX_SHADOWS;
+
+/**
+ * Fragment textures a surface's Enhanced maps add: one per distinct map texture, plus the
+ * surface hook's own (`detail`).
+ */
+export function enhancedMapsTextures(m: EnhancedMaps | undefined): number {
+  if (!m) return 0;
+  return new Set([m.normal, m.roughness, m.specular].filter(Boolean)).size + (m.detail ?? 0);
+}
+
+/**
+ * The maps that fit in `room` fragment textures, dropping by priority: the detail maps first,
+ * then the roughness / specular map, then the normal map (undefined when none fits).
+ */
+export function fitEnhancedMaps(m: EnhancedMaps | undefined, room: number): EnhancedMaps | undefined {
+  if (!m) return undefined;
+  const steps: EnhancedMaps[] = [m, { ...m, detail: 0 }, { normal: m.normal, normalScale: m.normalScale }, {}];
+  for (const c of steps) if (enhancedMapsTextures(c) <= room && (c.normal || c.roughness || c.specular)) return c;
+  return undefined;
+}
+
+/**
+ * The texture colour (gamma) a lit pass multiplies by its light: the colour itself, or in
+ * Enhanced mode its albedo (enhancedShading.albedo).
+ */
+export function engineAlbedo(g: N): N {
+  return enhancedShading.albedo ? enhancedShading.albedo(g) : g;
+}
 
 /**
  * Generated per-texture maps for Enhanced mode (docs/enhanced.md "Extension points"): a
@@ -444,6 +488,11 @@ export interface EnhancedMaps {
   specular?: THREE.Texture;
   /** Normal map strength (default 1). */
   normalScale?: number;
+  /**
+   * Extra textures the installed surface hook samples with these maps (the generated cache's CC0
+   * detail maps: 2); 0 or unset tells the hook to leave them out.
+   */
+  detail?: number;
 }
 
 /** Uniforms and light arrays the Enhanced mode reads (src/app/enhanced/*). */
@@ -531,7 +580,7 @@ export function applyEngineLighting<M extends THREE.NodeMaterial>(m: M, tex: N, 
  * Engine-light a standard material from its own `map` × `color` (characters, held weapons,
  * props). No-op with `?lighting=legacy`.
  */
-export function engineLightMaterial<M extends THREE.NodeMaterial>(m: M, opts: EngineLightOptions & { emissive?: N }): M {
+export function engineLightMaterial<M extends THREE.NodeMaterial>(m: M, opts: EngineLightOptions & { emissive?: N; enhancedMaps?: EnhancedMaps }): M {
   if (LEGACY_LIGHTING) return m;
   const c: N = materialColor;
   if (opts.emissive) return applyEngineLighting(m, c.rgb, c.a.mul(materialOpacity), opts);
@@ -539,9 +588,22 @@ export function engineLightMaterial<M extends THREE.NodeMaterial>(m: M, opts: En
   // shader by the ids of its nodes, so a graph of its own made each character / prop / held-item
   // material build the same shader again (docs/game-logic.md §18.8). The texture and colour come
   // from the material being drawn (materialColor reads its current `map` and `color`).
-  const key = `${opts.precomputed ? 1 : 0}${opts.lightSet ? 1 : 0}`;
+  // Enhanced mode: `enhancedMaps` gives the layout of generated maps (normal; roughness /
+  // specular), which the graph samples from the drawn material's `enhancedMapTextures` (set by
+  // the texture enhancement, neutral stand-ins where it has none): still one graph per layout.
+  const maps = enhancedShading.surface && opts.enhancedMaps && (opts.enhancedMaps.normal || opts.enhancedMaps.roughness || opts.enhancedMaps.specular) ? opts.enhancedMaps : undefined;
+  const surf = maps && (maps.roughness ?? maps.specular);
+  const key = `${opts.precomputed ? 1 : 0}${opts.lightSet ? 1 : 0}${maps ? `|m${maps.normal ? 'n' : ''}${surf ? 's' : ''}` : ''}`;
   let node = sharedEngineColor.get(key);
-  if (!node) sharedEngineColor.set(key, (node = vec4(engineLitColor(c.rgb, opts), c.a.mul(materialOpacity))));
+  if (!node) {
+    let o: EngineLightOptions = opts;
+    if (maps) {
+      const layout: EnhancedMaps = { normal: maps.normal, roughness: surf, specular: surf, normalScale: maps.normalScale };
+      const ref = (t: THREE.Texture): N => materialReference(`enhancedMapTextures.${t === maps.normal ? 'normal' : 'surface'}`, 'texture');
+      o = { ...opts, surface: enhancedShading.surface!(layout, ref, uv()) };
+    }
+    sharedEngineColor.set(key, (node = vec4(engineLitColor(c.rgb, o), c.a.mul(materialOpacity))));
+  }
   m.colorNode = node;
   m.lights = false;
   (m as THREE.Material & { vertexColors: boolean }).vertexColors = false;

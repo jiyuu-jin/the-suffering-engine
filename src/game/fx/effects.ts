@@ -36,6 +36,7 @@ import { followMatrices } from './attachments';
 import type { Fx, SpawnContext, TemplateInfo } from '../world/fx';
 import { colorOf } from '../world/fx';
 import type { Decals } from './decals';
+import { gore } from './gore-bus';
 import type { CameraShaker } from './shake';
 import { CameraShaker as Shaker } from './shake';
 import type { Surfaces } from './surfaces';
@@ -213,7 +214,8 @@ export class Effects {
         this.bloodPool(v, at);
         break;
       case 'Blood Point Generator':
-        this.bloodSpray(v, M, null);
+        // Enhanced mode's gore throws its own drops (gore-bus.ts; never set in Original).
+        if (!gore.listener?.spray?.(v, M)) this.bloodSpray(v, M, null);
         break;
       case 'Water Ripple':
         this.ripple(t.model, v, M);
@@ -269,6 +271,7 @@ export class Effects {
     const look = this.lookOfMaterial(isRef(v[0]) ? (v[0] as ResRef) : undefined);
     const size = Math.max(0.2, (num(v[3], 45) / 100) * 2);
     const start = Math.min(1, num(v[1], 0.25) / size);
+    if (gore.listener?.pool?.(new THREE.Vector3(...h.point), new THREE.Vector3(...h.normal), size, Math.max(0.5, num(v[2], 4)), Math.min(1, num(v[4], 80) / 100))) return;
     this.decal(look, new THREE.Vector3(...h.point), new THREE.Vector3(...h.normal), size, Math.min(600, num(v[6], 1000)), { opacity: Math.min(1, num(v[4], 80) / 100), growFrom: start, grow: Math.max(0.5, num(v[2], 4)), fade: 4 });
   }
 

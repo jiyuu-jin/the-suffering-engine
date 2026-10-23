@@ -72,6 +72,7 @@ import { loadSettings } from '../../app/menu/settings';
 import { bakedGain } from '../../app/surface-material';
 import { Surfaces, refKey, refsOf, waterSurfaces, type SurfaceInfo } from './surfaces';
 import { Decals } from './decals';
+import { gore } from './gore-bus';
 import { CameraShaker, type ShakeParams } from './shake';
 import { Effects } from './effects';
 import type { ArcHandle, ArcTarget } from './electric-arc';
@@ -439,6 +440,12 @@ export async function createFxSystem(ctx: GameContext): Promise<GameSystem> {
     const i = info as { amount?: number; source?: unknown } | undefined;
     if (!i || i.source === 'player' || !(num(i.amount as number) > 0)) return;
     const p = new THREE.Vector3(a.position.x, (a.bottom ?? a.position.y) + (a.height ?? 1.6) * 0.6, a.position.z);
+    // Enhanced mode's gore draws it (gore-bus.ts; never set in Original).
+    if (gore.listener?.hit) {
+      const by = (info as { by?: { position: THREE.Vector3Like } }).by?.position;
+      const d = by ? new THREE.Vector3(p.x - by.x, 0, p.z - by.z) : new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5);
+      if (gore.listener.hit(p, d.lengthSq() > 1e-6 ? d.normalize() : d.set(0, 0, 1), num(i.amount as number) / 15)) return;
+    }
     effects.bloodSpray([5, 20, Math.min(3, 1 + num(i.amount as number) / 10), 360], new THREE.Matrix4().setPosition(p), null);
   });
 
@@ -478,12 +485,27 @@ export async function createFxSystem(ctx: GameContext): Promise<GameSystem> {
 
   // --- Service.
   const bloodNear = (point: THREE.Vector3, dir: THREE.Vector3, look: ReturnType<Effects['bloodLook']>, amount: number) => {
+    if (gore.listener?.hit?.(point, dir, amount)) return;
     effects.bloodSpray([-5, 25, 1.5 + amount * 1.5, 120], new THREE.Matrix4().setPosition(point), look, dir);
     // A splat on the surface right behind the hit [inferred].
     const col = collision();
     const h = col?.raycast(point.x, point.y, point.z, dir.x, dir.y, dir.z, 2.5);
     if (h) effects.decal(look ?? effects.defaultBlood, new THREE.Vector3(...h.point), new THREE.Vector3(...h.normal), 0.4 + 0.4 * Math.random() * amount, 40, { fade: 4 });
   };
+
+  // Enhanced mode's gore (gore-bus.ts): the level it draws into. Never set in Original.
+  gore.listener?.attach({
+    scene: view.scene,
+    camera: view.camera,
+    drawn: () => view.drawn ?? view.collision,
+    collision,
+    lightAt: (p, parts) => surfaces.lightAt(p, parts, 1),
+    actors: () => (actors()?.list() ?? []) as never,
+    player: () => {
+      const c = combat() as (CombatLike & { player: { maxHealth?: number } }) | undefined;
+      return c && view.walking ? { health: c.player.health, maxHealth: c.player.maxHealth ?? 100, alive: c.player.alive !== false } : null;
+    },
+  });
 
   const service: FxService = {
     spawn: (ref, M, sctx) => wfx.spawn(ref, M, sctx ?? {}),
@@ -644,6 +666,7 @@ export async function createFxSystem(ctx: GameContext): Promise<GameSystem> {
         if (h < lastHealth - 15 && h > 0) shaker.start({ a: 0.04, b: 0.04, time: 0.3, fade: 0.3, inner: 1e9, outer: 1e9 });
         lastHealth = h;
       }
+      gore.listener?.update(dt);
       settingsAcc += dt;
       if (settingsAcc > 1) {
         settingsAcc = 0;
@@ -656,6 +679,7 @@ export async function createFxSystem(ctx: GameContext): Promise<GameSystem> {
       shaker.remove();
       offFrame();
       offDamage?.();
+      gore.listener?.detach();
       for (const sp of [effects.spawner, billboards.spawner, rebirth.spawner]) {
         const i = wfx.spawners.indexOf(sp);
         if (i >= 0) wfx.spawners.splice(i, 1);

@@ -90,6 +90,7 @@ import type { PlayerBody } from '../actors/player-body';
 import { AttachService } from './attach';
 import { buildHeldModel, buildStaticModel, flashCards, type HeldModel } from './models';
 import { weaponFx } from './fx';
+import { bouncingLaunch, FOUNTAIN_GRAVITY } from '../world/fx';
 import { NpcWeapons, type NpcLike } from './npc';
 import { THROWN_GRAVITY, ammoDef, ammoLabel, bounceHit, bounceSound, explosionDamage, thrownDefOf, flashlightLampOn, holdsFlashlight, keyOf, projectileDamage, projectileForce, readPlayerWeaponProps, templateClass, tpl, weaponDef, type ProjectileDef, type SurfaceProps, type ThrownDef, type WeaponDef } from './data';
 import { hudBus } from '../hud/bus';
@@ -237,6 +238,8 @@ interface Thrown {
   rest: boolean;
   /** Bounces counted so far (BouncingObject p49 / p50). */
   bounces?: number;
+  /** Gravity (m/s², positive down) of its decoded launch (casings: bouncingLaunch). */
+  grav?: number;
 }
 interface Effect {
   obj: THREE.Object3D;
@@ -642,14 +645,21 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     // The casing models use the face layout model.ts can't read yet: a small brass cylinder.
     const g = buildStaticModel(pkgs, def.casing) ?? new THREE.Mesh(casingGeo, matBrass);
     g.position.setFromMatrixPosition(b.matrixWorld);
-    const right = new THREE.Vector3(Math.cos(view.player.yaw), 0, -Math.sin(view.player.yaw));
-    const vel = right.multiplyScalar(1.5 + Math.random()).add(new THREE.Vector3(0, 2, 0));
-    // The casing generator's BouncingObject (p86 -> 4:64 / 4:87 / 4:664) bounces like a thrown
-    // one and clinks on each bounce (p62 / p63); it goes p54 s after settling, or after p12.
+    // The casing generator (Ranged Weapon p86) is created at the weapon's p88 bone (Suffering.rfl
+    // 0x10127a54..0x10127af9, engine vt+0x94: the bone's world matrix) and hands its object
+    // (4:64 / 4:87 / 4:664) a projectile record and that matrix: the object flies its own launch,
+    // the bone's -Z at p2 (5000 units/s, 2.44 m/s), p46 +- p47 % of the world's gravity, p12 s
+    // (world/fx.ts generatorSpawn / bouncingLaunch) [verified; the bone frame taken as the port's
+    // bone matrix, inferred]. Generators 4:71 / 4:88 / 4:259 turn nothing (p9..p20 all 0).
+    // It bounces like a thrown one and clinks on each bounce (p62 / p63); it goes p54 s after
+    // settling, or after p12.
     const td = def.casingObject;
+    const cv = td ? tpl(epk, td.template)?.v : undefined;
+    const l = cv ? bouncingLaunch(cv, b.matrixWorld, FOUNTAIN_GRAVITY, Math.random(), true) : undefined;
+    const vel = l?.vel ?? new THREE.Vector3(Math.cos(view.player.yaw), 0, -Math.sin(view.player.yaw)).multiplyScalar(2).add(new THREE.Vector3(0, 2, 0));
     if (!td) return addEffect(g, 1.2, 'casing', vel);
     fxGroup.add(g);
-    thrown.push({ def, td, casing: true, mesh: g, vel, fuse: td.fuse || 1.2, rest: false });
+    thrown.push({ def, td, casing: true, mesh: g, vel, fuse: l?.life || td.fuse || 1.2, rest: false, grav: l?.gravity });
   };
 
   // Wall impacts: the projectile's Missile Material Effects entry (p0 Material Type, p1 sounds,
@@ -1103,7 +1113,7 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
       const td = t.td;
       t.fuse -= dt;
       if (!t.rest) {
-        t.vel.y -= THROWN_GRAVITY * (td.gravityPct / 100) * dt;
+        t.vel.y -= (t.grav ?? THROWN_GRAVITY * (td.gravityPct / 100)) * dt;
         const step = t.vel.length() * dt;
         const p = t.mesh.position;
         if (step > 1e-4) {
@@ -1118,7 +1128,9 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
           if (w) {
             const n = new THREE.Vector3(...w.normal);
             p.set(w.point[0], w.point[1], w.point[2]).addScaledVector(n, 0.05);
-            t.vel.reflect(n).multiplyScalar(td.restitution);
+            // Mirror x (1 - p51 %) x (1 - the surface's Game Material Properties p4 %) (world/fx.ts
+            // bounceKeep, Suffering.rfl 0x1009ac0f) [verified].
+            t.vel.reflect(n).multiplyScalar(td.restitution * Math.max(0, 1 - (surfaceProps(w)?.damping ?? 0) / 100));
             // BouncingObject bounce rules (RFL 0x1009a8c0 [code], data.ts bounceHit): every hit
             // counts; at p49 it settles when p50 is set or the hit is a floor, else the hit is
             // taken back. A settled grenade detonates p54 s later (the Molotov and the

@@ -21,6 +21,7 @@ import { readHitTables } from './hit-react';
 import { readMeleeWeapons } from './npc-melee';
 import { resistanceForceMultiplier, resistanceMultiplier } from '../fx/gas';
 import { ENGINE_UNITS, THROWN_GRAVITY } from '../weapons/data';
+import { FOUNTAIN_GRAVITY, modelBoundsRadius } from '../world/fx';
 
 export interface ActorHit {
   actor: Actor;
@@ -361,8 +362,28 @@ export class ActorManager {
         shot = { ...(m?.cls === 'Missile' ? missile(m, Math.max(1, n(gen!.v[2], 1))) : { damage: 6, speed: 98 }), spread: n(w.v[75], 3), flash };
         break;
       }
+      // A Missile listed directly (the Mainliner's needle 10:1814) is thrown on the clip's
+      // ThrowWeapon (230) markers like a BouncingObject (0x100fd026 takes either class) and then
+      // flies as a real projectile (actors/missile.ts): p1 speed, p46 % of the world's gravity,
+      // p9 reach and p10 fallback elevation for the aim, p12 life, p26 damage of type p32, p34 at
+      // the impact; its sweep radius is its model's bounds radius [verified, docs/game-logic.md
+      // §15.7.4].
       if (w?.cls === 'Missile') {
         shot = missile(w);
+        const speed = n(w.v[1], 45000) / ENGINE_UNITS;
+        const model = readObjectTemplate(this.pkgs, r)?.modelRef;
+        thrown = {
+          template: { pkg: r.pkg, id: r.id },
+          aimMode: n(w.v[0], 0),
+          aim: { speed, gravity: FOUNTAIN_GRAVITY * (n(w.v[46], 100) / 100), reach: n(w.v[9], 0), fallbackDeg: n(w.v[10], 45) },
+          missile: {
+            damage: n(w.v[26], 0),
+            type: n(w.v[32], 1),
+            life: n(w.v[12], 5),
+            radius: (model && modelBoundsRadius(this.pkgs as unknown as PackageSet, model)) || 0,
+            impact: list(w.v[34]),
+          },
+        };
         break;
       }
     }
@@ -414,7 +435,10 @@ export class ActorManager {
     // Pause between attacks: p19..p20 (port reading; the original reads them only with p18 set,
     // 0x100f2cc0, and otherwise leaves the timing to the parent KillProjectile / reposition
     // behaviour, which is not modelled).
-    return { attacks, cooldownMin: n(b.v[19], 2), cooldownMax: Math.max(n(b.v[19], 2), n(b.v[20], 4)), range, damage: shot.damage, type: shot.type, speed: shot.speed, spread: shot.spread ?? 0, flash: shot.flash, noise: shot.noise, thrown, track, aim };
+    // ProjectileAttackBehavior p5 != 0: a throw keeps the aim point taken when the firing clip
+    // started (0x100fd069..0x100fd0b9) [verified]; 18 of 20 retail behaviours set it.
+    const keepAim = n(b.v[5], 0) !== 0;
+    return { keepAim, attacks, cooldownMin: n(b.v[19], 2), cooldownMax: Math.max(n(b.v[19], 2), n(b.v[20], 4)), range, damage: shot.damage, type: shot.type, speed: shot.speed, spread: shot.spread ?? 0, flash: shot.flash, noise: shot.noise, thrown, track, aim };
   }
 
   /**

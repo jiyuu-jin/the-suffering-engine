@@ -8,6 +8,8 @@
     "typecheck": "tsc --noEmit",
     "dump": "tsx tools/dump.ts",
     "bake": "tsx tools/bake.ts",
+    "enhance-textures": "tsx tools/enhance-textures.ts",
+    "enhance-detail": "tsx tools/enhance-detail.ts",
     "test": "node --import tsx --test tests/*.test.ts",
     "smoke": "node tools/smoke.mjs",
     "e2e:gamepad": "node tools/gamepad-e2e.mjs",

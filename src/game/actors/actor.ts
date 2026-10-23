@@ -42,6 +42,7 @@ import { attackStartsFight, DEFAULT_SIGHT, inSight, jumpVelocity, noiseHeard, PL
 import { hearsNoise } from '../../app/audio-rules';
 import { sightBlocked, type SeeThrough } from './sight';
 import { ballisticLaunch, type ThrowAim } from './throw';
+import { missileStep, type MissileBody, type MissileFlight } from './missile';
 import type { ClipRef } from './clipmap';
 import { difficulty } from '../campaign/difficulty';
 import { npcBlowDamage, shapeWorld, sweepSpheres, type HitSphereLike, type NpcMeleeWeapon, type SwingWindow } from './npc-melee';
@@ -114,7 +115,21 @@ export interface RangedProfile {
    * A thrown weapon (a BouncingObject in the weapon set, 6a / 6b's stranger: the molotov
    * 10:1863): it leaves on the clip's ThrowWeapon (230) markers, aimed by actors/throw.ts.
    */
-  thrown?: { template: { pkg: number; id: number }; aimMode: number; aim: ThrowAim };
+  thrown?: {
+    template: { pkg: number; id: number };
+    aimMode: number;
+    aim: ThrowAim;
+    /**
+     * A thrown Missile (the Mainliner's needle): flown by the actor (actors/missile.ts) and set
+     * off by its first contact. p26 damage, p32 type, p12 life (s), bounds radius (m), p34.
+     */
+    missile?: { damage: number; type: number; life: number; radius: number; impact: { pkg: number; id: number }[] };
+  };
+  /**
+   * ProjectileAttackBehavior p5 != 0: a throw goes to the aim point taken when the firing clip
+   * started, not where the target is at the ThrowWeapon marker [verified: 0x100fd069].
+   */
+  keepAim?: boolean;
 }
 
 /**
@@ -269,6 +284,8 @@ export interface ActorEnv {
   weaponMuzzle?(a: Actor, r: RangedProfile): THREE.Vector3Like | undefined;
   /** Muzzle flash / tracer for ranged attacks; `speed` (m/s) for slow projectiles that fly visibly. */
   shotFx?(from: THREE.Vector3Like, to: THREE.Vector3Like, hit: boolean, speed?: number): void;
+  /** Spawn an effect template (Object Generator, ...) at a point, facing `normal` when given. */
+  spawnFx?(template: { pkg: number; id: number }, at: THREE.Vector3Like, normal?: THREE.Vector3Like): void;
   /** Release a thrown object (a BouncingObject template) at `from` with velocity `vel` (m/s). */
   throwObject?(template: { pkg: number; id: number }, from: THREE.Vector3Like, vel: THREE.Vector3Like, by: Actor): void;
   /**
@@ -537,7 +554,7 @@ export class Actor {
    * The ranged attack under way (state 'shoot'): aim (aim pose until facing the target), fire
    * (the firing clip, shot at its Fire marker), pause (aim pose) and aim again until `left` is 0.
    */
-  private shot?: { attack: RangedAttack; clip: number; aim: number; aimBone: number; phase: 'aim' | 'fire' | 'pause'; t: number; until: number; left: number; done: boolean; fired: number };
+  private shot?: { attack: RangedAttack; clip: number; aim: number; aimBone: number; phase: 'aim' | 'fire' | 'pause'; t: number; until: number; left: number; done: boolean; fired: number; aimAt?: THREE.Vector3Like };
   /** Behaviour scratch state. */
   private b: {
     phase: number;
@@ -1717,6 +1734,7 @@ export class Actor {
     this.attackDelay -= dt;
     this.updateLook(env);
     if (this.inFlight.length) this.updateInFlight(env);
+    if (this.missiles.length) this.updateMissiles(dt, env);
     if (this.lookAtPlayer > 0) {
       this.lookAtPlayer -= dt;
       const p = env.player.position;
@@ -2727,6 +2745,10 @@ export class Actor {
       s.t = 0;
       s.done = false;
       s.fired = 0;
+      // The Fire state's entry takes the target's aim point while none is kept (0x100fcc31; the
+      // behaviour's start clears it) [verified]: a throw with ProjectileAttackBehavior p5 set goes
+      // there (fire).
+      s.aimAt ??= { ...this.aimPoint(env, t) };
       // The firing clip plays on the whole body: it takes a channel aim pose over (0x470f20).
       if (s.aimBone > 0) this.ch.releaseLayers(0.1);
       if (s.clip >= 0) {
@@ -2846,6 +2868,50 @@ export class Actor {
     else env.damageActor(t.actor!, damage, this, h);
   }
 
+  /** Thrown Missiles in flight (actors/missile.ts). */
+  private missiles: { f: MissileFlight; spec: NonNullable<NonNullable<RangedProfile['thrown']>['missile']> }[] = [];
+
+  /**
+   * Fly the thrown Missiles one step (missileStep): the world's front faces and every body's hit
+   * spheres but the thrower's. The first contact sets it off: p26 damage to the body it touched,
+   * p34 spawned there; a needle that only meets the world does no damage.
+   */
+  private updateMissiles(dt: number, env: ActorEnv) {
+    const bodies: MissileBody<Target>[] = [];
+    if (env.playerAlive) bodies.push({ body: { player: true } as Target, spheres: env.hitSpheres?.('player') ?? [] });
+    for (const a of env.actors) {
+      if (a === this || !a.alive || a.kind.decor || a.hidden) continue;
+      const sp = env.hitSpheres?.(a) ?? [];
+      // Without posed spheres: the body's capsule axis as three spheres [port].
+      bodies.push({ body: { actor: a } as Target, spheres: sp.length ? sp : [0.25, 0.5, 0.75].map((k) => ({ c: [a.position.x, a.bottom + a.height * k, a.position.z], r: a.radius })) });
+    }
+    // The projectile layer: Invisible Static Objects with p5 stop it (world/blockers.ts).
+    const w = env.world;
+    const sweep = {
+      frontSegmentCast: (ax: number, ay: number, az: number, bx: number, by: number, bz: number, r?: number) => {
+        const l = w.queryLayers;
+        w.queryLayers = l | COLLISION_LAYER.projectile;
+        try {
+          return w.frontSegmentCast(ax, ay, az, bx, by, bz, r);
+        } finally {
+          w.queryLayers = l;
+        }
+      },
+    };
+    for (let i = this.missiles.length - 1; i >= 0; i--) {
+      const { f, spec } = this.missiles[i];
+      const from = { ...f.p };
+      const c = missileStep(f, dt, sweep, bodies);
+      const len = Math.hypot(f.p.x - from.x, f.p.y - from.y, f.p.z - from.z);
+      if (len > 1e-4) env.shotFx?.(from, f.p, true, len / Math.max(dt, 1e-3));
+      if (!c) continue;
+      this.missiles.splice(i, 1);
+      if (c.kind === 'expired') continue;
+      for (const g of spec.impact) env.spawnFx?.(g, c.point, c.kind === 'world' ? c.normal : undefined);
+      if (c.kind === 'body') this.hitTarget(env, c.body, spec.damage, { point: c.point, type: spec.type });
+    }
+  }
+
   /** Projectiles in flight (slow missiles): they hit what is still near the aim point on arrival. */
   private inFlight: { t: number; target: Target; at: THREE.Vector3Like; damage: number }[] = [];
 
@@ -2877,8 +2943,14 @@ export class Actor {
     // as any thrown object (the weapons service).
     if (r.thrown) {
       if (r.noise) env.noise?.(muzzle, r.noise, this);
-      const v = r.thrown.aimMode === 1 ? ballisticLaunch(muzzle, aim, r.thrown.aim) : ballisticLaunch(muzzle, { x: muzzle.x + fx, y: muzzle.y, z: muzzle.z + fz }, { ...r.thrown.aim, reach: 0, fallbackDeg: 0 });
-      env.throwObject?.(r.thrown.template, muzzle, v, this);
+      // ProjectileAttackBehavior p5: the aim point kept from the clip's start (0x100fd079).
+      const to = r.keepAim && this.shot?.aimAt ? this.shot.aimAt : aim;
+      const v = r.thrown.aimMode === 1 ? ballisticLaunch(muzzle, to, r.thrown.aim) : ballisticLaunch(muzzle, { x: muzzle.x + fx, y: muzzle.y, z: muzzle.z + fz }, { ...r.thrown.aim, reach: 0, fallbackDeg: 0 });
+      // A thrown Missile (the Mainliner's needle) flies here until its first contact
+      // (actors/missile.ts); a BouncingObject goes to the weapons service.
+      const m = r.thrown.missile;
+      if (m) this.missiles.push({ f: { p: { x: muzzle.x, y: muzzle.y, z: muzzle.z }, v: { x: v.x, y: v.y, z: v.z }, gravity: r.thrown.aim.gravity, age: 0, life: m.life, radius: m.radius }, spec: m });
+      else env.throwObject?.(r.thrown.template, muzzle, v, this);
       return;
     }
     const d = Math.hypot(aim.x - muzzle.x, aim.z - muzzle.z);

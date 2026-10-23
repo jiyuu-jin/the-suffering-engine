@@ -78,6 +78,7 @@ import * as THREE from 'three/webgpu';
 import { classByHash, decodeTemplateProps, readObjectTemplate, type EntityPackageSet, type PropValue } from '../../formats/entities';
 import type { ResRef } from '../../formats/model';
 import { partCapReputation } from '../insanity/reputation';
+import { gore } from '../fx/gore-bus';
 
 const num = (v: PropValue | undefined, d = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
 const ref = (v: PropValue | undefined): ResRef | undefined => (v && typeof v === 'object' && !Array.isArray(v) ? v : undefined);
@@ -567,6 +568,8 @@ export class Dismemberment {
         this.deps.spawn(r.spurt, F, { owner: [] });
         s.follow.push({ bone: r.bone, M: F, until: this.deps.time() + 20 });
       }
+      // Enhanced mode's gore (gore-bus.ts; never set in Original): the stump bleeds.
+      gore.listener?.cut?.(b, a.ch.root, o.dir);
       if (o.byPlayer) {
         s.byPlayer = true;
         const deadFor = a.alive ? undefined : s.diedAt === undefined ? Infinity : this.deps.time() - s.diedAt;

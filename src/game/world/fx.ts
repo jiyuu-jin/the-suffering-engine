@@ -23,12 +23,15 @@
 //   firing takes (generatorPicks), p7 ± p8 s between firings, p21 run time (0 = endless), p22
 //   runs before it is destroyed (0 = any), p24 on from creation, p28 player range (m) with p29 /
 //   p30 height window, p5 destroys its spawns with it, p36 sounds (one random per firing);
-//   inputs p31 Destroy, p32 Start, p33 Stop, p34 Toggle, p35 Prefetch. [inferred] p13 / p14
-//   debris speed and spread, p20 debris cone (deg).
-// BouncingObject: model debris; break pieces get the generator's cone and live p1..p2 ms
-//   [inferred], then shrink away. One spawned with no velocity from its generator flies its own
-//   launch (bouncingLaunch: p1 along -local Z, p46 / p47 gravity, p12 life) and bounces by the
-//   engine rule (bounceVelocity / bounceKeep: p51 and the surface's p4) [verified].
+//   inputs p31 Destroy, p32 Start, p33 Stop, p34 Toggle, p35 Prefetch; p9..p20 shape what each
+//   spawn gets (generatorSpawn: a velocity only Items take, the spawn matrix's p20 turn and p18
+//   facing) [verified].
+// BouncingObject (debris, gibs, the 1a cap) [verified]: created at the generator's spawn matrix,
+//   it flies its own launch (bouncingLaunch: -local Z at p2 with a generator's record, else p1;
+//   p46 / p47 gravity; p12 life; p3..p6 spin), sweeps its origin's segment against front faces
+//   (frontSegmentCast), bounces by bounceVelocity / bounceKeep (p51 and the surface's p4), settles
+//   by p49 / p50 and goes p54 s later, spawning its p34 generators.
+// Particles have no ground test (Emitter.update) [verified].
 
 import * as THREE from 'three/webgpu';
 import { float, instancedBufferAttribute, instancedDynamicBufferAttribute, modelViewMatrix, positionGeometry, rotate, texture as tslTexture, uniform, vec2, vec3, vec4 } from 'three/tsl';
@@ -37,11 +40,13 @@ import type { Entity, EntityPackageSet, PropValue } from '../../formats/entities
 import { readObjectTemplate, className as classNameOf, classByHash, decodeTemplateProps, entityBoxCorners } from '../../formats/entities';
 import { instanceRotation, WORLD_SCALE } from '../../formats/level';
 import { findEntry, readModel, type PackageSet, type ResRef } from '../../formats/model';
-import type { CollisionWorld, RayHit } from '../../app/physics';
+import { COLLISION_LAYER, type CollisionWorld, type RayHit } from '../../app/physics';
+import { bounceHit } from '../weapons/data';
 import type { DynamicObjects, DynamicObject } from './dynamic';
 import type { World } from './logic';
 import { instanceMatrix } from './dynamic';
 import { SFX_MODE } from './sound-effect';
+import { gore } from '../fx/gore-bus';
 
 type Vec3 = [number, number, number];
 
@@ -121,7 +126,6 @@ interface Particle {
   fadeOut: number;
   rot: number;
   spin: number;
-  floor: number;
 }
 
 const POOL_CAP = 2048;
@@ -389,17 +393,127 @@ export function fountainBlend(v: PropValue[]): 0 | 1 | 2 {
 /**
  * Own launch of a BouncingObject handed only a matrix (an Object Generator spawn: 0x100b52a0 gives
  * BouncingObjects / Missiles no velocity, 0x100b5be1) [verified: launch Suffering.rfl 0x100cf8b0]:
- * velocity = -(row +0x34 of the object matrix, its local Z axis) x p1 engine units/s (p1 + (p2 -
- * p1) x strength when the launch carries one, never for a generator); gravity = world gravity x
- * (p46 + uniform(-p47, p47)) % (0x100cfb81..0x100cfbd3); lifetime p12 s (0x100cf8e9). In output
+ * velocity = -(row +0x34 of the object matrix, its local Z axis) x the launch speed (bouncingSpeed:
+ * p1, or p2 when the launch carries a projectile record, `record`: every generator spawn);
+ * gravity = world gravity x (p46 + uniform(-p47, p47)) % (0x100cfb81..0x100cfbd3); lifetime p12 s
+ * (0x100cf8e9); spin bouncingSpin. In output
  * space the local Z axis is column 2 of the port's instance matrix (formats/level.ts
  * instanceRotation reproduces the engine's object matrix: positions are not rotated and models
  * are not converted) [inferred]. 1a "Hat Gen" 7047 (rotation 0): the cap leaves at 9.77 m/s
  * towards +x and falls at 0.75 x 10.41 m/s² (+- 5 %).
  */
-export function bouncingLaunch(t: PropValue[], M: THREE.Matrix4, gravity: number, rand = Math.random()): { vel: THREE.Vector3; gravity: number; life: number } {
-  const vel = new THREE.Vector3().setFromMatrixColumn(M, 2).normalize().multiplyScalar(-num(t[1]) / WORLD_SCALE);
-  return { vel, gravity: (gravity * (num(t[46], 100) + (2 * rand - 1) * num(t[47]))) / 100, life: num(t[12], 10) };
+export function bouncingLaunch(
+  t: PropValue[],
+  M: THREE.Matrix4,
+  gravity: number,
+  rand = Math.random(),
+  record = false,
+): { vel: THREE.Vector3; gravity: number; life: number; spin: THREE.Vector3 } {
+  const vel = new THREE.Vector3().setFromMatrixColumn(M, 2).normalize().multiplyScalar(-bouncingSpeed(t, record) / WORLD_SCALE);
+  return { vel, gravity: (gravity * (num(t[46], 100) + (2 * rand - 1) * num(t[47]))) / 100, life: num(t[12], 10), spin: bouncingSpin(t) };
+}
+
+/**
+ * Launch speed of a Missile / BouncingObject (engine units/s) [verified: Suffering.rfl
+ * 0x100cfa03..0x100cfa40]: p1, or, when the launch is handed a projectile record (record type 2:
+ * every Object Generator spawn, 0x100b5be1 -> 0x100282e0, and every weapon's casing generator),
+ * (p2 - p1) + p1, i.e. p2. No strength or random factor is read there. So break debris with p1 /
+ * p2 = 3000 / 5000 leaves at 5000 units/s (2.44 m/s), the corpse gibs 3:3521 (-500 / -2000) at
+ * -2000: backwards, along +local Z, at 0.98 m/s. The port used to read p1..p2 as a lifetime in ms
+ * (the gibs then lived 0 s and vanished at once).
+ */
+export function bouncingSpeed(t: PropValue[], record: boolean): number {
+  const p1 = num(t[1]);
+  return record ? num(t[2], p1) - p1 + p1 : p1;
+}
+
+/**
+ * Spin of a launched BouncingObject / Missile (rad/s about its local x, y, z) [strong: the launch
+ * 0x100cfc0a..0x100cfc92 hands p4 deg/s about (0, 1, 0), p3 about (1, 0, 0) and p5 about (0, 0, 1)
+ * to 0x100cc400, which sums them into one axis and rate and caps the rate at p6 deg/s; the frame
+ * of the axes is inferred as the object's own]. Crate debris 3:4439: (300, 100, 100) capped at 45
+ * deg/s; the guard's cap 3:1481: (350, 20, 75) under its 720.
+ */
+export function bouncingSpin(t: PropValue[]): THREE.Vector3 {
+  const w = new THREE.Vector3(num(t[3]), num(t[4]), num(t[5])).multiplyScalar(Math.PI / 180);
+  const cap = (num(t[6], 720) * Math.PI) / 180;
+  const l = w.length();
+  return l > cap && l > 0 ? w.multiplyScalar(cap / l) : w;
+}
+
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
+
+/**
+ * What an Object Generator hands one spawned object (Suffering.rfl 0x100b52a0) [verified unless
+ * marked]. Engine object rows X / Y / Z are the port matrix's columns 0 / 1 / 2 (as for
+ * bouncingLaunch); `rand` gives uniform 0..1 (the engine's rand() / 32767). Speeds are p x 2048
+ * units/s in the engine, so p m/s here; p17 is in engine units.
+ *   Velocity V:
+ *     p16 = 0: V = -Z x p9, turned by p11 deg about world up (0, 1, 0), p10 deg about the local X
+ *       axis and p12 deg about the local Z axis (right-handed: 0x1000f910 / 0x1000c5b0); then
+ *       V.y += (0.5 + rand) x p14 and V.x, V.z += uniform(-p13, p13) each.
+ *     p16 != 0 (a cone): -Z turned uniform(p15, p16) deg about the local Y axis, then uniform(0,
+ *       2 pi) about the local Z axis; with p17 > 0 the spawn point moves p17 units back against
+ *       that direction; V = that direction x p9 (p13 / p14 not used).
+ *   Matrix: the generator's own, then p20 != 0 turns it about its own axis p19 (0 X, 1 Y, 2 Z)
+ *     by uniform(-p20, p20) taken as radians (no degree conversion: the retail 180 / 45 are a
+ *     random turn); then p18 with |V| > 0 turns it to face V: local -Z along V (0x1000d070 with
+ *     axis 2 negated, axis 1 from world up), dropping the p20 turn [the roll / handedness of the
+ *     new basis inferred: kept a rotation, Y towards up, like the port's other matrices].
+ *   Inherited velocity (the caller's argument, 0x100b5888): added to V after p18. The fire
+ *     (0x100b616f) passes the generator's +0x2c and +0x38 vectors summed, which only a parent
+ *     generator's record fills (0x100b51de); every generator a level, a Breakable or a weapon
+ *     makes has zero.
+ *   Who takes V: only an Item (class 0x5a410dde, 0x100b5a32 -> 0x10037b60). A BouncingObject or
+ *   a Missile (0x100b5be1) gets the matrix and a projectile record without velocity, and flies
+ *   its own launch along the matrix's -Z (bouncingLaunch with the record: speed p2). So for
+ *   debris the generator's p9..p16 only matter through p18.
+ */
+export function generatorSpawn(gv: PropValue[], M: THREE.Matrix4, inherited?: THREE.Vector3Like, rand: () => number = Math.random): { vel: THREE.Vector3; matrix: THREE.Matrix4 } {
+  const deg = Math.PI / 180;
+  const X = new THREE.Vector3().setFromMatrixColumn(M, 0).normalize();
+  const Y = new THREE.Vector3().setFromMatrixColumn(M, 1).normalize();
+  const Z = new THREE.Vector3().setFromMatrixColumn(M, 2).normalize();
+  const matrix = M.clone();
+  const p9 = num(gv[9]);
+  const d = Z.clone().negate();
+  const vel = new THREE.Vector3();
+  if (!num(gv[16])) {
+    vel.copy(d).multiplyScalar(p9);
+    if (num(gv[11])) vel.applyAxisAngle(WORLD_UP, num(gv[11]) * deg);
+    if (num(gv[10])) vel.applyAxisAngle(X, num(gv[10]) * deg);
+    if (num(gv[12])) vel.applyAxisAngle(Z, num(gv[12]) * deg);
+    const p14 = num(gv[14]), p13 = num(gv[13]);
+    vel.y += (0.5 + rand()) * p14;
+    vel.x += (2 * rand() - 1) * p13;
+    vel.z += (2 * rand() - 1) * p13;
+  } else {
+    const a = (num(gv[15]) + (num(gv[16]) - num(gv[15])) * rand()) * deg;
+    d.applyAxisAngle(Y, a).applyAxisAngle(Z, rand() * 2 * Math.PI);
+    const p17 = num(gv[17]);
+    if (p17 > 0) {
+      const e = matrix.elements;
+      e[12] -= (d.x * p17) / WORLD_SCALE;
+      e[13] -= (d.y * p17) / WORLD_SCALE;
+      e[14] -= (d.z * p17) / WORLD_SCALE;
+    }
+    vel.copy(d).multiplyScalar(p9);
+  }
+  const p20 = num(gv[20]);
+  if (p20) {
+    const axis = [X, Y, Z][Math.min(2, Math.max(0, num(gv[19], 1)))];
+    const pos = new THREE.Vector3().setFromMatrixPosition(matrix);
+    matrix.premultiply(new THREE.Matrix4().makeRotationAxis(axis, (2 * rand() - 1) * p20)).setPosition(pos);
+  }
+  if (num(gv[18]) && vel.lengthSq() > 1e-12) {
+    const pos = new THREE.Vector3().setFromMatrixPosition(matrix);
+    const s = new THREE.Vector3().setFromMatrixScale(matrix);
+    const up = Math.abs(vel.clone().normalize().y) > 0.999 ? new THREE.Vector3(1, 0, 0) : WORLD_UP;
+    // lookAt(eye, target, up) builds +Z = eye - target: -Z points along V.
+    matrix.lookAt(new THREE.Vector3(), vel, up).scale(s).setPosition(pos);
+  }
+  if (inherited) vel.add(inherited as THREE.Vector3);
+  return { vel, matrix };
 }
 
 /**
@@ -456,7 +570,6 @@ export class Emitter {
   private readonly c1 = new THREE.Color();
   private readonly axes: THREE.Vector3[] = [];
   readonly origin = new THREE.Vector3();
-  private floor = -Infinity;
   /** Removed when its emission ended and its particles died (spawned one-shots). */
   oneShot = false;
   /**
@@ -481,12 +594,15 @@ export class Emitter {
   /** p48 = 1: velocity-aligned quads (streakFrame). */
   readonly streak: boolean;
   private readonly frame = { angle: 0, squash: 1 };
+  /** Enhanced mode's gore only (gore-bus.ts): multiplies the lit colour. */
+  goreTint?: THREE.Color;
 
   constructor(
     readonly v: PropValue[],
     M: THREE.Matrix4,
     readonly pools: ParticlePool[],
-    collision: CollisionWorld | null,
+    // Kept for the callers; particles have no ground test (update).
+    _collision: CollisionWorld | null,
     readonly uid = 0,
   ) {
     this.on = num(v[17], 1) !== 0 && num(v[16]) === 0;
@@ -496,8 +612,6 @@ export class Emitter {
     this.streak = fountainStreak(v);
     for (let k = 0; k < 3; k++) this.axes.push(new THREE.Vector3());
     this.place(M);
-    const hit = collision?.raycast(this.origin.x, this.origin.y + 0.05, this.origin.z, 0, -1, 0, 30);
-    this.floor = hit ? hit.point[1] + 0.01 : -Infinity;
     this.start();
   }
 
@@ -569,12 +683,12 @@ export class Emitter {
       p.v.y -= g;
       p.p.addScaledVector(p.v, dt);
       p.rot += p.spin * dt;
-      // Particles come to rest on the floor below the emitter [port: the engine's collision
-      // of particles is not decoded].
-      if (p.p.y < p.floor) {
-        p.p.y = p.floor;
-        p.v.set(0, 0, 0);
-      }
+      // No ground test [verified]: neither the emitter think (Suffering.rfl 0x1011ab10) nor the
+      // engine's particle update (SUFFERING.EXE 0x4ac1e0, run by 0x4ad1cb / 0x4ae85f) queries
+      // collision; a particle flies until its lifetime ends and one that falls through a floor is
+      // hidden by the depth test. The port used to stop every particle at the first surface
+      // straight below the emitter: 1a's wall-box sparks (Breakable 5d69) lay in mid-air on the
+      // box's own collision box, 1.26 m above the floor.
     }
   }
 
@@ -605,7 +719,6 @@ export class Emitter {
       // Upright unless the fountain spins (p49): drip textures hang down [inferred].
       rot: spin ? Math.random() * Math.PI * 2 : 0,
       spin: spin * (Math.random() < 0.5 ? 1 : -1),
-      floor: this.floor,
     });
   }
 
@@ -617,6 +730,7 @@ export class Emitter {
     const np = this.pools.length;
     // p46 = 3: one colour for every live particle, p33 times the light at the emitter.
     const lit = this.lit && !LEGACY_LIGHTING ? litParticleColor(this.v[33], this.light, this.c1Lit) : null;
+    if (lit && this.goreTint) lit.multiply(this.goreTint);
     for (let i = 0; i < this.particles.length; i++) {
       const p = this.particles[i];
       const t = p.age / p.life;
@@ -642,12 +756,16 @@ export class Emitter {
 
 interface Debris {
   d: DynamicObject;
-  /** Centre of the piece (bounding sphere) in model space; p / q move the piece about it. */
-  c: THREE.Vector3;
-  r: number;
+  /**
+   * The point the engine sweeps (its position, or with p25 its bounds centre `c`, model space),
+   * rotation, scale.
+   */
   p: THREE.Vector3;
-  v: THREE.Vector3;
+  c: THREE.Vector3;
   q: THREE.Quaternion;
+  s: THREE.Vector3;
+  v: THREE.Vector3;
+  /** Spin (rad/s about its own axes, bouncingSpin). */
   w: THREE.Vector3;
   age: number;
   life: number;
@@ -655,16 +773,21 @@ interface Debris {
   /** Trail fountains (BouncingObject p36) following the piece, and the matrix they follow. */
   trails?: Emitter[];
   trailM?: THREE.Matrix4;
-  /** Gravity (m/s²) and the speed kept per bounce. */
+  /** Gravity (m/s²) and the speed kept per bounce (bounceKeep: p51). */
   grav: number;
   keep: number;
-  /** BouncingObject rules (own launch): full reflection x keep, like thrown objects. */
-  reflect?: boolean;
   /**
-   * BouncingObject sweep radius (its model's bounds radius): the engine's segment test grows the
-   * triangles it tests by it (CollisionWorld.frontSegmentCast).
+   * Sweep radius (its model's bounds radius): the engine's segment test grows the triangles it
+   * tests by it (CollisionWorld.frontSegmentCast).
    */
-  grow?: number;
+  grow: number;
+  /** Bounces so far, p49 settle count (0 = never), p50 any surface counts, p54 fuse after settling. */
+  bounces: number;
+  settleBounces: number;
+  anySurface: boolean;
+  settleFuse: number;
+  /** p34: generators spawned when it goes off. */
+  detonate: ResRef[];
 }
 
 /**
@@ -674,12 +797,18 @@ interface Debris {
  * 0x100c6e10 as the narrow phase's radius) [strong: the bounds object read as that sphere].
  */
 export function modelBoundsRadius(pkgs: PackageSet, r: ResRef): number | undefined {
+  return modelBoundsSphere(pkgs, r)?.r;
+}
+
+/** Bounds sphere of a model (.mdu type 7): model-space centre and radius. */
+export function modelBoundsSphere(pkgs: PackageSet, r: ResRef): { c: THREE.Vector3; r: number } | undefined {
   const mdu = (pkgs.get(r.pkg) as { mdu?: Parameters<typeof findEntry>[0] } | undefined)?.mdu;
   const e = mdu && findEntry(mdu, 7, r.id);
   if (!mdu || !e || e.size < 24) return undefined;
   const v = mdu.data(e);
   const rad = v.getFloat32(20, true);
-  return Number.isFinite(rad) && rad > 0 ? rad : undefined;
+  if (!(Number.isFinite(rad) && rad > 0)) return undefined;
+  return { c: new THREE.Vector3(v.getFloat32(8, true), v.getFloat32(12, true), v.getFloat32(16, true)), r: rad };
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,6 +1185,8 @@ export class Fx {
     // p0 = 1: emit from inside the fountain's own model box (fountainEmitPoint).
     if (model && num(v[0]) !== 0) em.box = modelBox(this.env.packages, model);
     this.emitters.push(em);
+    // Enhanced mode's gore (gore-bus.ts; never set in Original): blood fountains drip and darken.
+    if (em.lit) gore.listener?.fountain?.(em, texs.map((r) => this.texture(r)));
     return em;
   }
 
@@ -1108,7 +1239,10 @@ export class Fx {
       if (!r) continue;
       for (let n = 0; n < count; n++) {
         if (cap && cap.max > 0 && cap.live.length >= cap.max) continue;
-        const alive = this.spawn(r, M, sub);
+        // Each spawn's matrix (generatorSpawn: p17 / p18 / p20) [verified]; objects that follow
+        // their owner keep the matrix it moves (attachments, parented effects).
+        const turns = !!(num(gv[20]) || num(gv[18]) || (num(gv[16]) && num(gv[17]) > 0));
+        const alive = this.spawn(r, turns && !ctx.owner && !ctx.parent ? generatorSpawn(gv, M).matrix : M, sub);
         if (alive && cap) cap.live.push(alive);
       }
     }
@@ -1174,72 +1308,66 @@ export class Fx {
     }
   }
 
+  /**
+   * A BouncingObject (break debris, gibs, the 1a guard's cap) [verified unless marked;
+   * docs/game-logic.md §14.2 "Debris"]: created at the matrix its spawner hands it (an Object
+   * Generator's: generatorSpawn, p18 / p19 / p20), it flies its own launch (bouncingLaunch: -local
+   * Z at p2 with a generator's record, else p1; p46 / p47 gravity; p12 life; p3..p6 spin) from its
+   * origin, which is where the pieces of a break are modelled around. The engine sweeps the
+   * origin's segment (vt+0x5c), not the piece's centre.
+   */
   private spawnDebris(t: TemplateInfo, M: THREE.Matrix4, ctx: SpawnContext) {
     if (!t.model) return;
     if (this.debris.length > 120) this.removeDebris(0);
-    const d = this.env.dyn.spawnModel(t.model, M, { collides: false, name: `debris:${t.ref.pkg}:${t.ref.id}` });
+    // A generator's spawn carries a projectile record (speed p2); M is already its spawn matrix.
+    const record = !!ctx.gen;
+    const S = M;
+    const d = this.env.dyn.spawnModel(t.model, S, { collides: false, name: `debris:${t.ref.pkg}:${t.ref.id}` });
     if (!d) return;
-    const g = ctx.gen ?? [];
-    const cone = THREE.MathUtils.degToRad(num(g[20], 120) || 120);
-    const speed = (num(g[13], 1) || 1) * 2.2 + Math.random() * num(g[14], 0.5) * 2;
-    // Random direction in a cone around up (tilted towards the push direction).
-    const up = new THREE.Vector3(0, 1, 0);
-    if (ctx.dir) up.addScaledVector(ctx.dir, 0.8).normalize();
-    const th = Math.random() * cone * 0.5, ph = Math.random() * Math.PI * 2;
-    const perp = new THREE.Vector3(1, 0, 0);
-    if (Math.abs(up.x) > 0.9) perp.set(0, 0, 1);
-    const a = perp.clone().cross(up).normalize();
-    const b = up.clone().cross(a).normalize();
-    let dir = up.clone().multiplyScalar(Math.cos(th)).addScaledVector(a, Math.sin(th) * Math.cos(ph)).addScaledVector(b, Math.sin(th) * Math.sin(ph));
-    let launch = speed;
-    let grav = this.gravity, keep = 0.55, reflect = false;
-    let life = rnd(num(t.values[1], 3000), Math.max(num(t.values[1], 3000), num(t.values[2], 5000))) / 1000;
-    // p1 / p2 are launch speeds (bouncingLaunch); a piece whose "life" read so is none (the
-    // corpse gibs 3:2834..: p1 -500..-3000) lives its p12 s instead [port].
-    if (!(life > 0.05)) life = num(t.values[12], 2) || 2;
-    // A generator that gives no speed, spread or cone (p13 / p14 / p20 all 0) leaves the
-    // BouncingObject its own launch (bouncingLaunch) and bounce rules (bounceKeep,
-    // bounceVelocity). 1a "Hat Gen": the guard's cap.
-    const own = num(t.values[1]);
-    if (ctx.gen && !ctx.dir && own > 0 && !num(g[13]) && !num(g[14]) && !num(g[20])) {
-      const l = bouncingLaunch(t.values, M, this.gravity);
-      launch = l.vel.length();
-      dir = l.vel.normalize();
-      grav = l.gravity;
-      life = l.life;
-      keep = bounceKeep(num(t.values[51]));
-      reflect = true;
-    }
+    const l = bouncingLaunch(t.values, S, this.gravity, Math.random(), record);
     const p = new THREE.Vector3(), q = new THREE.Quaternion(), s = new THREE.Vector3();
-    M.decompose(p, q, s);
-    // Pieces are modelled in place around the broken object's origin: simulate their centre.
-    const sph = new THREE.Sphere();
-    const bb = new THREE.Box3();
-    d.pivot.traverse((o) => {
-      const g = (o as THREE.Mesh).geometry;
-      if (g) {
-        g.computeBoundingBox();
-        bb.union(g.boundingBox!);
-      }
-    });
-    bb.getBoundingSphere(sph);
-    const c = sph.center.clone();
-    p.add(c.clone().applyQuaternion(q));
+    S.decompose(p, q, s);
+    let sph = modelBoundsSphere(this.env.packages as unknown as PackageSet, t.model);
+    if (!sph) {
+      const bb = new THREE.Box3();
+      d.pivot.traverse((o) => {
+        const g = (o as THREE.Mesh).geometry;
+        if (g) {
+          g.computeBoundingBox();
+          bb.union(g.boundingBox!);
+        }
+      });
+      const bs = bb.isEmpty() ? new THREE.Sphere() : bb.getBoundingSphere(new THREE.Sphere());
+      sph = { c: bs.center, r: bs.radius };
+    }
+    // p25 = 1: the sweep follows the object's vt+0x64 point instead of its position (the current
+    // position getter 0x100cc1f0; the launch 0x100cf95c seeds the previous one from it too), the
+    // point its detonation (0x100d10b2) and the aim's p48 = 1 also use: its bounds centre
+    // [strong: the 66 retail objects with p25 = 1 are break pieces modelled metres from their
+    // origin, the crate's 3:4439 4.0..5.2 m up; those with p25 = 0 sit on theirs]. The piece
+    // turns about that point.
+    const c = num(t.values[25]) ? sph.c.clone() : new THREE.Vector3();
+    p.add(c.clone().multiply(s).applyQuaternion(q));
+    const grow = sph.r;
     this.debris.push({
       d,
+      s,
       c,
-      r: Math.min(0.2, Math.max(0.02, sph.radius * 0.35)),
       p,
-      v: dir.multiplyScalar(launch),
+      v: l.vel,
       q,
-      w: new THREE.Vector3(rnd(-8, 8), rnd(-8, 8), rnd(-8, 8)),
+      w: l.spin,
       age: 0,
-      life,
+      life: l.life,
       rest: false,
-      grav,
-      keep,
-      reflect,
-      grow: reflect ? (modelBoundsRadius(this.env.packages as unknown as PackageSet, t.model) ?? sph.radius) : undefined,
+      grav: l.gravity,
+      keep: bounceKeep(num(t.values[51])),
+      grow,
+      bounces: 0,
+      settleBounces: num(t.values[49]),
+      anySurface: num(t.values[50]) !== 0,
+      settleFuse: num(t.values[54]),
+      detonate: refList(t.values[34]).filter((r): r is ResRef => !!r),
     });
     // p36: fountains carried by the piece (1a "Hat Gen": the guard's cap 3:1481 trails blood
     // 3:2357 for its p10 = 5 s) [inferred from the data: the only list of fountain templates
@@ -1273,45 +1401,56 @@ export class Fx {
     for (let i = this.debris.length - 1; i >= 0; i--) {
       const x = this.debris[i];
       x.age += dt;
-      if (x.age > x.life + 0.8) {
+      // Lifetime over (p12, or p54 s after settling): the object goes off, its p34 generators
+      // spawn where it is (0x1009a230), and it is removed.
+      if (x.age >= x.life) {
+        if (x.detonate.length) {
+          const at = new THREE.Matrix4().compose(x.p, x.q, this.one.set(1, 1, 1));
+          for (const r of x.detonate) this.spawn(r, at);
+        }
         this.removeDebris(i);
         continue;
       }
       if (!x.rest) {
         x.v.y -= x.grav * dt;
-        const step = x.v.clone().multiplyScalar(dt);
-        const len = step.length();
-        if (col && len > 1e-5) {
-          // BouncingObjects: the engine's sweep (CollisionWorld.frontSegmentCast: the segment to the
-          // new position against front faces, triangles grown by the bounds radius; characters are
-          // not in it [inferred]); other debris keeps the port's two-sided ray.
-          const h = x.reflect
-            ? col.frontSegmentCast(x.p.x, x.p.y, x.p.z, x.p.x + step.x, x.p.y + step.y, x.p.z + step.z, x.grow ?? 0)
-            : col.raycast(x.p.x, x.p.y, x.p.z, step.x / len, step.y / len, step.z / len, len + x.r);
-          if (h) {
-            const n = new THREE.Vector3(...h.normal);
-            x.p.set(h.point[0], h.point[1], h.point[2]).addScaledVector(n, x.reflect ? 0.002 : x.r);
-            // BouncingObject rule (bounceVelocity): mirror x (1 - p51 %) x the surface's keep.
-            if (x.reflect) bounceVelocity(x.v, n, x.keep * (this.surfaceKeep?.(h) ?? 1));
-            else x.v.addScaledVector(n, -1.4 * x.v.dot(n)).multiplyScalar(x.keep);
-            x.w.multiplyScalar(0.6);
-            if (n.y > 0.6 && x.v.length() < 0.6) {
-              x.rest = true;
-              x.v.set(0, 0, 0);
-            }
-          } else x.p.add(step);
-        } else x.p.add(step);
+        const sx = x.v.x * dt, sy = x.v.y * dt, sz = x.v.z * dt;
+        // The engine's sweep (CollisionWorld.frontSegmentCast: the origin's segment to the new
+        // position against front faces, triangles grown by the bounds radius; characters are not
+        // in it [inferred]).
+        // Invisible Static Objects with p5 stop it (world/blockers.ts, the projectile layer).
+        let h: RayHit | null = null;
+        if (col && sx * sx + sy * sy + sz * sz > 1e-10) {
+          const layers = col.queryLayers ?? 0;
+          col.queryLayers = layers | COLLISION_LAYER.projectile;
+          h = col.frontSegmentCast(x.p.x, x.p.y, x.p.z, x.p.x + sx, x.p.y + sy, x.p.z + sz, x.grow);
+          col.queryLayers = layers;
+        }
+        if (h) {
+          const n = new THREE.Vector3(...h.normal);
+          x.p.set(h.point[0], h.point[1], h.point[2]).addScaledVector(n, 0.002);
+          // Every hit counts (0x1009a8c0, weapons/data.ts bounceHit): at p49 it settles when p50
+          // is set or the hit is a floor, and goes p54 s later; otherwise it bounces: mirror x
+          // (1 - p51 %) x the surface's keep (bounceVelocity).
+          const r = bounceHit({ bounces: x.settleBounces, anySurfaceBounces: x.anySurface }, x.bounces, n.y);
+          x.bounces = r.count;
+          if (r.settle) {
+            x.rest = true;
+            x.v.set(0, 0, 0);
+            x.life = Math.min(x.life, x.age + x.settleFuse);
+          } else bounceVelocity(x.v, n, x.keep * (this.surfaceKeep?.(h) ?? 1));
+        } else x.p.set(x.p.x + sx, x.p.y + sy, x.p.z + sz);
+        // Spin about its own axes (bouncingSpin) [frame inferred].
         const wl = x.w.length();
-        if (wl > 1e-4) x.q.premultiply(this.tmpQ.setFromAxisAngle(x.w.clone().divideScalar(wl), wl * dt));
+        if (wl > 1e-6) x.q.multiply(this.tmpQ.setFromAxisAngle(this.tmpV.copy(x.w).divideScalar(wl), wl * dt));
       }
-      // Shrink away after the lifetime.
-      const k = x.age > x.life ? Math.max(0.001, 1 - (x.age - x.life) / 0.8) : 1;
-      // root = T(p) · R(q) · S(k) · T(-c)
-      x.d.root.matrix.compose(x.p, x.q, this.one.set(k, k, k)).multiply(this.tmpM.makeTranslation(-x.c.x, -x.c.y, -x.c.z));
+      // root = T(p) · R(q) · S(s) · T(-c)
+      x.d.root.matrix.compose(x.p, x.q, x.s).multiply(this.tmpM.makeTranslation(-x.c.x, -x.c.y, -x.c.z));
       x.d.root.matrixWorldNeedsUpdate = true;
       x.trailM?.compose(x.p, x.q, this.one.set(1, 1, 1));
     }
   }
+
+  private readonly tmpV = new THREE.Vector3();
 
   update(dt: number, cam: THREE.Camera) {
     dt *= this.env.timeScale();

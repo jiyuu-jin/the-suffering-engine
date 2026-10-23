@@ -308,6 +308,21 @@ async function main() {
         90_000,
         `(() => { const v = window.__view; return !!v && !!window.__enhanced && v.enhanced?.tier === 'low' && v.renderer.info.render.triangles > 10000; })()`,
       );
+      // Enhanced Ultra with the texture cache's maps (when built): every pipeline of the level is
+      // compiled at load and none may fail. A shader over WebGPU's 16 sampled textures per stage
+      // (layered surfaces + generated maps + shadow maps) failed to build: three.js logs it, and
+      // any WebGPU validation error, as an error, which fails the check.
+      await check(
+        'Enhanced Ultra: every pipeline builds, no WebGPU errors (gfx=enhanced&tier=ultra)',
+        `/?skipintro&gfx=enhanced&tier=ultra&level=${LEVEL}`,
+        120_000,
+        `(() => {
+          const v = window.__view;
+          if (!v || v.enhanced?.tier !== 'ultra' || !(v.renderer.info.render.triangles > 10000) || !v.precompiles.length) return false;
+          const st = (window.__smokeUltra ??= { at: performance.now() });
+          return performance.now() - st.at > 3000;
+        })()`,
+      );
       // Levels outside chapter 1 render too, with the scene glow on and in Enhanced mode
       // (1c6b915 shipped chapter 5 throwing from the renderer on every frame: a cloned
       // material's glow mark came back a plain object). Two seconds of frames after the first

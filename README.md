@@ -41,8 +41,23 @@ Without that step the game runs without cutscenes and sound.
 - **Enhanced** is an opt-in modern renderer on the same levels: physically based lighting,
   real-time shadows, volumetric light and a filmic grade, with Low / Medium / High / Ultra
   quality tiers (or Auto). Pick it on the Graphics page (Graphics Mode, applied on the next
-  start) or with `?gfx=enhanced&tier=high`. It uses no third-party assets. See
-  [docs/enhanced.md](docs/enhanced.md).
+  start) or with `?gfx=enhanced&tier=high`. See [docs/enhanced.md](docs/enhanced.md).
+  - **Tiers**: Low and Medium cost about as much as Original. High adds temporal AA, a shadowed
+    lamp and a larger moonlight shadow map. Ultra adds a second shadowed lamp, more volumetric
+    steps, full-resolution ambient occlusion and a subtle soft focus. Lamp shadows are cached and
+    redrawn only where something moves, and Enhanced's passes are compiled at level load rather
+    than on first sight during play.
+  - **Texture enhancement** (optional, High and Ultra get the full set, Medium normal maps only):
+    `npm run enhance-textures` builds upscaled albedo, normal and roughness/specular maps from
+    *your own* install into the gitignored `game/converted/enhanced/` (uses `cwebp` if it is on
+    `PATH`, PNG otherwise). `npm run enhance-detail` optionally downloads one CC0 concrete detail
+    texture from Poly Haven into the same cache. Without the cache, surfaces are drawn as before.
+  - **Gore**: the game's own blood events are drawn as wet films that dry, falling drops that
+    stain where they land, spreading pools, wounds that soak into clothing and a hurt view at low
+    health. It is generated in code and adds nothing the game doesn't already show (`?gore=0`
+    turns it off).
+
+  Apart from that optional CC0 detail texture, Enhanced uses no third-party assets.
 
 ## Getting started
 
@@ -52,6 +67,7 @@ Requires Node.js 22 or newer and a recent desktop browser (WebGPU, with a WebGL2
 npm ci            # install dependencies
 npm run dev       # start the Vite dev server (http://localhost:5173)
 npm run bake      # optional: convert videos and sounds into game/converted/
+npm run enhance-textures  # optional: Enhanced mode texture cache from your install
 ```
 
 ## Testing
@@ -84,7 +100,7 @@ player picks their install folder in the browser.
 | `src/app/` | The browser app: entry point, renderer and lighting, physics, audio, video, input and gamepads, the game-file access layer (`gamefs.ts`), menus (`menu/`) |
 | `src/game/` | The game systems: `actors/` (characters, AI, combat, special creatures), `world/` (placed objects, logic objects, doors, props), `weapons/`, `insanity/`, `sequence/` (STOMP scenes), `campaign/`, `save/`, `hud/`, `fx/`, `levels/`, `visibility/` |
 | `tests/` | `node:test` suites; `tests/helpers.ts` finds the install and skips data tests without it |
-| `tools/` | CLIs (format dump, entity and class census, media baking, coverage report) and headless-browser harnesses (smoke test, playthrough, campaign, level QA, gamepad end-to-end) |
+| `tools/` | CLIs (format dump, entity and class census, media baking, Enhanced texture cache, image metrics, coverage report) and headless-browser harnesses (smoke test, playthrough, campaign, level QA, gamepad end-to-end) |
 | `tools/re/` | The generator for `src/formats/message-maps.ts` (reads the user's own binaries) |
 | `docs/` | Architecture and reference documentation |
 | `index.html` | The app page |

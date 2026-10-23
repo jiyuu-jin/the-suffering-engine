@@ -12,9 +12,10 @@
 //   - the dominant directional light (moonlight): a shadow map for volumetric shafts.
 
 import * as THREE from 'three/webgpu';
-import { renderGroup, uniform, uniformArray } from 'three/tsl';
-import { CULL_LUMA, RANK_LUMA } from '../../formats/render-data';
-import { FLASHLIGHT_BASE_INTENSITY, engineLightInternals, engineLights } from '../engine-light';
+import { renderGroup, step, uniform, uniformArray } from 'three/tsl';
+import { CULL_LUMA, RANK_LUMA, spotConstants } from '../../formats/render-data';
+import { FLASHLIGHT_BASE_INTENSITY, FLASHLIGHT_SPOTS, engineLightInternals, engineLights } from '../engine-light';
+import { AMBIENT_FLOOR, GLOW_GAIN } from './tone';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type N = any;
@@ -25,10 +26,40 @@ export const MAX_SPEC_LAMPS = 8;
 export const MAX_SHADOW_LAMPS = 2;
 /** Reach of a lamp cube shadow map (m): distances are stored as a fraction of it. */
 export const LAMP_SHADOW_RANGE = 24;
-/** Flashlight beam: cone half-angles (outer, inner) and reach (m). */
-export const FLASH = { outer: THREE.MathUtils.degToRad(26), inner: THREE.MathUtils.degToRad(9), range: 26, spillOuter: THREE.MathUtils.degToRad(55) };
-/** Flashlight radiance (linear, × the battery): albedo multiplier on the axis is POWER / (d² + 5). */
-const FLASH_POWER = 45;
+/**
+ * Occluders this close to a shadowed lamp (m) are its own fixture (the shade, cage or bulb of a
+ * Light Housing, often drawn in a prop batch with every other lamp of the level) and cast no
+ * shadow of it: the original's baked and point light light the room the shade would hide, and a
+ * shade in the cube map took that light away (High / Ultra corridors went black around lamps).
+ */
+export const LAMP_FIXTURE = 1.2;
+/** Lit (1) or not (0) by a lamp cube map: `dist` and the stored `occluder` as fractions of the range. */
+export const lampLit = (dist: N, occluder: N): N => step(dist, occluder).max(step(occluder, LAMP_FIXTURE / LAMP_SHADOW_RANGE));
+/**
+ * Where the original's beam starts: its vertex shader lights nothing nearer than c10.w along the
+ * beam's axis [verified, render-data.ts spotConstants: R·S / (L − S) from Spot Light p8..p10;
+ * the flashlight's beam 1 / 6 / 10 gives 2 m]. Enhanced fades its beam in across that distance,
+ * measured along the axis as the original does, from FLASH_START_RAMP[0] before it to
+ * FLASH_START_RAMP[1] after (the original's per-vertex step is as soft across a floor's large
+ * triangles, and it starts a little early there), so a floor, a cell door or a face at arm's
+ * length reads as in the original, by the room's own light. (A fade over the metre before 2 m
+ * left the cell row floor close-up at 1.4 × the original; −0.3 / +0.3 m gave 0.98 × with 14 %
+ * near black where Enhanced's lamp shadows fall, −0.45 / +0.3 m about 1.1 × and 11 %.)
+ */
+export const FLASH_BEAM_START = spotConstants(FLASHLIGHT_SPOTS[0]).start;
+export const FLASH_START_RAMP = [0.45, 0.3] as const;
+/** Flashlight beam: cone half-angles (outer, inner), reach (m) and start along the axis (m). */
+export const FLASH = { outer: THREE.MathUtils.degToRad(26), inner: THREE.MathUtils.degToRad(9), range: 26, spillOuter: THREE.MathUtils.degToRad(55), start: FLASH_BEAM_START };
+/**
+ * Flashlight radiance (linear, × the battery): the irradiance on the axis is POWER / (d² + NEAR),
+ * × 1.37 in the cookie's hot centre. Matched to the original's beam (Spot Light 4:123: colour 0.78 ×
+ * at most 4 on the axis, clamped at 400 / 255 light units, so ≈ 2.7 linear at most, in a narrower
+ * cone): about 2.2 at arm's length, 1.5 at 3 m, 0.75 at 6 m; it reaches further than the
+ * original's 7 m, falling off, and its wider cone and spill put about as much light into a room.
+ * (45 / (d² + 5) gave 12 at arm's length: pale walls and leaves blew out to glowing white.)
+ */
+const FLASH_POWER = 30;
+export const FLASH_NEAR = 18;
 const FLASH_COLOR = new THREE.Color(1.0, 0.9, 0.74);
 
 const lampData = Array.from({ length: MAX_SPEC_LAMPS * 2 }, () => new THREE.Vector4());
@@ -42,8 +73,10 @@ export const EU: Record<string, N> = {
   /** Linear radiance × battery; zero when off. */
   flColor: uniform(new THREE.Vector3()),
   /** cos(outer), cos(inner), cos(spill outer), spill share. */
-  flCone: uniform(new THREE.Vector4(Math.cos(FLASH.outer), Math.cos(FLASH.inner), Math.cos(FLASH.spillOuter), 0.06)),
+  flCone: uniform(new THREE.Vector4(Math.cos(FLASH.outer), Math.cos(FLASH.inner), Math.cos(FLASH.spillOuter), 0.04)),
   flRange: uniform(FLASH.range),
+  /** The beam's start along its axis: fades in from x to y (m). */
+  flStart: uniform(new THREE.Vector2(FLASH.start - FLASH_START_RAMP[0], FLASH.start + FLASH_START_RAMP[1])),
   flShadowMatrix: uniform(new THREE.Matrix4()),
   flShadowOn: uniform(0),
   flShadowTexel: uniform(1 / 1024),
@@ -74,6 +107,10 @@ export const EU: Record<string, N> = {
   projected: uniform(1),
   /** Fog: gain on the level's fog colour, and a floor on the fog amount near the camera. */
   fogGain: uniform(1),
+  /** Light floor (light units): AMBIENT_FLOOR × the ambient of the camera's region. */
+  ambientFloor: uniform(new THREE.Vector3()),
+  /** Gain of glow-marked surfaces (emitters; tone.ts GLOW_GAIN). */
+  glowGain: uniform(GLOW_GAIN),
 };
 for (const k in EU) EU[k].setGroup(renderGroup);
 export const lampArray: N = uniformArray(lampData, 'vec4').setGroup(renderGroup);
@@ -161,6 +198,10 @@ export class EnhancedLights {
         col.set(0, 0, 0, 0);
       }
     }
+
+    // Light floor: the ambient light (engine units) of the camera's Ambient Light region, by the
+    // engine's own rule for objects (smallest region first, else the level's global ambient).
+    EU.ambientFloor.value.copy(engineLights.objectLightSet(camera).ambient).multiplyScalar(AMBIENT_FLOOR);
 
     // Moonlight: the strongest non-rim directional light whose region holds the camera.
     let best = 0;

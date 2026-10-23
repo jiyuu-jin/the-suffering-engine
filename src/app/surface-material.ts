@@ -66,7 +66,7 @@ import { coverageMipmaps, decodeTexture } from '../formats/texture';
 import type { DecodedTexture } from '../formats/types';
 import { glowMarkAlphaRef, glowMarked, passAlphaRef, passDepthWrite, tintFactor } from '../formats/render-data';
 import { glowMark, setGlowMark } from './glow-mark';
-import { LEGACY_LIGHTING, additiveEffectColor, engineLightFactor, engineLightMaterial, engineStages, engineSurfaceFinish, enhancedShading, type EnhancedMaps } from './engine-light';
+import { ENGINE_SHADOW_TEXTURES, LEGACY_LIGHTING, MAX_FRAGMENT_TEXTURES, additiveEffectColor, engineAlbedo, engineLightFactor, engineLightMaterial, engineStages, engineSurfaceFinish, enhancedShading, fitEnhancedMaps, type EnhancedMaps } from './engine-light';
 
 /** Legacy look only (`?lighting=legacy`): gain applied to baked per-vertex lighting. */
 export const bakedGain = uniform(3.0);
@@ -110,6 +110,30 @@ export interface SurfaceMaterialOptions {
    * mode (docs/enhanced.md "Extension points").
    */
   enhancedMaps?: EnhancedMaps;
+}
+
+/**
+ * Enhanced mode, texture enhancement (docs/enhanced.md "Texture enhancement"): the generated cache's
+ * maps of a texture key, and its upscaled replacement (`base` is the texture Original draws).
+ * Installed by src/app/enhanced/maps/runtime.ts; unset in Original mode, where nothing changes.
+ */
+export const enhancedTextures: {
+  maps?(key: string): EnhancedMaps | undefined;
+  texture?(key: string, cutout: boolean, base: THREE.Texture | null): THREE.Texture | null;
+  /**
+   * Materials lit through engineLightMaterial's shared graph (characters): the map layout of this
+   * level's tier (its `enhancedMaps` option; undefined: none), and `bind` gives a material the
+   * maps of its texture key (neutral stand-ins without an entry).
+   */
+  layout?(): EnhancedMaps | undefined;
+  bind?(material: THREE.Material, key: string | undefined): void;
+} = {};
+
+/** Does this layer sample with the mesh's own UVs (layerUv's `uv()` branch)? */
+export function meshUvLayer(l: MaterialLayer): boolean {
+  const g = l.texGen ?? 0;
+  const generated = g === 4 || g === 5 || (g >= 1 && g <= 3) || (g >= 7 && g <= 9);
+  return !generated || (l.texInput ?? TexInput.Uv) === TexInput.Uv;
 }
 
 export interface SurfaceMaterialResult {
@@ -282,7 +306,7 @@ function shadePass(l: MaterialLayer, s: LayerSample, light: N, S: SurfaceGraph):
     return { rgb: toLinear(engineStages(g.mul(S.v3(tf[0], tf[1], tf[2])))), a: s.a };
   }
   S.tok('lit');
-  return { rgb: toLinear(engineStages(g.mul(light))), a: s.a };
+  return { rgb: toLinear(engineStages(engineAlbedo(g).mul(light))), a: s.a };
 }
 
 function sampleLayer(l: MaterialLayer, src: SurfaceTextureSource, missing: string[], S: SurfaceGraph): LayerSample | null {
@@ -479,10 +503,28 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
   // Engine passes: every layer is lit by the vertex lighting, or by its halved tint (unlit).
   // Enhanced mode: per-surface nodes from generated maps (part of the structure: tokens + slots).
   let surface: unknown;
-  if (enhancedShading.surface && opts.enhancedMaps && (opts.enhancedMaps.normal || opts.enhancedMaps.roughness || opts.enhancedMaps.specular)) {
-    const coords = layerUv(layers[0], S);
-    const maps = opts.enhancedMaps;
-    S.tok(`em:${maps.normal ? 'n' : ''}${maps.roughness ? 'r' : ''}${maps.specular ? 's' : ''}`);
+  // (Without explicit maps, the generated cache's maps of the first lit mesh-UV layer: enhancedTextures.)
+  let mapsLayer = layers[0];
+  let emaps = opts.enhancedMaps;
+  if (!emaps && enhancedTextures.maps && !unlit) {
+    const l = layers.find((x) => x.texture && !x.frames && !isUnlitBlend(x.blend) && meshUvLayer(x));
+    if (l) (emaps = enhancedTextures.maps(l.texture!)), (mapsLayer = l);
+  }
+  if (enhancedTextures.texture) {
+    const base = src, swap = enhancedTextures.texture;
+    src = { ...base, texture: (key, cutout) => swap(key, cutout, base.texture(key, cutout)) };
+  }
+  // (Within the fragment stage's texture limit: every layer and splat samples one texture, every
+  // lit Enhanced graph its shadow maps and the projected character shadows; the maps take what is
+  // left, dropping by priority. Layered surfaces of 1a went to 17-18 and their pipelines failed.)
+  if (emaps) {
+    const used = layers.length + Math.min(opts.splat?.length ?? 0, 8) + (enhancedShading.textures ?? 0) + ENGINE_SHADOW_TEXTURES;
+    emaps = fitEnhancedMaps(emaps, MAX_FRAGMENT_TEXTURES - used);
+  }
+  if (enhancedShading.surface && emaps && (emaps.normal || emaps.roughness || emaps.specular)) {
+    const coords = layerUv(mapsLayer, S);
+    const maps = emaps;
+    S.tok(`em:${maps.normal ? 'n' : ''}${maps.roughness ? 'r' : ''}${maps.specular ? 's' : ''}${maps.detail ? 'd' : ''}`);
     surface = enhancedShading.surface(maps, (t) => S.tex(t, coords), coords);
   }
   const light: N | null = LEGACY_LIGHTING ? null : surface ? engineLightFactor({ precomputed: opts.vertexColors, surface }) : lightFactor(opts.vertexColors);
@@ -497,8 +539,11 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
     S.tok(`b${layers[i].blend}`);
     if (s) rgb = blendOver(rgb, s, layers[i].blend);
   }
-  if (opts.splat?.length) rgb = applySplats(rgb, opts.splat, src, missing, S, light ? (c: N) => toLinear(engineStages(toSrgb(c).mul(light))) : undefined);
+  if (opts.splat?.length) rgb = applySplats(rgb, opts.splat, src, missing, S, light ? (c: N) => toLinear(engineStages(engineAlbedo(toSrgb(c)).mul(light))) : undefined);
   const colour: N = vec4(rgb, isBlended(blend) || blend === Blend.Cutout ? alpha : float(1));
+  // Enhanced mode: glow-marked surfaces (the scene glow's sources) are emitters in the HDR frame.
+  const glow = !LEGACY_LIGHTING && !!enhancedShading.glow && glowMarked(layers);
+  if (glow) S.tok('glow');
   const key = S.key.join(',');
   let node = sharedGraphs.get(key);
   if (!node) {
@@ -509,6 +554,7 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
     // Lit: already shaded per pass; the projected-shadow receiver pass darkens the result.
     else if (!LEGACY_LIGHTING) node = vec4(engineSurfaceFinish(rgb, { precomputed: opts.vertexColors, surface }), colour.a);
     else node = colour;
+    if (glow) node = vec4(enhancedShading.glow!(vec4(node).rgb), vec4(node).a);
     sharedGraphs.set(key, node);
   }
 

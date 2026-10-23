@@ -17,6 +17,32 @@ import * as THREE from 'three/webgpu';
  */
 export const warmTargets = new Set<THREE.RenderTarget>();
 
+/**
+ * Render passes of their own that draw the scene or the viewmodel (Enhanced mode's scene pass:
+ * HDR colour + velocity; its viewmodel pass: MSAA colour + coverage): the target, the MRT outputs
+ * it is drawn with and which scene. precompile() compiles them while the frame loop is suspended
+ * (a level load), one at a time, holding the renderer's target and MRT until the pass's shaders
+ * are built: three.js reads both when its asynchronous shader builds run, not when compileAsync()
+ * is called, so a restored state built shaders without the pass's outputs (failed pipelines). The
+ * compile uses the pass's own render context (`depth`): compileAsync() always takes the top-level
+ * one, whose shaders a nested pass never reuses.
+ */
+export interface WarmPass {
+  target: THREE.RenderTarget;
+  mrt: THREE.MRTNode | null;
+  viewmodel: boolean;
+  /**
+   * The render-call depth the pass is drawn at (a pass inside a post chain is a nested render);
+   * three.js keys render contexts, and so every shader of the pass, by it. -1 until `probe` ran.
+   */
+  depth: number;
+  /** Fills `depth` (e.g. draws the chain once with nothing in view). */
+  probe?: () => void;
+  /** The material the pass draws a scene material with (null: not drawn); default: its own. */
+  material?: (m: THREE.Material) => THREE.Material | null;
+}
+export const warmPasses = new Set<WarmPass>();
+
 /** Hidden objects (added to the scene by LevelRenderer) whose pipelines precompile() builds. */
 export const warmObjects = new THREE.Group();
 warmObjects.name = 'prewarm';

@@ -14,7 +14,7 @@ import { context } from 'three/tsl';
 import { BACK_BUFFER_TYPE, EngineFog, GAMMA_BACK_BUFFER, LEGACY_LIGHTING, backBufferOutput, engineFogNode, engineLights } from './engine-light';
 import { frameProbe } from './frame-probe';
 import { NO_GLOW, SceneGlow } from './scene-glow';
-import { warmObjects, warmTargets, warmHooks, warmViewmodelObjects } from './prewarm';
+import { warmObjects, warmTargets, warmHooks, warmViewmodelObjects, warmPasses, type WarmPass } from './prewarm';
 import { ENHANCED } from './enhanced/config';
 import type { EnhancedRenderer } from './enhanced';
 
@@ -167,6 +167,15 @@ export class LevelRenderer {
   /** Drawables precompile() requested, with the material they had (prewarm.ts). */
   private warmed = new WeakMap<THREE.Object3D, unknown>();
   private warmedTargets = new WeakSet<THREE.RenderTarget>();
+  /** Per own pass (prewarm.ts warmPasses): drawables compiled for it, with their material. */
+  private passWarmedMap = new WeakMap<WarmPass, WeakMap<THREE.Object3D, unknown>>();
+  /** With own passes (Enhanced mode): precompile() calls run one after another. */
+  private serial: Promise<unknown> = Promise.resolve();
+  private passWarmed(t: WarmPass) {
+    let m = this.passWarmedMap.get(t);
+    if (!m) this.passWarmedMap.set(t, (m = new WeakMap()));
+    return m;
+  }
 
   private constructor(private readonly container: HTMLElement, forceWebGL: boolean) {
     // The frame target is the engine's back buffer: 8-bit, holding gamma values (engine-light.ts
@@ -449,15 +458,26 @@ export class LevelRenderer {
    * to the canvas: only behind the loading screen); `lanes` splits each pass in concurrent lanes
    * (worth it for the full load-time job only).
    */
-  async precompile(opts: { full?: boolean; hooks?: boolean; lanes?: boolean } = {}): Promise<number> {
+  async precompile(opts: { full?: boolean; hooks?: boolean; lanes?: boolean; serial?: boolean } = {}): Promise<number> {
+    // With own passes (prewarm.ts warmPasses: Enhanced mode) one call at a time: three.js's
+    // asynchronous shader builds read the renderer's target and MRT when they run, and two calls
+    // at once (the load's and the visibility system's first update) set them under each other.
+    if (warmPasses.size && !opts.serial) {
+      const run = this.serial.then(() => this.precompile({ ...opts, serial: true }));
+      this.serial = run.catch(() => undefined);
+      return run;
+    }
     const r = this.renderer;
     const t0 = performance.now();
     // A target registered since the last call: everything has to be compiled for it.
     const targets = [...warmTargets];
-    const full = !!opts.full || targets.some((t) => !this.warmedTargets.has(t));
-    for (const t of targets) this.warmedTargets.add(t);
+    // Own passes (prewarm.ts warmPasses): only while the frame loop is suspended (a level load).
+    const passes = this.suspended ? [...warmPasses] : [];
+    const full = !!opts.full || [...targets, ...passes.map((p) => p.target)].some((t) => !this.warmedTargets.has(t));
+    for (const t of [...targets, ...passes.map((p) => p.target)]) this.warmedTargets.add(t);
     const drawable = (o: THREE.Object3D) => (o as THREE.Mesh).isMesh || (o as THREE.Sprite).isSprite || (o as THREE.Points).isPoints || (o as THREE.Line).isLine;
     const fresh: THREE.Object3D[] = [];
+    const ownFresh = new Set<THREE.Object3D>();
     // Each pass is split in PRECOMPILE_LANES lanes by material: three.js compiles a lane one
     // object at a time, waiting for each pipeline, and the GPU process compiles several lanes'
     // pipelines at once. Objects of one shader in different lanes build it once
@@ -467,19 +487,30 @@ export class LevelRenderer {
       const first = (Array.isArray(m) ? m[0] : m) as unknown as { id?: number } | undefined;
       return (first?.id ?? 0) % PRECOMPILE_LANES;
     };
-    const gather = (scene: THREE.Scene, camera: THREE.Camera, target: THREE.RenderTarget | null, part = -1): Promise<void> | null => {
+    // (`seen`: an own pass's record of what it compiled, in place of `warmed`; `hold` keeps the
+    // target set for the caller, who restores it once the shaders are built.)
+    // (`swap`: an own pass's material for each drawn one, null = not drawn: shadow maps.)
+    const gather = (scene: THREE.Scene, camera: THREE.Camera, target: THREE.RenderTarget | null, part = -1, hold = false, seen?: WeakMap<THREE.Object3D, unknown>, swap?: WarmPass['material']): Promise<void> | null => {
+      const warmed = seen ?? this.warmed;
       const saved: [THREE.Object3D, boolean, boolean, number][] = [];
+      const swapped: [THREE.Mesh, THREE.Material | THREE.Material[]][] = [];
       const included: THREE.Object3D[] = [];
       let n = 0;
       scene.traverse((o) => {
         saved.push([o, o.visible, o.frustumCulled, o.layers.mask]);
         o.visible = true;
         o.frustumCulled = false;
-        const d = drawable(o);
+        let d: boolean = drawable(o);
         // Already compiled, or another lane's: off every layer (its children are still visited).
-        if (d && ((!full && this.warmed.get(o) === (o as THREE.Mesh).material) || (part >= 0 && lane(o) !== part))) o.layers.mask = 0;
+        if (d && ((!full && warmed.get(o) === (o as THREE.Mesh).material) || (part >= 0 && lane(o) !== part))) o.layers.mask = 0;
         else {
-          o.layers.mask |= camera.layers.mask; // zone-culled objects (visibility.ts)
+          if (d && swap) {
+            const m = o as THREE.Mesh;
+            const list = [m.material].flat().map((x) => ((m as { isMesh?: boolean }).isMesh && !(o as THREE.Sprite).isSprite ? swap(x) : null));
+            if (list.some(Boolean)) (swapped.push([m, m.material]), (m.material = Array.isArray(m.material) ? list.map((x) => x ?? list.find(Boolean)!) : list[0]!));
+            else d = false;
+          }
+          o.layers.mask = d || !drawable(o) ? o.layers.mask | camera.layers.mask : 0; // zone-culled objects (visibility.ts)
           if (d) (n++, included.push(o));
         }
       });
@@ -491,13 +522,15 @@ export class LevelRenderer {
           p = r.compileAsync(scene, camera);
         }
       } finally {
-        r.setRenderTarget(prev);
+        if (!hold) r.setRenderTarget(prev);
+        for (const [m, mat] of swapped) m.material = mat;
         for (const [o, v, f, l] of saved) {
           o.visible = v;
           o.frustumCulled = f;
           o.layers.mask = l;
         }
-        if (p) fresh.push(...included);
+        if (p && seen) for (const o of included) (seen.set(o, (o as THREE.Mesh).material), ownFresh.add(o));
+        else if (p) fresh.push(...included);
       }
       return p;
     };
@@ -508,14 +541,15 @@ export class LevelRenderer {
     const light = this.flashlight.visible;
     for (const on of LEGACY_LIGHTING ? [light, !light] : [light]) {
       this.flashlight.visible = on;
-      // Lanes only for the big load-time job (each lane gathers the whole scene again).
-      for (const target of [null, ...targets.filter((t) => !this.sharesCanvasPass(t))]) {
+      // Lanes only for the big load-time job (each lane gathers the whole scene again). (With own
+      // passes, Enhanced mode, the scene is never drawn to the canvas itself.)
+      for (const target of [...(passes.some((p) => !p.viewmodel) ? [] : [null]), ...targets.filter((t) => !this.sharesCanvasPass(t))]) {
         if (opts.lanes) for (let k = 0; k < PRECOMPILE_LANES; k++) add(gather(this.scene, this.camera, target, k));
         else add(gather(this.scene, this.camera, target));
       }
-      // The viewmodel pass (its lamp mirrors the flashlight).
+      // The viewmodel pass (its lamp mirrors the flashlight; drawn by an own pass in Enhanced mode).
       this.fpLamp.visible = on;
-      add(gather(this.fpScene, this.fpCamera, null));
+      if (!passes.some((p) => p.viewmodel)) add(gather(this.fpScene, this.fpCamera, null));
     }
     this.flashlight.visible = light;
     this.fpLamp.visible = light;
@@ -528,14 +562,50 @@ export class LevelRenderer {
         console.warn('[renderer] warm hook failed:', err);
       }
     }
+    // Own passes, one at a time with their target and MRT held (prewarm.ts warmPasses), after
+    // the jobs above (their asynchronous builds read the renderer's state too).
+    const own = passes.length
+      ? (async () => {
+          await Promise.all(jobs);
+          // (compileAsync() takes the render context of a top-level call; the pass's own is that of
+          // its nested call depth: three.js's RenderContexts.get(target, mrt, depth), overridden for
+          // the pass's target while it compiles.)
+          const rc = (r as unknown as { _renderContexts: { get(t: unknown, m: unknown, d?: number): unknown } })._renderContexts;
+          const ownGet = Object.prototype.hasOwnProperty.call(rc, 'get');
+          const get = rc.get;
+          for (const pass of passes) {
+            if (pass.depth < 0) pass.probe?.();
+            const prevTarget = r.getRenderTarget(), prevMRT = r.getMRT();
+            r.setRenderTarget(pass.target);
+            r.setMRT(pass.mrt);
+            rc.get = (t, m, d = 0) => get.call(rc, t, m, t === pass.target && pass.depth >= 0 ? pass.depth : d);
+            try {
+              const [scene, camera] = pass.viewmodel ? [this.fpScene, this.fpCamera] : [this.scene, this.camera];
+              const ps: Promise<void>[] = [];
+              const lanes = opts.lanes && !pass.viewmodel ? PRECOMPILE_LANES : 1;
+              for (let k = 0; k < lanes; k++) {
+                const p = gather(scene, camera, pass.target, lanes > 1 ? k : -1, true, this.passWarmed(pass), pass.material);
+                if (p) ps.push(p);
+              }
+              await Promise.all(ps);
+            } finally {
+              if (ownGet) rc.get = get;
+              else delete (rc as { get?: unknown }).get;
+              r.setRenderTarget(prevTarget);
+              r.setMRT(prevMRT);
+            }
+          }
+        })()
+      : null;
+    if (own) jobs.push(own);
     // Also wait for the jobs of earlier calls still running (their objects count as requested).
     const prior = this.compiling;
     const mine = Promise.all(jobs);
     this.compiling = Promise.all([prior, mine.catch(() => undefined)]).then(() => undefined);
     await prior;
     await mine;
-    const n = new Set(fresh).size;
-    this.precompiles.push({ objects: n, passes: targets.length + 2, ms: Math.round(performance.now() - t0) });
+    const n = new Set([...fresh, ...ownFresh]).size;
+    this.precompiles.push({ objects: n, passes: targets.length + 2 + passes.length, ms: Math.round(performance.now() - t0) });
     if (n) console.info(`[renderer] pipelines precompiled for ${n} objects, ${targets.length + 1} passes + viewmodel in ${(performance.now() - t0).toFixed(0)} ms`);
     return n;
   }

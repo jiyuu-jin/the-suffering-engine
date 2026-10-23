@@ -88,7 +88,9 @@ Code: launch `0x100cf8b0`, impact `0x100d1450`.
 | p | Name | Meaning | Tag |
 |---|---|---|---|
 | 1 | `speed` | launch speed (units/s) | verified |
-| 2 | `speedMax` | upper speed when the launch carries a strength, `p1 + (p2 − p1) × strength` | verified (`0x100cfa33`) |
+| 2 | `speedMax` | the speed when the launch gets a projectile record (every generator spawn): `(p2 − p1) + p1`, no strength factor | verified (`0x100cfa21..0x100cfa40`) |
+| 3 / 4 / 5 / 6 | | spin deg/s about x / y / z, the rate capped at p6 | strong (`0x100cfc0a`, `0x100cc400`) |
+| 25 | | sweep and detonate at the object's vt+0x64 point (its bounds centre) instead of its position | strong (`0x100cc1f0`) |
 | 12 | `lifetime` | seconds before it expires or detonates (the grenade fuse, the flare's 20 s) | verified (`0x100cf8e9`) |
 | 14 / 16 | `impactNoise` / `fireNoise` | InvestigateSound (see game-logic §15.9) | data |
 | **26** | `damage` | **damage per projectile, flat**. Previously documented as "impact force". | verified (`0x100d1921`) |
@@ -140,8 +142,8 @@ The thrown launch speed is `p1` = 70000 units/s (34 m/s). The world gravity that
 is Level Properties p19 x p18 units/s² [verified]: in every chapter 1 level that is
 9.8 x 2175 units/s², or 10.41 m/s² at 2048 units per output metre (game-logic.md §14.2). The
 throw code that sets the launch direction was not decoded, and the port keeps its 40 % launch
-factor. A BouncingObject that a generator spawns flies along -local Z at p1 (`world/fx.ts
-bouncingLaunch`). A bounce reflects the velocity and scales it by (1 - GMP p4 %) x (1 - p51 %)
+factor. A BouncingObject that a generator spawns flies along -local Z of the spawn matrix at p2
+(`world/fx.ts generatorSpawn / bouncingLaunch`, game-logic.md §14.2 "Debris"). A bounce reflects the velocity and scales it by (1 - GMP p4 %) x (1 - p51 %)
 [verified: 0x1009a3b0 / 0x1009adae].
 
 ### Radius Damage

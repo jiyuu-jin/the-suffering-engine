@@ -18,7 +18,7 @@ import { boneSubtree, MAX_INFLUENCES, type Skeleton, type SkinnedModel } from '.
 import { blendInto, guessClipLabel, type AnimClipData } from '../formats/animation';
 import { instanceRotation, toOutputSpace, type LevelObject } from '../formats/level';
 import { engineLightMaterial } from './engine-light';
-import { createSurfaceMaterial, missingTexture } from './surface-material';
+import { createSurfaceMaterial, enhancedTextures, missingTexture } from './surface-material';
 
 /**
  * Whether a character submesh needs its decoded surface material rather than the plain lit
@@ -201,9 +201,11 @@ export function buildSkinnedMesh(
         disposables.push(map);
       }
     }
+    // Enhanced mode: the texture cache's upscaled albedo (surface-material.ts enhancedTextures).
+    const drawn = src && map && enhancedTextures.texture ? enhancedTextures.texture(src.key, false, map) : map;
     const mat = new THREE.MeshStandardNodeMaterial({
       color: map ? 0xffffff : 0x8a7f74,
-      map,
+      map: drawn,
       roughness: 0.85,
       metalness: 0,
       side,
@@ -212,7 +214,10 @@ export function buildSkinnedMesh(
     mat.name = s.textureKey ?? 'untextured';
     // Lit like the engine's dynamic objects: its own light set (ambient region, directional / rim
     // lights, at most 5 point lights ranked at the character, spots) (engine-light.ts).
-    engineLightMaterial(mat, { precomputed: false, lightSet: true });
+    // Enhanced mode: the texture cache's normal and surface maps through the shared graph.
+    const layout = enhancedTextures.layout?.();
+    if (layout) enhancedTextures.bind?.(mat, src?.key);
+    engineLightMaterial(mat, { precomputed: false, lightSet: true, enhancedMaps: layout });
     materials.push(mat);
     disposables.push(mat);
   });

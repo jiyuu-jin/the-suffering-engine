@@ -6,10 +6,12 @@
 // vertex colours, Ambient Light regions, Directional Lights, Point Lights with their flicker,
 // alarms and Lighting Effects) and works in linear HDR on top of it:
 //
-//   E      = gain × max(L − Σ lamp occlusion, 0)^2.2          the engine light, linearised
+//   L'     = max(L − Σ lamp occlusion, SHADOW_KEEP × L)       lamp shadows never crush baked light
+//   E      = gain × max(softLight(L'), ambient floor)^2.2     the engine light, saturating softly
+//                                                             where the original clamps, linearised
 //   E     += flashlight irradiance (per pixel, PBR spot, shadow-mapped)
 //   factor = ½ E^(1/2.2)                                       back into the pass's gamma maths
-//   colour = surface passes (surface-material.ts) × factor → linear, unclamped (HDR)
+//   colour = albedo (texture ≤ 80 % reflectance) × factor → linear, unclamped (HDR)
 //   colour += GGX specular of the flashlight and the nearest lamps (wet floors are glossier)
 //
 // so a surface reads exactly as authored where no Enhanced light falls on it, and an Enhanced light
@@ -24,7 +26,6 @@ import {
   PI,
   cameraPosition,
   cross,
-  cubeTexture,
   dFdx,
   dFdy,
   dot,
@@ -46,8 +47,9 @@ import {
   vec4,
 } from 'three/tsl';
 import { enhancedShading, engineShadowFactor, type EngineLightOptions, type EnhancedMaps } from '../engine-light';
-import { EU, LAMP_SHADOW_RANGE, lampArray } from './lights';
+import { EU, FLASH, FLASH_NEAR, LAMP_SHADOW_RANGE, lampArray, lampLit } from './lights';
 import { shadowTextures } from './shadows';
+import { ALBEDO_MAX_GAMMA, LIGHT_SOFT, SHADOW_KEEP } from './tone';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type N = any;
@@ -78,8 +80,17 @@ export interface EnhancedSurfaceNodes {
 }
 
 const TO_LINEAR = 2.2;
-/** Highest engine light (light units) kept: the original clamps at 400/255; HDR keeps more. */
-const ENGINE_LIGHT_MAX = 3.2;
+
+/**
+ * Authored light (light units) saturating softly above 1 towards 1 + LIGHT_SOFT (tone.ts
+ * softLight). The original clamps at 400 / 255 and its pass saturates at 1 on top: light above 1
+ * only brightens dark texels there, it never turns a pale texture into a lamp.
+ */
+const softLight = (L: N): N => {
+  const l = vec3(L).max(0);
+  const o = l.sub(1).max(0);
+  return l.min(1).add(o.div(o.div(LIGHT_SOFT).add(1)));
+};
 
 const vogel = (i: N, n: N, rot: N): N => {
   const r = sqrt(float(i).add(0.5).div(float(n)));
@@ -126,14 +137,19 @@ const flashCone = Fn(([Ldir]: N[]) => {
 });
 
 /** Flashlight radiance arriving at P (linear), with distance fall-off and its shadow; vec4(rgb, NdotL). */
-const flashRadiance = Fn(([P, Nrm]: N[]) => {
+export const flashRadiance = Fn(([P, Nrm]: N[]) => {
   const Lv = EU.flPos.sub(P);
   const d2 = dot(Lv, Lv).max(1e-4);
   const d = d2.sqrt();
   const Ldir = Lv.div(d);
   const win = float(1).sub(pow(d.div(EU.flRange).clamp(0, 1), 4)).clamp(0, 1);
-  // Soft near field (a torch's reflector is not a point): 1 / (d² + 5).
-  const att = win.mul(win).div(d2.add(5));
+  // Soft near field (a torch's reflector is not a point): 1 / (d² + FLASH_NEAR).
+  // The beam starts where the original's does, FLASH.start along its axis (lights.ts
+  // FLASH_BEAM_START: 2 m, fading in across it, EU.flStart): lit from 0.4 m, floors, bars and
+  // faces close up read 1.2-1.45 × the original, and leaves at the lens blew up into blurred,
+  // magnified blobs (6a's foliage).
+  const axial = dot(Lv.negate(), EU.flDir);
+  const att = win.mul(win).div(d2.add(FLASH_NEAR)).mul(smoothstep(EU.flStart.x, EU.flStart.y, axial));
   const k = flashCone(Ldir).mul(att);
   const ndl = dot(Nrm, Ldir).max(0);
   const sh = flashShadow(P, Nrm);
@@ -175,7 +191,7 @@ const lampShadow = (s: 0 | 1, P: N, Nrm: N): N =>
       const tex = s ? shadowTextures.lamp1 : shadowTextures.lamp0;
       const sum = float(0).toVar();
       for (const [a, b] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        sum.addAssign(step(d, (cubeTexture as N)(tex, v.add(t1.mul(a)).add(t2.mul(b))).level(float(0)).r));
+        sum.addAssign(lampLit(d, tex.sample(v.add(t1.mul(a)).add(t2.mul(b))).level(float(0)).r));
       }
       lit.assign(sum.div(5));
     });
@@ -217,10 +233,15 @@ function lightFactor(L: N, o: EngineLightOptions): N {
     // Take out the shadowed lamps' share where their cube map says occluded.
     const occl0 = float(1).sub(lampShadow(0, P, Nrm));
     const occl1 = float(1).sub(lampShadow(1, P, Nrm));
-    const Ls = vec3(L)
-      .sub(lampEngineLight(0, P, Nrm).mul(occl0.mul(0.75)))
-      .sub(lampEngineLight(1, P, Nrm).mul(occl1.mul(0.75)));
-    const E = pow(Ls.max(0).min(ENGINE_LIGHT_MAX), vec3(TO_LINEAR)).mul(EU.engineGain).toVar();
+    // (At most 1 − SHADOW_KEEP of the authored light: the lamp's share is an estimate, and baked
+    // light that is already dark must not go black.)
+    const L0 = vec3(L).max(0);
+    const Ls = L0.sub(lampEngineLight(0, P, Nrm).mul(occl0.mul(0.75)))
+      .sub(lampEngineLight(1, P, Nrm).mul(occl1.mul(0.75)))
+      .max(L0.mul(SHADOW_KEEP));
+    // Ambient floor: part of the ambient light of the camera's region (lights.ts), so a room's
+    // dark corners stay readable as the original's ambient keeps them.
+    const E = pow(softLight(Ls).max(EU.ambientFloor), vec3(TO_LINEAR)).mul(EU.engineGain).toVar();
     const fl = flashRadiance(P, Nrm);
     E.addAssign(fl.xyz.mul(fl.w));
     return pow(E, vec3(1 / TO_LINEAR)).mul(0.5);
@@ -303,6 +324,12 @@ export function installEnhancedShading(): void {
   enhancedShading.finish = finish;
   enhancedShading.fog = fog;
   enhancedShading.surface = surface;
+  // Albedo: a white texture reflects at most ALBEDO_MAX (80 %); glow-marked surfaces emit.
+  enhancedShading.albedo = (g: N) => vec3(g).min(ALBEDO_MAX_GAMMA);
+  enhancedShading.glow = (rgb: N) => vec3(rgb).mul(EU.glowGain);
+  // Fragment textures of every lit graph: the flashlight's and the two lamp cubes' shadow maps
+  // (surface-material.ts keeps a surface's maps within the stage's limit with this).
+  enhancedShading.textures = 3;
   // Per-material parameters, read by the shared graphs (EnhancedMaterialParams).
   Object.defineProperty(THREE.Material.prototype, 'enhancedParams', {
     configurable: true,

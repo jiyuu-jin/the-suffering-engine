@@ -35,11 +35,10 @@ import {
   vec2,
   vec3,
   vec4,
-  cubeTexture,
   context,
 } from 'three/tsl';
 import { engineLightInternals } from '../engine-light';
-import { EU, FLASH, LAMP_SHADOW_RANGE, lampArray } from './lights';
+import { EU, FLASH, FLASH_NEAR, LAMP_SHADOW_RANGE, lampArray, lampLit } from './lights';
 import { shadowTextures } from './shadows';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -64,9 +63,9 @@ export class VolumetricNode extends THREE.TempNode {
   /** Scattering scale (× 1 / fog end), dust noise strength. */
   readonly density = uniform(1);
   readonly dust = uniform(0.6);
-  readonly flashScatter = uniform(0.09);
-  readonly lampScatter = uniform(0.5);
-  readonly moonScatter = uniform(1);
+  readonly flashScatter = uniform(0.1);
+  readonly lampScatter = uniform(0.25);
+  readonly moonScatter = uniform(0.25);
   private readonly rt = new THREE.RenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: false });
   private readonly material = new THREE.NodeMaterial();
   private readonly projInv: N;
@@ -156,7 +155,7 @@ export class VolumetricNode extends THREE.TempNode {
           const suv = vec2(ndc.x.mul(0.5).add(0.5), mix(ndc.y.mul(0.5).add(0.5), ndc.y.mul(-0.5).add(0.5), EU.flipY));
           const occ = step(fd.div(FLASH.range).sub(0.004), shadowTextures.flash.sample(suv).level(0).r);
           const shadow = mix(float(1), occ, EU.flShadowOn.mul(step(ndc.x.abs(), 1)).mul(step(ndc.y.abs(), 1)));
-          light.addAssign(EU.flColor.mul(cone.mul(win).mul(shadow).div(fd2.add(5))).mul(phaseHG(dot(dir.negate(), fdir), 0.35)).mul(this.flashScatter));
+          light.addAssign(EU.flColor.mul(cone.mul(win).mul(shadow).mul(smoothstep(EU.flStart.x, EU.flStart.y, dot(fl.negate(), EU.flDir))).div(fd2.add(FLASH_NEAR))).mul(phaseHG(dot(dir.negate(), fdir), 0.35)).mul(this.flashScatter));
           // Lamps (engine point lights): halos; the cube-shadowed ones cast shafts.
           Loop(EU.lampCount, ({ i: k }: { i: N }) => {
             const a = lampArray.element(int(k).mul(2));
@@ -168,9 +167,9 @@ export class VolumetricNode extends THREE.TempNode {
             If(b.w.greaterThan(-0.5), () => {
               const dn = d2.sqrt().div(LAMP_SHADOW_RANGE).sub(0.006);
               If(b.w.lessThan(0.5), () => {
-                sh.assign(step(dn, (cubeTexture as N)(shadowTextures.lamp0, v).level(float(0)).r));
+                sh.assign(lampLit(dn, shadowTextures.lamp0.sample(v).level(float(0)).r));
               }).Else(() => {
-                sh.assign(step(dn, (cubeTexture as N)(shadowTextures.lamp1, v).level(float(0)).r));
+                sh.assign(lampLit(dn, shadowTextures.lamp1.sample(v).level(float(0)).r));
               });
             });
             light.addAssign(rad.mul(sh).mul(phaseHG(dot(dir, v.normalize()), 0.25)).mul(this.lampScatter).mul(0.6));

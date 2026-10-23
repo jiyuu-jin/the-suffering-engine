@@ -297,6 +297,8 @@ async function openLevel(path: string, spawnName?: string, opts: { updateUrl?: b
     const audioReady = startLevelAudio(loaded, token);
     audioReady.catch(() => undefined); // (awaited below; no unhandled-rejection report meanwhile)
     await nextFrame();
+    // Enhanced mode: the level's generated texture maps, if the cache has them (docs/enhanced.md).
+    if (view.enhanced && fs) await view.enhanced.maps.prepareLevel(fs, loaded.level);
     const stats = view.setLevel(loaded.level, loaded.textures);
     frameProbe.mark('level meshes');
     showLevelInfo(loaded, stats);

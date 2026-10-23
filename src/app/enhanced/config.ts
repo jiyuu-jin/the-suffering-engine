@@ -129,7 +129,7 @@ export const TIER_FEATURES: Record<QualityTier, TierFeatures> = {
     moonShadowSize: 4096,
     specularLights: 8,
     volumetricSteps: 40,
-    volumetricScale: 1,
+    volumetricScale: 0.5,
     aoSamples: 16,
     aoScale: 1,
     bloom: true,

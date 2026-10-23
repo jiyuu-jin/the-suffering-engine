@@ -77,6 +77,7 @@ import { corpseBlowKind, readGibRule, readThrownBody, throwDirection, type GibRu
 import { ANIM_EVENT_MESSAGE, readAnimEvents } from '../../formats/animation';
 import { buildHeldModel } from '../weapons/models';
 import type { ArcHandle, ArcTarget } from '../fx/electric-arc';
+import { gore } from '../fx/gore-bus';
 
 export interface ActorsService {
   list(): readonly Actor[];
@@ -351,6 +352,7 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
     },
     shotFx: (from, to, _hit, speed) => (speed ? fx.missile(from, to, speed) : fx.shot(from, to)),
     throwObject: (t, from, vel, by) => void (ctx.services.weapons as WeaponsLike | undefined)?.throwObject?.(t, from, vel, by),
+    spawnFx: (t, at, n) => (ctx.services.fx as { spawnAt?(r: ResRef, p: THREE.Vector3Like, n?: THREE.Vector3Like): void } | undefined)?.spawnAt?.(t, at, n ?? { x: 0, y: 1, z: 0 }),
     fleePositions,
     seeThrough: null,
     noise: (at, spec, from) => manager.noise(at, spec, from),
@@ -556,6 +558,8 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
   const gibBody = (a: Actor, gib: readonly ResRef[], bone: number) => {
     const M = boneMatrix(a, bone);
     for (const g of gib) fxSvc()?.spawn?.(g, M.clone());
+    // Enhanced mode's gore (gore-bus.ts; never set in Original).
+    gore.listener?.gib?.(M, a.ch.root);
     a.ch.root.visible = false;
     going.add(a);
   };

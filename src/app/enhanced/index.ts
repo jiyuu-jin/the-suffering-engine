@@ -8,12 +8,16 @@
 //   post.ts        the RenderPipeline: AO, volumetrics, TRAA, bloom, DOF, lens, horror grade
 //   auto-tier.ts   Auto quality: adapter probe + frame-time governor
 //   config.ts      mode / tier choice (URL, saved settings) and the per-tier feature table
+//   maps/          texture enhancement: the generated cache's maps and upscaled albedo per tier
+//   gore/          blood and gore: wet films, droplets, wounds, the hurt view (opt-in with Enhanced)
 
 import * as THREE from 'three/webgpu';
 import { GRAPHICS, TIER_FEATURES, WEBGL_MAX_TIER, capTier, type QualityTier, type TierFeatures, type TierSetting } from './config';
 import { installEnhancedShading } from './shading';
 import { EU, enhancedLights } from './lights';
 import { EnhancedShadows } from './shadows';
+import { EnhancedTextureMaps } from './maps/runtime';
+import { EnhancedGore } from './gore';
 import { EnhancedPipeline, grade, type EnhancedStage, type EnhancedStageHook } from './post';
 import { TierGovernor, probeAdapter, type AdapterProbe } from './auto-tier';
 import { engineLights } from '../engine-light';
@@ -55,7 +59,11 @@ export class EnhancedRenderer {
   private menuSeen: TierSetting | null = null;
   readonly governor: TierGovernor;
   readonly shadows = new EnhancedShadows();
+  /** Generated texture maps (maps/runtime.ts, docs/enhanced.md "Texture enhancement"). */
+  readonly maps = new EnhancedTextureMaps();
   readonly pipeline: EnhancedPipeline;
+  /** Blood and gore (gore/index.ts, docs/enhanced.md "Gore"). */
+  readonly gore: EnhancedGore;
   private lastDraw = -1;
   private readonly clock = performance.now();
   stats = { drawMs: 0, tierChanges: 0 };
@@ -72,6 +80,7 @@ export class EnhancedRenderer {
     // The viewmodel pass is composited by its coverage: it clears to transparent black.
     host.renderer.setClearAlpha(0);
     this.pipeline = new EnhancedPipeline(host.renderer, { scene: host.scene, camera: host.camera, viewmodelScene: host.viewmodelPass.scene, viewmodelCamera: host.viewmodelPass.camera });
+    this.gore = new EnhancedGore(this);
     this.apply();
   }
 
@@ -115,6 +124,7 @@ export class EnhancedRenderer {
   private apply() {
     const f = (this.features = TIER_FEATURES[this.tier]);
     this.shadows.configure(f);
+    this.maps.setTier(this.tier);
     // Real shadow maps replace the engine's projected character shadows from High up.
     EU.projected.value = f.lampShadows > 0 ? 0.5 : 1;
     this.pipeline.build(f);
