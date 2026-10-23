@@ -201,6 +201,26 @@ const KITS = {
 //   of the step; level: level stem.
 
 const L1A = 'LEVELS/1 PrisonDeathRow/1a PrisonDeathRow.lvl';
+
+// `diag`: a page expression whose text is added to a step's problems when it fails (the cause).
+// 1a's guard 609e only goes on when the level logic before him has run: his chatter
+// SimpleConversation 7520 ends only through Detector 7523 at the west end (Relay 8ab9 ->
+// 837d -> Behavior Changer 7521 -> 7522 -> WaypointBehavior 7524), which taking the flashlight
+// 6978 enables (Relay 8aba); after the gate ambush he talks (7528) and walks to the door
+// controls only when Count Down 73a5 reaches zero (CartWheelers 64ee and 64f1; 64f1 comes
+// through door 4e48 on WaypointBehavior 8027). A failed escort step names which one is missing.
+const ESCORT_1A_DIAG = `(() => {
+  const w = __world.world, M = __actors.manager, h = (u) => u.toString(16);
+  const act = (u) => M.actors.find((x) => x.entity?.uid === u);
+  const desc = (u) => { const a = act(u); if (!a) return h(u) + ' gone'; const b = a.behavior; return h(u) + ' ' + (a.alive ? 'alive' : 'dead') + ' ' + (b ? b.cls + (b.uid ? '#' + h(b.uid) : '') : '-') + ' ' + a.state + ' @' + a.position.x.toFixed(1) + ',' + a.position.z.toFixed(1); };
+  const out = ['guard ' + desc(0x609e)];
+  if (!w.get(0x6978)?.s.taken) out.push('flashlight 6978 NOT taken: Detector 7523 is enabled only by taking it, so his chatter 7520 never ends');
+  else if (!w.get(0x7523)?.destroyed) out.push('Detector 7523 (west end) not crossed: 7520 -> 7522 -> escort 7524 not started');
+  const cd = w.get(0x73a5);
+  if (cd && !cd.destroyed) out.push('ambush Count Down 73a5: ' + cd.s.count + ' left (' + [0x64ee, 0x64f1].map(desc).join('; ') + '; door 4e48 ' + (w.get(0x4e48)?.s.open ? 'open' : 'shut') + '): the guard waits in his Hostility');
+  return out.join(' | ');
+})()`;
+
 const ROUTE = [
   {
     id: '1a.intro',
@@ -286,7 +306,7 @@ const ROUTE = [
   { id: '1a.cartwheeler', obj: 'west corridor: the CartWheeler scene, then the fight', do: 'walk', to: [406.9, 97.7, 546.9], then: { cine: true, fight: 40 }, expect: { played: [0x5dac] }, shot: true },
   { id: '1a.health', obj: 'pick up the Xombium bottle', do: 'pick', uid: 0x6ff5, optional: true },
   { id: '1a.flashlight', obj: 'the office: take the flashlight', do: 'pick', uid: 0x6978, expect: { taken: [0x6978] } },
-  { id: '1a.escort', obj: 'meet the guard at the west end; he leads the way', do: 'walk', to: [381, 97.7, 540.2], then: { wait: 6 } },
+  { id: '1a.escort', obj: 'meet the guard at the west end; he leads the way', do: 'walk', to: [381, 97.7, 540.2], then: { wait: 6 }, diag: ESCORT_1A_DIAG },
   // The player goes on alone; the guard escorts (WaypointBehavior 7524, p8 the player, p9 10 m /
   // p10 20 m) and walks his waypoints (8316 at the gate) while the player keeps within 10 m, then
   // opens the gate. Whether he comes after the player depends on where his chain is when the
@@ -295,7 +315,7 @@ const ROUTE = [
   // 150 s for nothing (also with the committed code). So the player answers: he goes back to the
   // guard and keeps by him until the gate is open.
   { id: '1a.ahead', obj: 'go on alone, down to the gate (the guard stays behind)', do: 'walk', to: [404.5, 88.7, 553.4] },
-  { id: '1a.guard-comes', obj: 'back to the guard: he walks to the gate and opens it', do: 'follow', uid: 0x609e, until: `!!__world.world.get(0x7f48)?.s.open`, timeout: 150 },
+  { id: '1a.guard-comes', obj: 'back to the guard: he walks to the gate and opens it', do: 'follow', uid: 0x609e, until: `!!__world.world.get(0x7f48)?.s.open`, timeout: 150, diag: ESCORT_1A_DIAG },
   {
     id: '1a.follow',
     obj: 'follow the guard down the stairs and through the gate he opens',
@@ -305,13 +325,14 @@ const ROUTE = [
     timeout: 150,
     expect: { open: [0x7f48] },
     shot: true,
+    diag: ESCORT_1A_DIAG,
   },
-  { id: '1a.ambush', obj: 'the CartWheeler ambush by the gate', do: 'walk', to: [423.8, 88.7, 557.5], then: { wait: 3, fight: 40 } },
+  { id: '1a.ambush', obj: 'the CartWheeler ambush by the gate', do: 'walk', to: [423.8, 88.7, 557.5], then: { wait: 3, fight: 40 }, diag: ESCORT_1A_DIAG },
   { id: '1a.ammo', obj: 'revolver ammo in the booth', do: 'pick', uid: 0x865a, optional: true },
   // After the ambush the guard talks, walks to the electrified door controls (Waypoint 752d) and
   // is killed by the shock (Damage Action Objects 75dd / 8185); his pistol falls as a revolver
   // pickup (actors/drops.ts).
-  { id: '1a.guard-dies', obj: 'follow the guard to the door controls: he is electrocuted', do: 'follow', uid: 0x609e, fight: true, then: { wait: 1.5 }, shot: true, until: `(() => { const a = __actors.manager.actors.find((x) => x.entity?.uid === 0x609e); if (a && a.health <= 0) __pt.aimAt(a.motor.position.x, a.bottom + 0.3, a.motor.position.z); return !a || a.health <= 0; })()`, timeout: 120 },
+  { id: '1a.guard-dies', obj: 'follow the guard to the door controls: he is electrocuted', do: 'follow', uid: 0x609e, fight: true, then: { wait: 1.5 }, shot: true, until: `(() => { const a = __actors.manager.actors.find((x) => x.entity?.uid === 0x609e); if (a && a.health <= 0) __pt.aimAt(a.motor.position.x, a.bottom + 0.3, a.motor.position.z); return !a || a.health <= 0; })()`, timeout: 120, diag: ESCORT_1A_DIAG },
   // The drop is checked as the player meets it (drawn, lit, on screen; a frame '-seen'), then taken
   // with E like any pickup.
   { id: '1a.guard-gun', obj: "take the guard's dropped revolver", do: 'pickNear', cls: 'Ammo Box', at: [429.5, 88.7, 529.3], radius: 3, expect: { weapon: '4:5' } },
@@ -657,13 +678,18 @@ const ROUTE = [
   // The lever 13d5 opens the eight cells; cell 1ee has a hole down to the basement.
   { id: '3b.cells', obj: 'the cell lever opens the cells', do: 'use', uid: 0x13d5, then: { wait: 3 }, expect: { open: [0x1ee] } },
   { id: '3b.hole-cell', obj: 'into cell 1ee', do: 'walk', to: [428.5, 98.16, 297.3], tol: 0.3 },
-  { id: '3b.hole', obj: 'drop through the hole in the cell floor', do: 'route', pts: [[428.5, 98.16, 300.5], [430, 96, 303.5], [430, 93.75, 304]] },
-  { id: '3b.basement', obj: 'north through the basement to the button', do: 'walk', to: [404.23, 92.16, 324.78], tol: 0.3, then: { fight: 40 } },
+  // The rubble under the hole (Static Objects 2d56 / 2d57, model 23:703) collides as two boxes
+  // 2.5 m high from z 304.5 (docs/game-logic.md §14.10): land south of them; off their top the
+  // basement walk may drop 2.5 m.
+  { id: '3b.hole', obj: 'drop through the hole in the cell floor', do: 'route', pts: [[428.5, 98.16, 300.5], [430, 96, 303.2], [430, 93.75, 303.4]] },
+  { id: '3b.basement', obj: 'north through the basement to the button', do: 'walk', to: [404.23, 92.16, 324.78], tol: 0.3, drop: 2.5, then: { fight: 40 } },
   { id: '3b.basement-door', obj: 'the basement button opens the door north', do: 'use', uid: 0x2177, then: { wait: 2 }, expect: { open: [0x2175] } },
   { id: '3b.cp4', obj: 'down the basement: checkpoint (Detector 2d7b, 1 m deep at z 346.4)', do: 'walk', to: [435.5, 86.2, 347.3], then: { fight: 40 }, expect: { checkpoint: 0x2d7c } },
   { id: '3b.tunnel', obj: 'the tunnel north', do: 'walk', to: [409.4, 86.2, 367.6], tol: 0.3, then: { fight: 30 } },
   // Up the rock ledges to the north cell block (Clamber Points 2a00, 29fe, 2d55 / 267f).
-  { id: '3b.climb1', obj: 'climb the first ledge', do: 'clamber', from: [409.4, 86.2, 367.6], face: [[409.3, 88.5, 369]] },
+  // Left of the ceiling box over the ledge's east half (29c0, 2.18 m above its top): the room test
+  // sweeps the proxy up to 2.245 m (docs/game-logic.md §14.10), so the climb is from x < 409.
+  { id: '3b.climb1', obj: 'climb the first ledge', do: 'clamber', from: [408.6, 86.2, 367.6], face: [[408.6, 88.5, 369]] },
   // Clamber Point 29fe (yaw 180, side 3: its 3 m edge runs along z, x 413.4..414.4, top 91.4,
   // facing west; clamber.ts): climbed from the foot west of it, facing east, onto the ledge's
   // floor (from x 413.6).
@@ -683,8 +709,8 @@ const ROUTE = [
   // ---- 3a, back from 3b ----
   { id: '3a.return', obj: 'the walkway after 3b (mail 31:1: the burnt walkway)', do: 'wait', until: `!!__world.world.get(0x2149)?.destroyed || true`, timeout: 2 },
   { id: '3a.shotgun', obj: 'the shotgun on the walkway', do: 'pick', uid: 0x2192, optional: true },
-  // The burnt gate 3ab0 is locked but broken: a gap the grid planner misses.
-  { id: '3a.gap', obj: 'through the hole in the burnt gate', do: 'route', pts: [[419, 110.66, 391.75], [412, 110.66, 391.75], [405, 110.66, 391.5]] },
+  // The burnt gate 3ab0 (Switch, locked) collides as one 0.3 x 2.7 x 2 m box: its hole is drawn
+  // only (docs/game-logic.md §14.10). The way on is the door ba2.
   { id: '3a.real-door', obj: 'through the door ba2 (Luthor walks off)', do: 'use', uid: 0xba2, goto: [393, 110.66, 390.6], then: { wait: 1 } },
   { id: '3a.stair-door', obj: 'the stair-room door 381f', do: 'use', uid: 0x381f, goto: [391, 110.66, 386], then: { wait: 1 } },
   { id: '3a.inner-stairs', obj: 'down the stairs', do: 'route', pts: [[389, 110.66, 381.5], [389.5, 110.66, 378.6], [391.5, 108, 378], [393.5, 106.8, 377]] },
@@ -704,7 +730,9 @@ const ROUTE = [
   // The gas tanks 13c0.. in the store room: one breaks the rest (Relay 3e4e hides the door 3abb).
   // From the ladder's foot, where the ladder leaves him (walking about there faces the ladder
   // and remounts it).
-  { id: '3a.tanks', obj: 'smash a gas tank: the store-room door is blown', do: 'break', from: [288.17, 97.66, 383.0], uids: [0x13c3], then: { wait: 2 }, expect: { destroyed: [0x13c3] } },
+  // The ladder 157b collides as its box (x 287.7..287.8, z 382.65..383.35; docs/game-logic.md
+  // §14.10): the stand is on the side it leaves him, north of it.
+  { id: '3a.tanks', obj: 'smash a gas tank: the store-room door is blown', do: 'break', from: [287.55, 97.66, 384.1], uids: [0x13c3], then: { wait: 2 }, expect: { destroyed: [0x13c3] } },
   { id: '3a.store-out', obj: 'out of the store room past the blown tanks, south into the west yard', do: 'route', pts: [[288.6, 97.66, 384.6], [287, 97.66, 388], [287, 97.66, 391]] },
   // Detector 3eec (a vision) starts the pit CartWheelers and Count Down 4372; the wall
   // CartWheelers, Object Cloner 4366 and the "Slayer" scene (42c7) that breaks the gate 3aa4.
@@ -1275,17 +1303,17 @@ const ROUTE = [
   // 1cb0 starts the ambush (Relays 28da / 28dc) and kills the guard (2d3b), 28fd makes the
   // wagon's engine 1b80 and fuel can 25b3 vulnerable: it is shot from up there and "PaddyWagon"
   // turns the cloners Off (Relay 28df).
-  { id: '8a.crate', obj: 'pull the crate 193a west, out of the corner (Pushable 7:457)', do: 'push', uid: 0x193a, stand: [413.45, 97.7, 521.3], rel: [-1.35, 0], dir: [-1, 0], key: 'KeyS', secs: 5, until: `__pt.center(0x193a)[0] < 413.4` },
+  { id: '8a.crate', obj: 'pull the crate 193a west, out of the corner (Pushable 7:457)', do: 'push', uid: 0x193a, stand: [413.45, 97.7, 521.3], rel: [-1.35, 0], dir: [-1, 0], key: 'KeyS', secs: 5, until: `__pt.center(0x193a)[0] < 412.85` },
   { id: '8a.crate2', obj: 'push it north up the alley under Clamber Point 2288', do: 'push', uid: 0x193a, stand: [412.64, 97.7, 519.9], rel: [0, -1.35], dir: [0, 1], secs: 30, until: `__pt.center(0x193a)[2] > 531.6` },
-  { id: '8a.crate-jump', obj: 'jump onto the crate (first person: 2.05 m)', do: 'route', relTo: 0x193a, pts: [[0, 97.7, -2.4], [0, 99.65, 0]], jumpAt: [0, -1.9, 0.3], timeout: 8 },
+  { id: '8a.crate-jump', obj: 'jump onto the crate (first person: 2.05 m)', do: 'route', relTo: 0x193a, pts: [[-0.3, 97.7, -2.4], [-0.4, 99.65, 0]], jumpAt: [-0.3, -1.9, 0.3], timeout: 8 },
   { id: '8a.roof', obj: 'clamber from the crate onto the guard house roof (Clamber Point 2288, 4 m): Detectors 27fc / 1cb0 / 28fd', do: 'clamber', here: true, face: [[410.5, 104.2, 533]], shot: true },
   // On the roof the pit CartWheelers flee (27fc -> Relay 27f3 Disable -> Behavior Changer 27ee
   // with FleeBehavior 27ef enabled, 27f0 with KillEnemies 27f1 (the player as p3 target) disabled;
   // Timer 29e7 -> Relay 2806 hands them out; the yard grid 27fd.. does the reverse). The Slayers
   // (Object Cloner 274d, two at a time, and the placed 2756 by the alley) still shoot up at him:
   // they are fought from up there first.
-  { id: '8a.roof-fight', obj: 'fight the yard\'s Slayers from the roof (the CartWheelers flee)', do: 'arena', stand: [406.5, 103.63, 546], hold: 12, until: `!__pt.hostiles(30).filter((a) => ['chase', 'attack', 'shoot'].includes(a.st)).length`, timeout: 150 },
   { id: '8a.wagon', obj: 'from the roof\'s north edge shoot the wagon\'s engine (1b80, 25 m): "PaddyWagon" sends it through the gate', do: 'break', from: [405.5, 103.63, 554.3], uids: [0x1b80], then: { wait: 6, fight: 20 }, expect: { destroyed: [0x1b80], played: [0x1b7c] }, shot: true },
+  { id: '8a.roof-fight', obj: 'fight the yard\'s Slayers left from the roof before going down (the CartWheelers flee; the cloners are off)', do: 'arena', stand: [406.5, 103.63, 546], hold: 12, until: `!__pt.hostiles(30).filter((a) => ['chase', 'attack', 'shoot'].includes(a.st)).length`, timeout: 150 },
   { id: '8a.roof-down', obj: 'down off the roof\'s north edge into the yard (6 m: no fall damage under 6.5 m)', do: 'walk', to: [392, 97.7, 559.5], drop: 6.2, then: { fight: 30 } },
   // Over the wagon wedged in the gateway (Clamber Point 26e0, its east side) and off its north
   // end: Detector 2cf6 -> Timer 2d06 (3 s) -> Autosave 1e08.
@@ -1304,9 +1332,13 @@ const ROUTE = [
   // overhang to the rocks, up Clamber Points 25b1 and 2a3e onto the far bank's terraces.
   // Crossing the bank's planes (Detectors 2712..2715) sends the CartWheeler 2813 off the cliff to
   // Jimmy (26fb) by the gate 19b4, who kills it (Relay 2709 -> Timer 281c -> BlowUp).
-  { id: '8a.creek', obj: 'down the bank to the west ledge at the south ford', do: 'walk', to: [462.0, 84.1, 543.8], tol: 0.5, drop: 4 },
-  { id: '8a.ford', obj: 'a running jump over the channel onto the east ledge (Detector 2b2c)', do: 'route', pts: [[463.4, 84.1, 542.9], [467.2, 84.74, 540.6], [470.5, 84.74, 538.5]], jumpAt: [463.2, 543.0, 0.45], timeout: 12, shot: true },
-  { id: '8a.ledge', obj: 'north along the east ledge under the overhang to the rocks', do: 'walk', to: [490.8, 84.7, 593.6], tol: 1.2, drop: 4 },
+  // The west bank's water-level rock at the ford (84.1) is drawn faces only for movers since the
+  // collision trees (docs/game-logic.md §14.10: its model's tree has no nodes): nobody stands on
+  // it. The crossing is a running jump from the bank top (87.5) over the channel onto the east
+  // ledge (84.7), 3.8 m across and 2.7 m down; the cave wall behind the ledge stops the jump.
+  { id: '8a.creek', obj: 'to the west bank top above the ford', do: 'walk', to: [460.5, 87.6, 539.5], tol: 0.6 },
+  { id: '8a.ford', obj: 'a running jump from the bank top over the channel onto the east ledge (Detector 2b2c)', do: 'route', pts: [[463.3, 87.4, 539.5], [468.6, 84.7, 539.5]], jumpAt: [462.8, 539.5, 0.35], timeout: 10, shot: true },
+  { id: '8a.ledge', obj: 'north along the east ledge under the overhang towards the rocks', do: 'walk', to: [486.9, 84.74, 584.4], tol: 1.2, drop: 4 },
   { id: '8a.rocks', obj: 'up the rocks (Clamber Points 25b1, 2a3e)', do: 'clamber', from: [491, 84.7, 593.4], face: [[491.2, 87.8, 591.5], [491.4, 90.2, 587.8]], stands: [null, [491.2, 87.2, 589.6]] },
   // Detector 1e1e: the Slayers 1e1c / 1e1a on their waypoints and three CartWheelers (Relay 232e
   // -> Timers -> Behavior Changers 2332..2334: JumpBehavior off the rocks).
@@ -1378,16 +1410,20 @@ const ROUTE = [
   { id: '8b.jimmy-free', obj: 'Jimmy, freed, talks (SimpleConversation 1752)', do: 'wait', until: `[0x1753, 0x1758, 0x1759, 0x1760, 0x189f].includes(__actors.manager.get(0x1738)?.behavior?.uid)`, timeout: 90 },
   { id: '8b.jimmy-east', obj: 'follow Jimmy east through the broken wall (WaypointBehavior 1753)', do: 'follow', uid: 0x1738, until: `[0x1758, 0x1759, 0x1760, 0x189f].includes(__actors.manager.get(0x1738)?.behavior?.uid)`, timeout: 300, fight: true },
   { id: '8b.east', obj: 'east through the broken wall: checkpoint (Detector 11fd -> Autosave 1898)', do: 'walk', to: [241.2, 91.2, 141.5], then: { wait: 2, fight: 30 }, expect: { checkpoint: 0x1898 } },
-  { id: '8b.jimmy-ravine', obj: 'follow Jimmy on east and round into the ravine (WaypointBehavior 1759: Burrowers, CartWheelers, the ravine\'s Slayers)', do: 'follow', uid: 0x1738, until: `[0x1760, 0x189f].includes(__actors.manager.get(0x1738)?.behavior?.uid)`, timeout: 600, fight: true },
-  { id: '8b.ravine', obj: 'the ravine (Detector 1793: Slayers, a Burrower)', do: 'walk', to: [282, 90.4, 240], tol: 1.5, then: { wait: 2, fight: 30, until: `__actors.manager.get(0x1738)?.behavior?.uid === 0x189f`, timeout: 60 } },
+  { id: '8b.jimmy-burrowers', obj: 'follow Jimmy on east and north (WaypointBehavior 1759: Burrowers, CartWheelers) to the ravine\'s mouth', do: 'follow', uid: 0x1738, until: `[0x175e, 0x175d, 0x175c].includes(__actors.manager.get(0x1738)?.waypointNow ?? 0) || [0x1760, 0x189f].includes(__actors.manager.get(0x1738)?.behavior?.uid)`, timeout: 600, fight: true },
+  // The ravine (Detector 1793 at its mouth -> Relay 1794: the Slayers 16f4 / 18ef, the Burrower
+  // 16f5) killed Jimmy when he walked in first: the player goes ahead (beyond the escort's p9 10 m
+  // he waits) and clears it, then fetches him.
+  { id: '8b.ravine', obj: 'ahead into the ravine and clear it (Detector 1793: Slayers 16f4 / 18ef, the Burrower 16f5)', do: 'arena', stand: [242, 89.7, 228], hold: 10, until: `![0x16f4, 0x16f5, 0x18ef].some((u) => __actors.manager.get(u)?.alive)`, timeout: 240 },
+  { id: '8b.jimmy-ravine', obj: 'back to Jimmy and after him through the ravine to its ladder (175c, SimpleConversation 1760)', do: 'follow', uid: 0x1738, until: `[0x1760, 0x189f].includes(__actors.manager.get(0x1738)?.behavior?.uid)`, timeout: 400, fight: true, then: { until: `__actors.manager.get(0x1738)?.behavior?.uid === 0x189f`, timeout: 60 } },
   { id: '8b.ladder', obj: 'up Ladder d05 to the walkway', do: 'ladder', from: [289.2, 90.5, 245.3], face: [292, 93, 245.3], top: 103.5 },
   { id: '8b.cp3', obj: 'the walkway: checkpoint (Detector 25f9 -> Autosave 25fa)', do: 'walk', to: [305.5, 103.7, 223.2], tol: 0.4, expect: { checkpoint: 0x25fa } },
-  { id: '8b.jimmy-walkway', obj: 'Jimmy up the ladder and along the walkway: Detector 26b5 sees him (Relay 24e8 enabled: his scene)', do: 'wait', until: `!!__world.world.get(0x24e8)?.enabled`, timeout: 120 },
+  { id: '8b.jimmy-walkway', obj: 'Jimmy up the ladder and along the walkway: Detector 26b5 sees him (Relay 24e8 enabled: his scene)', do: 'wait', until: `!!__world.world.get(0x24e8)?.enabled || !__actors.manager.get(0x1738)?.alive`, timeout: 120 },
   // Hermes' gas room: Detector 1eaf -> Relay 1efd -> Relay 1edf -> "Camera" 1ed5 (48 s; with
   // Jimmy alive and unhurt, "Camera" 1eb1, 76 s, through Relay 24e8). Its end (Relay 1ed7): the
   // gas on (Mechanism 1fa3, Volumetric Fogs, Damage Action Objects 24fc / 24da / 24db / 249c, one
   // per difficulty, 3.5..10 a second) and the room's breakables made vulnerable (Relay 25c4).
-  { id: '8b.hermes', obj: 'into Hermes\' gas room (Jimmy\'s "Camera" 1eb1: Hermes kills him, Behavior Changer 25d5 -> DeathBehavior 10:350)', do: 'walk', to: [322, 105.9, 219.8], tol: 0.4, then: { cine: true, wait: 2 }, expect: { played: [0x1eb1] }, shot: true },
+  { id: '8b.hermes', obj: 'into Hermes\' gas room (Jimmy alive: his "Camera" 1eb1, Hermes kills him, Behavior Changer 25d5 -> DeathBehavior 10:350; else "Camera" 1ed5)', do: 'walk', to: [322, 105.9, 219.8], tol: 0.4, then: { cine: true, wait: 2 }, shot: true },
   // The four gas valves: Switch -> Disarm (the rotation group's p64) -> its Mechanism turns 160 deg
   // and at rest sends p58 Off (props.ts mechArrivalOutput) -> Relays 1fa7 / 1fab / 1fad / 1faf ->
   // Count Down 1fa9: at zero the gas stops (Mechanism 1fa3 Off, the Damage Action Objects Off) and
@@ -1410,9 +1446,9 @@ const ROUTE = [
   { id: '8b.jet', obj: 'push the crate 2404 onto the gas jet by it (Detector 2458): the copies go to the stove', do: 'push', uid: 0x2404, stand: [329, 105.9, 224.35], rel: [0, 1.35], dir: [0, -1], secs: 8, until: `__pt.center(0x2404)[2] < 220.3` },
   // Pushed past it (the push stops a poll late): pulled back north over it.
   { id: '8b.jet-back', obj: 'pull the crate back onto the jet if it went past', do: 'push', uid: 0x2404, stand: [329, 105.9, 218], rel: [0, 1.3], dir: [0, 1], key: 'KeyS', secs: 6, skipDone: true, until: `__pt.center(0x2404)[2] > 219.45` },
-  { id: '8b.lamps', obj: 'shoot down the hanging lamps over three more jets (2510 -> 250e -> Mechanism 2509; 24be -> 24a6; 250b -> Mechanism 24a0)', do: 'break', from: [333, 105.9, 228.6], uids: [0x2510, 0x24be, 0x250b], expect: { destroyed: [0x2415, 0x241c, 0x2420] } },
-  { id: '8b.molotov', obj: 'a Molotov at the Hermes copy by the stove: he reacts (Triggered -> Relay 1f0d -> "Hermes" 1f0f)', do: 'throw', select: '4:249', cls: 'Hermes', near: [340.6, 105.9, 229.5, 2], ready: `!!__world.world.get(0x1f0d)?.enabled`, from: [334, 105.9, 230.5], aimY: 0.2, until: `!!__world.world.get(0x1f0f)?.s.played`, timeout: 120, then: { until: `!!__world.world.get(0x1f13)?.s?.running || !!__world.world.get(0x1f0f)?.s.done`, timeout: 15 }, shot: true },
-  { id: '8b.stove-door', obj: 'close the stove door 1e37 before Hermes gets out (Count Down 1f15 -> Relay 26ae)', do: 'use', uid: 0x1e37, stand: [341.6, 105.9, 228.4], then: { until: `!!__world.world.get(0x24e7)?.s.played`, timeout: 20 }, expect: { played: [0x24e7] } },
+  { id: '8b.lamps', obj: 'shoot down the hanging lamps over three more jets (2510 -> 250e -> Mechanism 2509; 24be -> 24a6; 250b -> Mechanism 24a0)', do: 'break', from: [333, 105.9, 228.6], uids: [0x2510, 0x24be, 0x250b], then: { wait: 2 }, expect: { destroyed: [0x2510, 0x24be, 0x250b] } },
+  { id: '8b.molotov', obj: 'a Molotov at the Hermes copy by the stove: he reacts (Triggered -> Relay 1f0d -> "Hermes" 1f0f)', do: 'throw', select: '4:249', cls: 'Hermes', near: [340.6, 105.9, 229.5, 2], ready: `!!__world.world.get(0x1f0d)?.enabled`, from: [336, 105.9, 233], aimY: 1, until: `!!__world.world.get(0x1f0f)?.s.played`, timeout: 120, then: { until: `!!__world.world.get(0x1f13)?.s?.running || !!__world.world.get(0x1f0f)?.s.done`, timeout: 15 }, shot: true },
+  { id: '8b.stove-door', obj: 'close the stove door 1e37 before Hermes gets out (Count Down 1f15 -> Relay 26ae)', do: 'use', uid: 0x1e37, stand: [341.8, 105.9, 228.4], look: [343.8, 106.6, 228.4], then: { until: `!!__world.world.get(0x24e7)?.s.played`, timeout: 20 }, expect: { played: [0x24e7] } },
   { id: '8b.hermes-end', obj: 'the end scene "Camera" 24e7 and "Door" 24ff', do: 'wait', until: `!!__world.world.get(0x24e7)?.s.played`, timeout: 30, then: { cine: true, wait: 8 } },
   // Up the ladder 1ec7 through the hatch: Detector 1f2f -> Level Transition 1798 (9 Lighthouse;
   // it carries Jimmy, 1738, when he is alive).
@@ -1479,7 +1515,9 @@ const ROUTE = [
   { id: '9.ladder', obj: 'up the ladder 11', do: 'ladder', from: [350.9, 112.1, 220.25], face: [352.5, 113.5, 220.25], top: 118 },
   { id: '9.stairs', obj: 'up the stairs to the lamp machinery', do: 'walk', to: [347.6, 136.1, 216.8], tol: 0.5 },
   { id: '9.wedges', obj: 'shoot the lamp\'s three wedges (Count Down 1043)', do: 'break', from: [347.74, 136.08, 217.16], uids: [0x1919, 0x191a, 0x191b], expect: { destroyed: [0x1029, 0x1045, 0x1046] }, shot: true },
-  { id: '9.crank', obj: 'push the crank 9e1: the lamp turns', do: 'push', uid: 0x9e1, stand: [350.4, 136.1, 216.25], dir: [1, 0], secs: 4, until: `!!__world.world.get(0xcab)?.enabled`, shot: true },
+  // The stand is south of the lamp housing 9dc's leaf box (z >= 216), which the view ray to the
+  // crank crossed from the old stand (docs/game-logic.md §14.10): the grab missed.
+  { id: '9.crank', obj: 'push the crank 9e1: the lamp turns', do: 'push', uid: 0x9e1, stand: [350.6, 136.1, 215.6], dir: [1, 0], secs: 4, until: `!!__world.world.get(0xcab)?.enabled`, shot: true },
   // Up into the lamp room: Detector 132b -> Relay 1326 -> the Reputation Points Message Filters
   // 1323 / 1324 / 1325 (above 70 / -90..70 / -90 and below) pick the vision's line (131d / 131f /
   // 1321), then she is gone (Relay 132c).
@@ -1488,12 +1526,19 @@ const ROUTE = [
   { id: '9.lamp-down', obj: 'down from the lamp room', do: 'ladderDown', uid: 0x9da, from: [346.2, 141.03, 218.2], face: [345.5, 140, 217.46], bottom: 136.5 },
   { id: '9.stairs-down', obj: 'down the stairs', do: 'walk', to: [352.9, 118.1, 218.8], tol: 0.6 },
   { id: '9.ladder-down', obj: 'down the ladder 11', do: 'ladderDown', uid: 0x11, from: [352.7, 118.08, 218.6], face: [352, 117, 220.25], bottom: 112.6 },
+  // Straight off the ladder's foot first: the planner's first leg from there (round the ladder's
+  // collision box, docs/game-logic.md §14.10) could lead into the ladder, which mounted it again
+  // (runs r2 / r7: the walk ended on the floor above).
+  { id: '9.ladder-off', obj: 'step off the ladder\'s foot', do: 'route', pts: [[350.8, 112.1, 218.9]], timeout: 6 },
   { id: '9.base-door', obj: 'to the door of the ladder room', do: 'walk', to: [348.5, 112.1, 217.6], tol: 0.4, loot: 6 },
   { id: '9.outside', obj: 'out of the base to the guard', do: 'walk', to: [330.5, 112.5, 218], tol: 1.5 },
   // e03 -> his line and escort e05 to Waypoints e07 / e08 by the gate; e08 -> Relay 19e7 enables
   // Level Transition ca6. Detector cab on the way -> "Horace" cad (Horace blows the gate open)
   // and the mail 10:1 (Level Transition Msg Handler 19ea); its end -> Behavior Changer e09.
   { id: '9.gate', obj: 'follow him to the gate (Waypoint e08 enables Level Transition ca6)', do: 'follow', uid: 0xbc9, until: `!!__world.world.get(0xca6)?.enabled`, timeout: 200, fight: true },
+  // Detector cab (player filter, an 18 x 1 m slab across the road at the gate, enabled by the
+  // lamp) plays "Horace": the follow can end 6 m short of it, so walk into it.
+  { id: '9.cab', obj: 'up to the gate (Detector cab)', do: 'walk', to: [305.3, 112.3, 147.9], tol: 0.6 },
   { id: '9.horace', obj: 'Horace blows the gate ("Horace" cad)', do: 'wait', until: `!!__world.world.get(0xcad)?.s.played && !__world.world.runningStomps().some((r) => r.uid === 0xcad)`, timeout: 240, expect: { played: [0xcad] }, shot: true },
   // Detector ca7 -> Level Transition ca6 (no spawn name: 10's Player Spawn Point 86d from 9) carries
   // the guard (p7: bc9) to 10's Companion Spawn Point 908.
@@ -1524,7 +1569,10 @@ const ROUTE = [
   { id: '10.crate-west', obj: 'push the crate 318 west', do: 'push', uid: 0x318, stand: [259.4, 98.6, 281.5], dir: [-1, 0], secs: 5, until: `__pt.center(0x318)[0] < 254.7` },
   { id: '10.crate-south', obj: 'push it south into Detector 32e', do: 'push', uid: 0x318, stand: [254.6, 98.6, 283.4], dir: [0, -1], secs: 5, until: `(__world.world.get(0x32e).s.inside?.size ?? 0) > 0` },
   { id: '10.valves', obj: 'shoot the two pipe valves (Count Down 394 at zero: Mechanism 32d)', do: 'break', from: [254.5, 98.6, 282.5], uids: [0x357, 0x35a], until: `__world.world.get(0x394).s.count === 0`, expect: { destroyed: [0x357, 0x35a] }, shot: true },
-  { id: '10.climb-out', obj: 'back onto the pump housing (Clamber Point 38f)', do: 'clamber', from: [260, 98.6, 285], face: [[259.8, 103.2, 289]] },
+  // Clamber Point 38f's template (2:850) allows 3.5 m of height and its top is 4.4 m over the pump
+  // room floor: from inside only 110b (2:455, 4.5 m) takes, stood at x 260.8 facing north (the
+  // old stand at x 260 passed its side test by centimetres; run r12 failed it three times).
+  { id: '10.climb-out', obj: 'back onto the pump housing (Clamber Point 110b)', do: 'clamber', from: [260.8, 98.6, 285.3], face: [[260.7, 103.2, 288]] },
   { id: '10.corridor', obj: 'down to the corridor', do: 'route', pts: [[262.3, 98.6, 287.6], [264, 98.6, 284]], timeout: 10 },
   { id: '10.water', obj: 'the water rises: the fire by the pipes goes out', do: 'wait', until: `!!__world.world.get(0x124c)?.destroyed`, timeout: 60, shot: true },
   { id: '10.mainliners', obj: 'fight the Mainliners (Object Cloner cf8, Count Down 1372)', do: 'arena', stand: [265, 98.6, 270], hold: 12, preyDy: 3, until: `__world.world.get(0x1372).s.count === 0 && (__actors.director.cloners?.get(0xcf8)?.remaining ?? 0) <= 0`, timeout: 200 },
@@ -1539,7 +1587,9 @@ const ROUTE = [
   // Across: Detector 62a: the Slayers f91 / f93 / 634 / 138d (Count Downs f97 / fbc / fab), the
   // guard's "Ernesto" scene (STOMP 1153) and his escort on east (114c .. 1258) to Waypoint 947.
   { id: '10.across', obj: 'across the bus (Detector 62a: Slayers)', do: 'walk', to: [237.5, 97.5, 153], tol: 1.5, drop: 3 },
-  { id: '10.slayers', obj: 'fight the Slayers past the bus', do: 'arena', stand: [237.5, 97.5, 153], hold: 25, until: `[0x634, 0xf91, 0xf93, 0x138d].every((u) => !__actors.manager.get(u)?.alive)`, timeout: 300, shot: true },
+  // `sea`: a Slayer knocked into the gap (its bed 84.5) is shot from the edge, not followed down:
+  // run r10 followed one in and was stranded there (no way back up, invulnerable after a retry).
+  { id: '10.slayers', obj: 'fight the Slayers past the bus', do: 'arena', stand: [237.5, 97.5, 153], hold: 25, sea: [95, [237.5, 97.5, 153]], until: `[0x634, 0xf91, 0xf93, 0x138d].every((u) => !__actors.manager.get(u)?.alive)`, timeout: 300, shot: true },
   { id: '10.east', obj: 'follow him east to the burning road (Waypoint 947 -> Relay 949)', do: 'follow', uid: 0x7b8, until: `__pt.msgs(600).includes(' 949')`, timeout: 400, fight: true },
   // Waypoint 947: the fire across the road (Fires 44b.., Detectors d12 / 108f: 200 fire), the
   // Infernas d18 / d19 / 13f1..13f3 (Count Down 1256) -> Behavior Changer 1255: his farewell and
@@ -2120,11 +2170,18 @@ try {
   };
 
   /** Walk to a spot the object can be used from (tries a few), look at it, press E. */
-  async function useObj(uid, { walkFirst = true, wantOpen = false } = {}) {
+  async function useObj(uid, { walkFirst = true, wantOpen = false, look = null } = {}) {
     // A door by its handle (the fit anchor), else by the middle of its meshes (something in front
     // of the handle, a crate, can take the view's pick).
     const aim = async () => {
       let t = 0;
+      // `look` [x, y, z]: a point that picks it from the step's stand (8b's stove door 1e37: its
+      // open leaf turns the anchor and the middle away; its hinge does it).
+      if (look) {
+        await ev(`(() => { __pt.ap.follow = 0; __pt.ap.active = false; __pt.aimAt(${look[0]}, ${look[1]}, ${look[2]}); return 1; })()`);
+        await sleep(350);
+        if ((t = await ev(`__world.pickTarget()?.w?.uid ?? 0`)) === uid) return t;
+      }
       for (const [at, up] of [['useAim', 0], ['center', 0], ['center', 0.6]]) {
         // (Nothing else may turn the view meanwhile: a creature engaged on the way (ap.follow)
         // or the autopilot keep turning it on every frame, and the look at the door was lost.)
@@ -2876,7 +2933,7 @@ try {
           // over before the sleep below ends; read after it, the new level passed for "no change"
           // and E on the arrival side's own door (1c 52b6, back to 1b) bounced between the levels.
           const levelBefore = await levelNow();
-          await useObj(step.uid, { wantOpen: !!step.expect?.open?.includes(step.uid) });
+          await useObj(step.uid, { wantOpen: !!step.expect?.open?.includes(step.uid), look: step.look ?? null });
           await sleep(1500);
           // An exit: try again (after dealing with what attacks) while no level change starts.
           for (let n = 0; n < 3 && step.transition; n++) {
@@ -3280,13 +3337,17 @@ try {
         case 'ladderDown': {
           // From the top (3a's manhole ladder 157b): look at the ladder, E attaches at its top, S
           // climbs down to the foot.
-          for (let n = 0; n < 2 && !(await walk(step.from, 0.3, 90)).arrived; n++);
-          await ev(`(() => { __pt.aimAt(${step.face.join(',')}); return 1; })()`);
-          await sleep(400);
-          const t = await ev(`__world.pickTarget()?.w?.uid ?? 0`);
-          if (t !== step.uid) note(`ladder #${hex(step.uid)}: the view targets ${t ? '#' + hex(t) : 'nothing'}`);
-          await press('KeyE');
-          await sleep(500);
+          // Up to three tries: the walk can end a few centimetres off the stand with the view then
+          // missing the ladder (3a's manhole 157b: "the view targets nothing" in two runs of four).
+          for (let attempt = 0; attempt < 3 && !(await ev(`!!__world.interact.climb`)); attempt++) {
+            for (let n = 0; n < 2 && !(await walk(step.from, 0.3, 90)).arrived; n++);
+            await ev(`(() => { __pt.aimAt(${step.face.join(',')}); return 1; })()`);
+            await sleep(400);
+            const t = await ev(`__world.pickTarget()?.w?.uid ?? 0`);
+            if (t !== step.uid) note(`ladder #${hex(step.uid)}: the view targets ${t ? '#' + hex(t) : 'nothing'}`);
+            await press('KeyE');
+            await sleep(500);
+          }
           if (!(await ev(`!!__world.interact.climb`))) cur.problems.push('ladder: E did not attach at the top');
           await keyEv('keyDown', 'KeyS');
           // S is let go the moment the climb ends: held on, it walks the player backwards off the
@@ -3499,6 +3560,7 @@ try {
         missed = await checkExpect(step.expect, cpBefore);
       }
       cur.problems.push(...missed);
+      if (cur.problems.length && step.diag) cur.problems.push(`why: ${await ev(step.diag).catch((e) => e.message)}`);
       const trace = await ev(`(window.__ptTrace ?? []).splice(0).slice(-80)`).catch(() => []);
       if (trace?.length) note(`trace: ${trace.join('; ')}`);
     } catch (e) {

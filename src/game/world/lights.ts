@@ -40,6 +40,7 @@
 
 import * as THREE from 'three/webgpu';
 import { mix, positionLocal, vec3 } from 'three/tsl';
+import { cloneWithGlowMark } from '../../app/glow-mark';
 import { EngineFog, LEGACY_LIGHTING, engineColor, engineLights, type AmbientBox, type EnginePointLight } from '../../app/engine-light';
 import { entityBoxCorners } from '../../formats/entities';
 import { instanceRotation } from '../../formats/level';
@@ -376,7 +377,7 @@ export class Lights {
           const basic = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide });
           basic.colorNode = mix(vec3(0.05, 0.055, 0.065), vec3(0.008, 0.01, 0.018), positionLocal.y.div(h).clamp(0, 1).pow(0.6));
           mat = basic;
-        } else mat = (m.material as THREE.Material).clone();
+        } else mat = cloneWithGlowMark(m.material as THREE.Material);
         mat.depthWrite = false;
         (mat as THREE.MeshStandardNodeMaterial).fog = false;
         m.material = mat;

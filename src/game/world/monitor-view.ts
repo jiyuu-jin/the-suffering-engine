@@ -43,6 +43,7 @@ import type { EntityPackageSet, PropValue } from '../../formats/entities';
 import type { DynamicObjects } from './dynamic';
 import { readTemplate } from './fx';
 import { warmObjects } from '../../app/prewarm';
+import { cloneWithGlowMark } from '../../app/glow-mark';
 import { GAMMA_BACK_BUFFER, gammaDecode } from '../../app/engine-light';
 
 const num = (v: unknown, d = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
@@ -173,7 +174,7 @@ export class MonitorOverlay {
       if (!m.isMesh) return;
       const pos = m.geometry.getAttribute('position');
       for (let i = 0; i < pos.count; i++) halfHeight = Math.max(halfHeight, Math.abs(pos.getY(i)));
-      const mat = (m.material as THREE.Material).clone();
+      const mat = cloneWithGlowMark(m.material as THREE.Material);
       // Drawn after the scene, in model order (glass, then the bezel round it), always on top.
       mat.depthTest = false;
       mat.depthWrite = false;

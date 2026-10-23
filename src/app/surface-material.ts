@@ -65,6 +65,7 @@ import {
 import { coverageMipmaps, decodeTexture } from '../formats/texture';
 import type { DecodedTexture } from '../formats/types';
 import { glowMarkAlphaRef, glowMarked, passAlphaRef, passDepthWrite, tintFactor } from '../formats/render-data';
+import { glowMark, setGlowMark } from './glow-mark';
 import { LEGACY_LIGHTING, additiveEffectColor, engineLightFactor, engineLightMaterial, engineStages, engineSurfaceFinish, enhancedShading, type EnhancedMaps } from './engine-light';
 
 /** Legacy look only (`?lighting=legacy`): gain applied to baked per-vertex lighting. */
@@ -553,7 +554,7 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
   }
   material.name = opts.material?.key ?? opts.textureKey ?? 'untextured';
   // Pixels this surface marks for the scene glow (src/app/scene-glow.ts, render-data.ts glowMarked).
-  if (!LEGACY_LIGHTING && glowMarked(layers)) material.userData.glowMark = glowMarkMaterial(layers, side, src, missing);
+  if (!LEGACY_LIGHTING && glowMarked(layers)) setGlowMark(material, glowMarkMaterial(layers, side, src, missing));
   return { material, missing, blend };
 }
 
@@ -735,7 +736,7 @@ export class SurfaceMaterialCache {
   dispose() {
     for (const t of this.gpu.values()) t?.dispose();
     for (const m of this.materials.values()) {
-      const mark = m.userData.glowMark as THREE.Material | undefined;
+      const mark = glowMark(m);
       if (mark && ![...plainMarks.values()].includes(mark)) mark.dispose();
       m.dispose();
     }

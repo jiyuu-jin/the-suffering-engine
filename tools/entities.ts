@@ -1,4 +1,4 @@
-// Usage: npx tsx tools/entities.ts "<path to .lvl>" [--class <name>[,<name>...]] [--uid <hex>] [--limit N]
+// Usage: npx tsx tools/entities.ts "<path to .lvl>" [--class <name>[,<name>...]] [--uid <hex>[,<hex>...]] [--limit N]
 //                                                    [--graph] [--validate] [--classes]
 // Prints an entity census of a level (counts per class) and, with filters, entity details.
 //   --class   details for entities of these classes (case-insensitive substring match)
@@ -133,9 +133,11 @@ if (classFilter) {
 }
 const uidFilter = flag('--uid');
 if (uidFilter) {
-  const e = byUid.get(parseInt(uidFilter, 16));
-  if (e) details(e);
-  else console.log(`no entity with uid ${uidFilter}`);
+  for (const u of uidFilter.split(',')) {
+    const e = byUid.get(parseInt(u, 16));
+    if (e) details(e);
+    else console.log(`no entity with uid ${u}`);
+  }
 }
 
 if (has('--graph')) {

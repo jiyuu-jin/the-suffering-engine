@@ -12,7 +12,7 @@ import { parseEntities, type EntityPackageSet } from '../src/formats/entities';
 import { readSkeletonTrailer, readSkinnedModel } from '../src/formats/skeleton';
 import { BLEND_ALPHA_REF, modelCullsBackFaces, translucentPassState } from '../src/formats/render-data';
 import type { PackageSet } from '../src/formats/model';
-import { buildSkinnedMesh, characterSurfaceBlend, decodeCharacterTextures } from '../src/app/character';
+import { buildSkinnedMesh, characterAlphaTest, characterSurfaceBlend, decodeCharacterTextures } from '../src/app/character';
 import { beamHidden, beamTriangles, projectorOpacity, projectorParams, ProjectorState, skinnedVertexFor } from '../src/game/actors/specials/projector';
 import { nodeFS, readSrsc, skip } from './helpers';
 
@@ -187,4 +187,21 @@ test('projectors without a model (1c, 10, 5b): the beam starts at their placemen
   assert.equal(u.className, 'Breakable');
   assert.equal(u.modelRef, undefined, 'no model, no lens bone');
   assert.equal(p.beamFlicker, 0);
+});
+
+test("6a's figure 10:196: its cones' cut-out pass 2:904 (alpha 0) is discarded, not drawn black", { skip }, async () => {
+  const L6A = 'LEVELS/6 Woods/6a Woods.lvl';
+  const lvl = readSrsc(L6A);
+  const pkgs = (await loadPackages(nodeFS(), dirname(L6A), readLevelHeader(lvl).dependencies, () => {})) as unknown as PackageSet;
+  const sk = readSkinnedModel(pkgs, { pkg: 10, id: 196 })!;
+  const cones = sk.model.submeshes[0];
+  assert.equal(cones.material?.key, '2:904');
+  assert.equal(characterAlphaTest(cones.material, false), 200 / 255);
+  const tex = decodeCharacterTextures(sk, pkgs).get('2:164');
+  if (tex) {
+    let maxA = 0;
+    for (let i = 3; i < tex.rgba.length; i += 4) maxA = Math.max(maxA, tex.rgba[i]);
+    assert.ok(maxA <= 200, `texture alpha up to ${maxA}`);
+  }
+  assert.equal(characterAlphaTest(sk.model.submeshes[1].material, false), 0, 'the opaque body has no test');
 });

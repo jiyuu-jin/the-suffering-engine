@@ -102,6 +102,13 @@ export interface WorldService {
    * For sight tests (src/game/actors/sight.ts).
    */
   seeThrough(hit: RayHit): boolean;
+  /**
+   * Does a shot pass a collision hit? With collision trees (docs/game-logic.md §14.10) nothing:
+   * the sight flag (template bit 10) is a line-of-sight query flag (0x800) that the
+   * BouncingObject sweep never passes [verified for it; bullets inferred] - 3a's gas tank 13c3
+   * carries it and is shot. Without collision parts: the see-through surfaces, as sight.
+   */
+  shotThrough(hit: RayHit): boolean;
   /** Does the eye see through a hit on the drawn triangles (LevelRenderer.drawn: see-through surfaces)? */
   eyeThrough(hit: RayHit): boolean;
 }
@@ -769,6 +776,14 @@ export async function createWorldSystem(ctx: GameContext): Promise<GameSystem> {
         return uid !== undefined && dyn.seeThrough(uid, hit.part);
       }
       return !!seeThroughStatic()[hit.part];
+    },
+    shotThrough: (hit) => {
+      if (hit.dynamic !== undefined) {
+        const uid = dyn.uidOfBody(hit.dynamic);
+        const d = uid !== undefined ? dyn.objects.get(uid) : undefined;
+        return d?.collisionLocal ? false : service.seeThrough(hit);
+      }
+      return loaded.level?.collision ? false : service.seeThrough(hit);
     },
     eyeThrough: (hit) => (hit.dynamic !== undefined ? service.seeThrough(hit) : !!seeThroughDrawn()[hit.part]),
   };

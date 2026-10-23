@@ -63,6 +63,7 @@
 
 import * as THREE from 'three/webgpu';
 import type { Character } from '../../../app/character';
+import { cloneWithGlowMark } from '../../../app/glow-mark';
 import { translucentPassState } from '../../../formats/render-data';
 import type { Entity, PropValue } from '../../../formats/entities';
 import type { Actor, ActorEnv } from '../actor';
@@ -359,13 +360,8 @@ function projector(rt: SpecialRuntime, e: Entity): () => void {
     const geometry = mesh.geometry.clone();
     mesh.geometry = geometry;
     const m = mesh.material;
-    const mats = (Array.isArray(m) ? m : [m]).map((x) => {
-      const c = x.clone();
-      // Material.copy round-trips userData through JSON: keep the scene glow's mark material
-      // (scene-glow.ts glowMarkOf; his 10:428 pass carries the flag) as the object it is.
-      if (x.userData.glowMark) c.userData.glowMark = x.userData.glowMark;
-      return c;
-    });
+    // The clones keep the scene glow's mark (app/glow-mark.ts; his 10:428 pass carries the flag).
+    const mats = (Array.isArray(m) ? m : [m]).map((x) => cloneWithGlowMark(x));
     mesh.material = mats.length === 1 ? mats[0] : mats;
     const pos = geometry.getAttribute('position') as THREE.BufferAttribute;
     // Render vertices of each skeleton vertex p12[i] (the welded copies the engine updates too).

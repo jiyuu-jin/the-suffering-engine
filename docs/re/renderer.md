@@ -793,6 +793,10 @@ the user's reference frame of a lit cage lamp (bulb 255, glass 200..250, rim 250
   added over the frame (each upsampled to the screen directly; the engine stretches its 256²
   accumulation);
 - `?noglow` turns it off; Enhanced mode and `?lighting=legacy` do not use it;
+- a surface's mark material is a non-enumerable userData property (`src/app/glow-mark.ts`):
+  `Material.clone` deep-copies userData through JSON, which turned a stored mark into a plain
+  object the renderer could not draw (chapter 5 in 1c6b915). Clones that should keep glowing
+  use `cloneWithGlowMark`;
 - not done: the HDR Scene Glow templates (no retail caller), the destination alpha of HUD
   quads drawn after the world (the port adds the glow before the viewmodel and the HUD).
 

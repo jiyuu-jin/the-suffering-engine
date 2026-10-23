@@ -610,14 +610,20 @@ export class CollisionWorld {
   // Capsule overlap / depenetration
 
   /** True if the capsule overlaps any triangle (by more than `skin`). */
-  capsuleOverlaps(c: Capsule, skin = 0.001): boolean {
+  /**
+   * `only` (optional): static triangles of these COLLISION_LAYER bits alone, and no dynamic body
+   * (the clamber room test asks for Static Objects only, docs/game-logic.md §14.10).
+   */
+  capsuleOverlaps(c: Capsule, skin = 0.001, only?: number): boolean {
     const r = c.r - skin;
     const n = this.queryBox(c.x - r, c.y0 - r, c.z - r, c.x + r, c.y1 + r, c.z + r);
     const T = this.tris;
     for (let k = 0; k < n; k++) {
+      if (only !== undefined && !(this.triLayers[this.candidates[k]] & only)) continue;
       const p = 9 * this.candidates[k];
       if (segTriDist2(c.x, c.y0, c.z, c.y1 - c.y0, T, p, CLOSEST) < r * r) return true;
     }
+    if (only !== undefined) return false;
     for (const d of this.dynamicList) {
       if (!d.enabled || !(d.layers & this.queryLayers) || !d.world.triangleCount) continue;
       if (!CollisionWorld.boxOverlap(d.world.bounds, c.x - r, c.y0 - r, c.z - r, c.x + r, c.y1 + r, c.z + r)) continue;

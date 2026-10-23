@@ -5,6 +5,7 @@
 //   npx tsx tools/levelqa.ts --levels "0 Prelude,10 Docks"   substring filter on the .lvl path
 //   npx tsx tools/levelqa.ts --all                 include chapter 1 (1a/1b/1c)
 //   npx tsx tools/levelqa.ts --url http://localhost:5173     use a running dev server
+//   npx tsx tools/levelqa.ts --query "gfx=enhanced&tier=low"  extra page query (e.g. Enhanced mode)
 //   npx tsx tools/levelqa.ts --out <dir>           screenshots + JSON (default $TMPDIR/levelqa)
 //   npx tsx tools/levelqa.ts --doc                 (re)write the status table in docs/levels.md
 //   npx tsx tools/levelqa.ts --reuse --doc         static checks again, browser results from <out>/levelqa.json
@@ -48,6 +49,7 @@ const includeCh1 = args.includes('--all');
 const filter = opt('--levels')?.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 const OUT = opt('--out') ?? join(tmpdir(), 'levelqa');
 const urlArg = opt('--url');
+const extraQuery = opt('--query')?.replace(/^[?&]/, '');
 
 const CH1 = /\/1 PrisonDeathRow\//;
 
@@ -349,7 +351,7 @@ async function browserPass(paths: string[]): Promise<BrowserReport[]> {
       await page.send('Page.navigate', { url: 'about:blank' });
       await sleep(300);
       const t0 = Date.now();
-      await page.send('Page.navigate', { url: `${base}/?level=${encodeURIComponent(path)}` });
+      await page.send('Page.navigate', { url: `${base}/?level=${encodeURIComponent(path)}${extraQuery ? `&${extraQuery}` : ''}` });
       try {
         await waitFor(() => page.eval<boolean>(`!!(window.__world && window.__view && window.__view.renderer.info.render.triangles > 0)`), 120_000, `${level} load`);
         rep.loaded = true;

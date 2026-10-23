@@ -136,6 +136,8 @@ interface WorldMessaging {
   seeThrough?(hit: RayHit): boolean;
   /** Does the eye see through a hit on the drawn triangles (LevelRenderer.drawn)? */
   eyeThrough?(hit: RayHit): boolean;
+  /** Does a shot pass a collision hit (docs/game-logic.md §14.10)? */
+  shotThrough?(hit: RayHit): boolean;
 }
 
 interface WeaponsLike {
@@ -795,6 +797,7 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
     if (w.world?.playerUid) env.playerUid = w.world.playerUid;
     if (typeof w.seeThrough === 'function') manager.seeThrough = (hit) => w.seeThrough!(hit);
     // Draw occlusion looks at the drawn triangles (docs/game-logic.md §14.10).
+    if (typeof w.shotThrough === 'function') manager.shotThrough = (hit) => w.shotThrough!(hit);
     if (typeof w.eyeThrough === 'function' && view.drawn !== view.collision) manager.occlusion = { world: () => view.drawn, seeThrough: (hit) => w.eyeThrough!(hit) };
     // NPC sight and shots pass what the eye passes (bars, grates, chain-link, glass).
     env.seeThrough = manager.seeThrough;

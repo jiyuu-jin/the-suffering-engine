@@ -35,13 +35,16 @@ import * as THREE from 'three/webgpu';
 import type { ResRef } from '../../formats/model';
 import type { EntityPackageSet } from '../../formats/entities';
 import type { PlayerController } from '../../app/player';
-import type { CollisionWorld } from '../../app/physics';
+import { COLLISION_LAYER, type CollisionWorld } from '../../app/physics';
 import type { World, WorldEntity } from './logic';
 import type { DynamicObjects } from './dynamic';
 import type { Props } from './props';
 import type { Fx } from './fx';
 import { readTemplate } from './fx';
-import { clamberRoom, clamberSide } from './clamber';
+import { clamberRoom, clamberRoomShape, clamberSide } from './clamber';
+import { readModelCollision } from '../../formats/model-collision';
+import { readModelBoundsBox } from '../../formats/model-spheres';
+import type { SrscFile } from '../../formats/srsc';
 import type { DamageService } from './damage';
 import { InteractionClips, type PlayerBodyClips } from '../actors/interaction-clips';
 import { UseAnimator, ladderFootWindow, approachOf, nearestInteraction, readInteractionProps, switchAnchor, switchFit, type UseBody, type UseStep } from './use-anim';
@@ -806,6 +809,21 @@ export class Interactions {
    * Try to clamber onto a ledge in front of the player (Space / E). Returns true when it
    * started. The side tests are clamber.ts (clamberSide); no room on top: "Blocked" (0x10011f30).
    */
+  private room?: { radius: number; height: number } | null;
+  /** The clamber room test's shape from the Player's proxy (p91, clamber.ts clamberRoomShape). */
+  private roomShape() {
+    if (this.room === undefined) {
+      this.room = null;
+      const proxy = this.env.world.of('Player')[0]?.e.values[91] as ResRef | undefined;
+      const t = proxy && typeof proxy === 'object' ? readTemplate(this.env.pkgs, proxy) : undefined;
+      const mdu = t?.model ? (this.env.pkgs.get(t.model.pkg) as { mdu?: SrscFile } | undefined)?.mdu : undefined;
+      const c = mdu && t?.model ? readModelCollision(mdu, t.model.id) : undefined;
+      const box = mdu && t?.model ? readModelBoundsBox(mdu, t.model.id) : undefined;
+      if (c && box) this.room = clamberRoomShape(c.leaves.flatMap((l) => (l.kind === 'sphere' ? [l.radius] : [])), box.corner[1] + box.edges[1][1]) ?? null;
+    }
+    return this.room ?? undefined;
+  }
+
   tryClamber(): boolean {
     if (this.clamber || this.climb || this.mounted || !this.env.walking()) return false;
     const pl = this.env.player;
@@ -841,7 +859,8 @@ export class Interactions {
         .reduce<ReturnType<typeof clamberSide>>((hit, ip) => hit ?? (ip ? clamberSide(ip, box, p, look, margin) : null), null);
       if (!pick) continue;
       const { edge, normal: n, anchor } = pick;
-      if (col.capsuleOverlaps(clamberRoom(anchor, box.top, pl.motor.cfg.height, pl.motor.cfg.radius), 0.01)) {
+      const shape = this.roomShape() ?? { height: pl.motor.cfg.height, radius: pl.motor.cfg.radius };
+      if (col.capsuleOverlaps(clamberRoom(anchor, box.top, shape.height, shape.radius), 0.01, COLLISION_LAYER.solid)) {
         blocked = true;
         continue;
       }

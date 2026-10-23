@@ -78,3 +78,36 @@ test('lamp tables: the "on" glass (7:1863) and bulb (4:1374) mark the glow, the 
   }
   assert.ok(seen.size >= 8);
 });
+
+test('glow mark survives no JSON round trip: a plain clone has no mark, cloneWithGlowMark shares the real one', async () => {
+  // Material.copy deep-copies userData through JSON.stringify / parse; a mark stored there as an
+  // enumerable material came back a plain object that the glow pass handed to the renderer
+  // ("customProgramCacheKey is not a function", chapter 5 in 1c6b915).
+  const THREE = await import('three/webgpu');
+  const { cloneWithGlowMark, glowMark, setGlowMark } = await import('../src/app/glow-mark');
+  const src = new THREE.MeshStandardNodeMaterial();
+  const mark = new THREE.MeshBasicNodeMaterial();
+  setGlowMark(src, mark);
+  assert.equal(glowMark(src), mark);
+  assert.equal(JSON.stringify(src.userData), '{}');
+  const plain = src.clone();
+  assert.equal(glowMark(plain), undefined);
+  const kept = cloneWithGlowMark(src);
+  assert.equal(glowMark(kept), mark);
+  assert.equal(glowMark(kept.clone()), undefined);
+  // Whatever else sits under the key (an old enumerable copy, JSON data) is no mark.
+  const stale = new THREE.MeshStandardNodeMaterial();
+  stale.userData.glowMark = mark;
+  assert.equal(glowMark(stale.clone()), undefined);
+});
+
+test('cloneWithGlowMark keeps the alpha test that NodeMaterial.copy drops (three r186)', async () => {
+  const THREE = await import('three/webgpu');
+  const { cloneWithGlowMark } = await import('../src/app/glow-mark');
+  const cut = new THREE.MeshStandardNodeMaterial({ alphaTest: 200 / 255 });
+  assert.equal(cut.alphaTest, 200 / 255);
+  // The bug this guards against (a cloned cut-out drew its discarded texels: 6a's black cones).
+  // If three fixes NodeMaterial.copy the first check starts failing: the workaround can go.
+  assert.equal(cut.clone().alphaTest, 0, 'NodeMaterial.copy skips _alphaTest');
+  assert.equal(cloneWithGlowMark(cut).alphaTest, 200 / 255);
+});

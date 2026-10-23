@@ -13,7 +13,7 @@ import * as THREE from 'three/webgpu';
 import type { DecodedTexture } from '../formats/types';
 import { Blend, findEntry, TDU_TEXTURE, type PackageSet, type SurfaceMaterial } from '../formats/model';
 import { decodeTexture } from '../formats/texture';
-import { modelCullsBackFaces } from '../formats/render-data';
+import { modelCullsBackFaces, passAlphaRef } from '../formats/render-data';
 import { boneSubtree, MAX_INFLUENCES, type Skeleton, type SkinnedModel } from '../formats/skeleton';
 import { blendInto, guessClipLabel, type AnimClipData } from '../formats/animation';
 import { instanceRotation, toOutputSpace, type LevelObject } from '../formats/level';
@@ -129,6 +129,19 @@ export function buildSkeleton(skel: Skeleton): { skeleton: THREE.Skeleton; bones
   return { skeleton: new THREE.Skeleton(bones, inverses), bones, rootBones };
 }
 
+/**
+ * Alpha test of a character pass drawn lit (not a surface-material pass): a cut-out pass (mode 8)
+ * keeps alpha > 200 / 255 whatever the texture's header says (0x48fab0). Killjoy's figures carry
+ * 2:904 (texture 2:164, alpha 0 everywhere) on their light cones: drawn opaque, the cones pinned
+ * to a lens became the black stretched triangles of 6a's phone vision. Otherwise a texture with
+ * alpha cuts at 0.5, as before [port].
+ */
+export function characterAlphaTest(m: SurfaceMaterial | undefined, hasAlpha: boolean): number {
+  const l = m?.layers.find((x) => x.texture || x.frames);
+  if (l?.blend === Blend.Cutout) return passAlphaRef(Blend.Cutout)!;
+  return hasAlpha ? 0.5 : 0;
+}
+
 /** SkinnedMesh with one material group per submesh. Triangles are re-wound to CCW-front. */
 export function buildSkinnedMesh(
   skinned: SkinnedModel,
@@ -194,7 +207,7 @@ export function buildSkinnedMesh(
       roughness: 0.85,
       metalness: 0,
       side,
-      alphaTest: src?.hasAlpha ? 0.5 : 0,
+      alphaTest: characterAlphaTest(s.material, !!src?.hasAlpha),
     });
     mat.name = s.textureKey ?? 'untextured';
     // Lit like the engine's dynamic objects: its own light set (ambient region, directional / rim

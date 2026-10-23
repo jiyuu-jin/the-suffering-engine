@@ -29,6 +29,13 @@
 // (H - 2r) / 4 by 3 (H - 2r) / 4 (H the shape's height) must hit nothing. No floor is asked for
 // under the anchor (the port's earlier extra test refused 29fe). Pure maths (no three.js):
 // interact.ts applies it.
+// The shape (docs/game-logic.md §14.10) [verified]: the "width" is the player's EXE mover
+// (Player +0xd0) vt+0x30 = 0x41b270, the largest radius of its spheres, and r is half of it; H is
+// the top of the movement proxy's world box (engine vt+0x18 = 0x459410, the model box) above the
+// proxy's origin (+0x48). The proxy is Player p91, Collider 2:44 (model 2:27): four spheres of
+// r 0.6, box -0.455..2.245: r = 0.3, H = 2.245. The sweep is a scene query with the class filter
+// cleared and Static Object alone turned on (0x10011cb6..0x10011ccf), so doors and props do not
+// count.
 
 type V3 = { x: number; y: number; z: number };
 const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
@@ -96,6 +103,12 @@ export function clamberSide(ip: readonly unknown[], box: ClamberBox, feet: V3, l
  * The room test's swept body (0x10011b30) as a capsule at the anchor on the box top: a sphere of
  * radius r swept from top + r + (height - 2r) / 4 up to top + height - r.
  */
+/** The room test's shape from the player's movement proxy: its sphere radii and its box top (model units). */
+export function clamberRoomShape(radii: readonly number[], boxTop: number): { radius: number; height: number } | undefined {
+  if (!radii.length || !(boxTop > 0)) return undefined;
+  return { radius: 0.5 * Math.max(...radii), height: boxTop };
+}
+
 export function clamberRoom(anchor: { x: number; z: number }, top: number, height: number, radius: number) {
   const straight = Math.max(0, height - 2 * radius);
   return { x: anchor.x, z: anchor.z, y0: top + radius + 0.25 * straight, y1: top + height - radius, r: radius };

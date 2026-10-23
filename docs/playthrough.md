@@ -153,6 +153,10 @@ outputs, STOMP Players and Level Transitions, and checked in the browser.
 | 56 | 1a escort (route) | `1a.guard-comes` waited 150 s for nothing (also with the committed code, an A/B run): the guard 609e stood at the west end beckoning. | Whether he comes depends on his chain when the player goes ahead: SimpleConversation 7522 walks him to the listener, but once WaypointBehavior 7524 runs, a player beyond 20 m is only beckoned (the decoded escort rule). | The step goes back to the guard and keeps by him until he opens the gate (`follow`), as a player answering the beckon does. | fixed (route) |
 | 57 | 1a metal detector (user report) | Walking through the lobby's metal detector gates (Detectors 8956 / 8957 -> Relay 813e -> Sound Effect 8147, 3:297) no longer sounded the alarm. | The logic ran (8147 asked to play, its light on), but the mixer dropped the voice: 48 of 48 voices were the looping hum 4:297 at (404.7, 92.7, 489.3), the lobby sparks generator 81f2 spawning its Sound Effect 4:1159 (play mode 1) every 0.1 s since the decoded generator rule (13b4507), and a new sound of priority 85 finds none of strictly lower priority to steal. | Object Generator p23 decoded (docs/game-logic.md §14.2): no spawn while p23 objects it made still exist; 81f2 (p23 3) keeps one hum (`world/fx.ts`). A spawned Sound Effect plays at creation only with p1 and loops in play mode 1. | fixed [verified], tests; step `1a.metal-detector` (`expect.heard`: a voice of 3:297 started during the step) |
 | 58 | 1a "Gaurd" #218 (user report, not reproduced) | "The second guard after the earthquake is already dead; the scene where he gets bashed doesn't play." | Not reproduced. Walked like a player from a capture before the hall (stroll), and back from the walkway after #114 in three ways (straight back through the junction, waiting east of Detector 7ac1 until #114 ended, back at once): #218 started each time as a cinematic with guard 609f alive (health 50, DormantBehavior 10:147 at the off-map staging area until then), on screen 24.6 s of 28.3, killed in the scene. The full opening watched (216 s) leaves him and CartWheeler 6208 dormant and unhurt. The other candidate, the crawling guard 7fdf of "Cartwheeler" #253, is placed dead by the data (p68 none, p69 DeathBehavior 10:933, pose 10:1663) in the room north of the west corridor, out of sight; #253 keys him alive, crawling, and his tripwire Detector 642a spans the corridor. | Check added: `expect.aliveAtStart` (the characters a sequence finds alive when it starts, recorded by wrapping the world's sequence observer); `1a.gaurd` fails if 609f is dead when #218 starts. | open (needs the reporter's path or a save) |
+| 59 | 1a gas chamber (collision) | Playtest: the window glass did not stop the player before CartWheeler 64f6 broke in. | The glass Real_Glass 6342 (Static Object, model 9:2089) is drawn with additive faces (blend 2), which the drawn-triangle collision treated as light-only. | Objects collide as their collision trees (docs/game-logic.md §14.10): 6342 is one 0.09 x 3.9 x 11.3 m box and stops movers. "CartWheeler" #210 sends it away at 2.26 s, and its body goes with it. The shards it leaves (Breakable 702f, 9:2551) are a sphere tree without nodes: rays hit their faces, movers pass. Checked in the browser: the player is stopped on both sides of the pane before the scene and walks through after it. | fixed [verified], test |
+| 60 | 1a escort (route; deployed build) | `1a.guard-dies` could not be played: after the gate ambush the guard 609e stood in his HostilityBehavior by the gate for good (A/B: a `--level 1a` run of the committed tree). Earlier reports of him "looping in his conversation" (SimpleConversation 7520 act / idle every 5..8 s) were runs whose `1a.flashlight` step failed. | (1) The ambush's Count Down 73a5 needs both CartWheelers; the second, 64f1, walks WaypointBehavior 8027 to Waypoint 8025 inside door 4e48. That goal's nearest Move Node is on its side, so its path crosses no door edge and nothing opened the door: the body (Collider radius 0.4, ffaf3d3) stopped 0.51 m short of 8025 (reach 0.45), and the stuck-leg rule (e170605) ended the WaypointBehavior; it idled behind the shut door, nobody saw it, 73a5 stayed at 1 and Timer 7532 -> Behavior Changer 7527 (the guard's talk 7528, then his walk to Waypoint 752d) never came. (2) 7520 is a chatter with repeating lines: it ends only through Detector 7523 at the west end, which taking the flashlight 6978 enables (Relay 8aba), the level's own rule. | A passive walk stuck against a closed door on the Move Node edge its goal lies on opens it (`actor.ts doorInTheWay / goalOnEdge`; the decoded escort rules, the once-per-MoveTo leg test and the stuck-leg rule are unchanged). The route's escort steps (`1a.escort` .. `1a.guard-dies`) print a `why:` when they fail (`ESCORT_1A_DIAG`: the guard's behaviour, the flashlight / Detector 7523, Count Down 73a5 with both CartWheelers and door 4e48). | fixed, tests (`tests/electrocution.test.ts`), verified on the real route (`CartWheeler #64f1 opens door #4e48`, 73a5 at zero, 7528, the walk to 752d) |
+| 61 | 1a electrocution (user report) | The guard fell at once at the electrified door; in the original he stays up amid the bolts while Horace's line plays, then falls. | Decoded the scene: his arrival at Waypoint 752d fires Relay 8a1b -> Timer 81d5 (0.1 s) -> Damage Action Objects 75dd (0) and 8185 (200 at once) and Relay 75de -> Timer 5bd2 (0.1 s) -> the bolts (7619) and Relay 7a77 -> Timer 8a1c (0.25 s) -> Speech Player 8b33, Horace's random line 0.35 s after the arrival; the guard has no line there. The death is at 0.1 s in the original too; what differs is the clip. The Character death picker (0x100e5d00) chooses among the p72 DeathBehaviors by the angle between the body's back axis and the attacker's direction (DeathBehavior p4 the bound); a Damage Action Object's damage record has no attacker (0x1008e9e7): 90 degrees, so the guard takes his second entry 10:22 (clip 10:156: upright ~0.5 s, kneeling 1.5..5 s, down at 5.7 s). The port always took the first (10:250: 10:301 down by 0.5 s, or 10:1470). | `actor.ts deathAngle / deathPick / deathFor` with the killing blow's attacker (`profile.deaths`, DeathBehavior `angle`); docs/game-logic.md §11.5 item 3, §17.3. | fixed, tests, verified on the real route (10:156 played; Horace's line 0.35 s after the arrival; a frame strip from the reference framing: upright amid the bolts with the line on screen to 1 s, on his knees 1.5..5 s, down at 5.5 s; `1a.guard-dies` and `1a.guard-gun` pass) |
+| 62 | 5a / 5b (deployed build 1c6b915) | Chapter 5 threw `material.customProgramCacheKey is not a function` from the renderer every frame (5a); 5b drew nothing. | The scene glow kept each surface's mark material in `material.userData.glowMark`. `Material.clone` / `copy` deep-copies userData through JSON, so a clone carried the mark as `Material.toJSON` output, a plain object, and the glow pass swapped that object in as the mesh's material. The clones were the sky objects (lights.ts) and security monitors (monitor-view.ts) of chapter 5, whose materials are flagged. | The mark is a non-enumerable userData property (`app/glow-mark.ts`): JSON skips it, so a plain clone has no mark. Only a real material counts as a mark. `cloneWithGlowMark` keeps it for the sky, the monitors and Killjoy's projector targets. Smoke now loads 5a, 3a and 5a in Enhanced mode. `tools/levelqa.ts --query` runs the QA in Enhanced mode. | fixed, test (`tests/scene-glow.test.ts`), smoke, levelqa: all 18 levels load with 0 errors in both modes |
 
 ## Open observations
 
@@ -554,8 +558,8 @@ the transitions' enable logic and checked in the browser [verified]:
   the tunnel and three ledges up; the stairs; the clamber onto the roof (Clamber Points 2bfd /
   1da5); Detector 19da -> Level Transition 19db -> 3a "East Spawn" (18de), mail 31:1 (2f8a ->
   42f3 -> Relay 42f5: the burnt walkway).
-- **3a, the return.** The shotgun 2192 (optional pick); the hole in the burnt gate 3ab0; doors
-  ba2 and 381f; checkpoint 3187; door 3806 onto the west walkway, where Object Cloners 13c9 /
+- **3a, the return.** The shotgun 2192 (optional pick); past the burnt gate 3ab0 (its hole is
+  drawn only: the gate collides as one box, row 3-18); doors ba2 and 381f; checkpoint 3187; door 3806 onto the west walkway, where Object Cloners 13c9 /
   1b5a keep sending CartWheelers until the searchlights cc2 / 348e light Detectors 13ed / 1b5b;
   the searchlight cc3 lights the pit (Detector 13f8: Count Down 1b7a); down the manhole ladder
   157b; a gas tank in the store room (Relay 3e4e blows the door 3abb); the west yard: Detector
@@ -593,6 +597,7 @@ stand's floor and surroundings) and `hold` (the fight kept within that many metr
 | 3-15 | actors (MoveTo) | CartWheeler copies 15d7 / 1b5e (and Mainliner 2b83 in earlier runs) stood "chasing" for minutes under a player on a walkway or ledge above them. | With no graph path the chaser walked straight at the player and stayed there; the give-up on a failed MoveTo applied only to a stuck graph walk. | A hunter with no way on the graph to a target out of straight reach gives the target up (idles, picks again after its interval, the failed target last: KillEnemies 0x100fbbdf) [inferred: a FindPath without a result is a failed MoveTo]; a stuck walk gives up whether or not it had a path. | fixed [inferred] |
 | 3-16 | actors (CartWheeler) | CartWheeler 2cc5 paced under its first Waypoint in 3b's south corridor for good (stuck-actor note). | Its Waypoints 2cc8 / 2dfd / 2d00 hang on the ceiling (102.6 m, 4.4 m over the floor); the floor walker never counted them reached (within 2 m in height) and never went up. | A Waypoint walk to a Waypoint over 2 m above takes the crawler path up (`cartwheeler.ts routeCheck`) or leaps up under it, then crawls the rest (`ceilingWaypoints`) [inferred]. | fixed [inferred] |
 | 3-17 | harness | Hermes 429b "sinking"; the run left the west walkway chasing a creature down the stairs and lost the searchlights. | The sanity probe counted a sequence-held body ("Hermes" #42 flies it through the burnt walkway's floor by its keys); walkway fights chased. | Sequence-held actors are left out of the floating / sinking / stuck probe; the walkway fights hold the player's place (`stay`); a ladder step presses E when walking into the ladder does not mount it. | fixed |
+| 3-18 | route / world (collision) | With objects colliding as their collision trees (docs/game-logic.md §14.10, row 9-15) the 3b barricade still closed the doorway after `3b.barricade` broke crate 2f94, and the drop through the cell-floor hole ended on top of the rubble at 95.7, from where the planner found no way to the basement button. | The barrel 2f93 lying on crates 2f92 / 2f95 overhangs the gap 2f94 leaves at head height as its 0.7 x 1.5 m box (the drawn barrel left room); the rubble 2d56 / 2d57 (23:703) is two 2.5 m boxes from z 304.5. | The step breaks 2f94 and 2f95 (2f95's p21 message 11 brings 2f92 and 2f93 down); the hole route lands south of the rubble and `3b.basement` may drop 2.5 m. The manhole ladder 157b is now a box (x 287.7..287.8) between the ladder's foot and the old `3a.tanks` stand: the walk round it faced the ladder and remounted it, and the tank 13c3 was never hit; the stand is on the side the ladder leaves him (287.55, 384.1). The decoded clamber room test (docs/game-logic.md §14.10: the proxy's sphere swept to 2.245 m) blocks 3b's first ledge (Clamber Point 2a00) under the ceiling box 29c0 that covers its east half (2.18 m above the top): `3b.climb1` stands at x 408.6 (a scan of all 229 retail Clamber Points finds no other that lost room). Checked in the browser: the doorway is clear, `3b.hole` .. `3b.roof` and `3a.manhole` .. `3a.store-out` pass. The burnt gate 3ab0's hole is drawn only (one 0.3 x 2.7 x 2 m box): `3a.gap` is gone, the walk goes by the door ba2. The gas tank 13c3 took no bullet: its template has bit 10 (AI sight passes it), which the shots had shared with sight; shots now pass no collision-tree geometry (`WorldService.shotThrough`, docs/game-logic.md §14.10) [inferred], and the shotgun breaks it. | fixed (route, weapons) |
 
 ### Results (last run, Medium, headless Brave / WebGPU, 1280x720)
 
@@ -619,6 +624,12 @@ mousedown); the transformation and change back (Q needs pointer lock); two Xombi
 struggle reflex.
 
 Frames: `<shots>/r3/` (one per step with `shot`, `*-beam` for the searchlights).
+
+- **a3j** (2026-10-22, `--level 3a --to 3a.exit`, after the collision trees and row 3-18): 55 of
+  57 steps, 4a reached in 964 s. One death on Medium (the fenced yard's Slayer fire), retried. The
+  other miss: the probe's "1e93 sinking -0.36" at the arrival (a scripted body 0.2 m under the drawn
+  floor; the collision box there is 0.16 m higher still). Chapter 1 (`--to 1c.exit`, run c2, the
+  same build before the clamber room shape): 67 of 68, one death in a fight.
 
 ### Open (by owning area)
 
@@ -1083,11 +1094,15 @@ Outdoor rendering, checked against the data:
 
 ### Open (by owning area)
 
-- **Projector (rendering), owner: chapter 5.** In the phone vision, Killjoy's figure 2135 (model
-  10:196) shows as large black stretched triangles. The Projector Effect moves vertices 0..4,
-  which belong to submesh 0 (material 2:904: cutout, texture alpha 0 everywhere). Those triangles
-  should be discarded; hiding 2135 removes the shape. I suspect the projector's opacity override
-  (`specials/projector.ts`).
+- **Projector (rendering), owner: chapter 5. Fixed.** In the phone vision, Killjoy's figure 2135
+  (model 10:196) showed as large black stretched triangles: its cone fans (submesh 0, 2:904,
+  cut-out, texture alpha 0), pinned to its own bone 5, drawn opaque. Two causes: the lit
+  character path took its alpha test from the texture header (none for 2:164) instead of the
+  pass's mode 8 (`character.ts characterAlphaTest`: > 200 / 255), and three r186's
+  `NodeMaterial.copy` drops `alphaTest`, so the projector's material clones lost even that
+  (`glow-mark.ts cloneWithGlowMark` restores it). Checked in the browser: the figure stands
+  whole and opaque (p5 = 100) with no black shapes. `fx/body-parts.ts` clones with a plain
+  `clone()` and loses its alpha tests the same way.
 - **Companion (Clem).** Clem died in both 6b runs within about 10 s of the first Fester wave on
   the beach: about 30 rats from the Festers' rat release, 4 a bite (the port's guess for rats
   biting a character), plus 40 from Fester blows and 8.7 from the harness's shotgun.
@@ -1251,6 +1266,12 @@ gate 6134 shut, then swung open by the sequence's keys.
   the top of the stairs through the door to 8316 and the gate opened.
 - **Harness**: `--save` of a capture taken in another level killed the player on restore (not
   used by the route; `--visited` covers it).
+- **1a chair room behind the electrified door (deep link)**: reported black in a `--level 1a`
+  session. On the real route it is drawn (chairs, walls, the witness room behind the glass); from
+  the same spot (429.2, 538.5, flashlight off, after the scene) the witness room measured a mean
+  luminance of 22 on the route against 10 in a deep-linked session, the corridor walls 11.7
+  against 12.4. So a deep-link artefact of level state the route sets up on the way (which light
+  state differs is not traced). Both are darker than the original's frames of the scene.
 
 ## 8 Bluff (routes `8a.*`, `8b.*`)
 
@@ -1286,9 +1307,10 @@ levels' message graphs and checked in the browser [verified]:
   2cf6 -> Timer 2d06 -> Autosave 1e08. East along the road, Detector 1d10 / 2a19 plays "Camera"
   1d0e (45.5 s): the prison truck with Hermes and a prisoner plunges into the creek. Detector
   2cf8: the Infernas 2534 / 2545 / 254d, the Burrowers 2cda / 1d50, the fires (Relay 1d4e) and
-  the Slayers 1d4a / 1d4c (Relay 2d01). The creek (3..3.5 m: deeper than 2 m drowns, row 8-2): down
-  the west bank to the ledge at the water level, a running jump over the 3 m channel at the south
-  ford (z 540, Detector 2b2c), north along the east ledge under the overhang to the rocks, up
+  the Slayers 1d4a / 1d4c (Relay 2d01). The creek (3..3.5 m: deeper than 2 m drowns, row 8-2): a
+  running jump from the west bank top (87.5) at the south ford (z 539.5, Detector 2b2c) over the
+  channel onto the east ledge (84.7; the cave wall behind it stops the jump; row 8-12), north
+  along the east ledge under the overhang to the rocks, up
   Clamber Points 25b1 and 2a3e onto the far bank's terraces. Crossing the bank's planes
   (Detectors 2712..2715) sends the CartWheeler 2813 (10 000 health) off the cliff to Jimmy (26fb)
   by the gate 19b4, who kills it and walks off east (Relay 2709, Speech 2707). Detector 1e1e: the
@@ -1343,11 +1365,19 @@ levels' message graphs and checked in the browser [verified]:
   picked by force (row 8-8): a Molotov's blast makes him react and his HitReactBehavior 10:1228
   sends its p11, Triggered, to his links: 1f0d -> 2496 -> "Hermes" 1f0f (the gas into the stove)
   -> Count Down 1f15 (2 -> 1), Timer 1f13 (8 s: he gets out, the door opens). Closing the stove
-  door 1e37 (p36: starts open; p65 Decrement) takes 1f15 to zero -> Relay 26ae -> "Camera" 24e7,
+  door 1e37 (p36: starts open; p65 Decrement) takes 1f15 to zero -> Relay 26ae -> "Camera" 24e7
+  (the door shut too early also disables Relay 2496, inDisable 9: nothing goes in until it is
+  opened again, p64 Increment),
   Timers 251c / 25da -> "Door" 24ff. Up the ladder 1ec7 through the hatch: Detector 1f2f -> Level
   Transition 1798 (9 Lighthouse).
 
-No new step kinds (walk / clamber / ladder / use / push with `rel` / break / arena / wait).
+No new step kinds (walk / clamber / ladder / use / push with `rel` / break / arena / wait /
+follow / throw / route). New options: `clamber` `here: true` (press from where the player stands:
+on top of 8a's crate, a spot the planner cannot walk to); `route` `relTo: uid` (points and
+`jumpAt` as offsets from that object's centre where it is now); `throw` `select` (the
+throwable), `cls` + `near: [x, y, z, r]` (whichever character of that class stands there: cloned
+Hermes copies have no level uid), `ready` (a further condition), `aimY`, `max`. The deep link
+waits up to 600 s for the first level (a loaded machine took over 180 s).
 Harness fixes: a walk into a Level Transition's Detector ends cleanly in the next level
 (the loop's evaluation used to throw `__actors is not defined` while the level was torn down); a
 plan whose start cell has no free neighbour (pressed against a shelf in a fight) starts from a
@@ -1367,9 +1397,32 @@ free spot up to 0.8 m away.
 | 8-8 | actors (hit reactions) | 8b: Hermes never sent Triggered (6) to the stove Relay 1f0d; the route sent On to Relay 26ae after 120 s (logged). | Two decodes missing. The hit reaction's amount is the blow's impact force (damage record +0x1c, Missile p28..p31, Melee p69 x Attack p7, Radius Damage p2..p3) times the matching Damage Resistance's p2 (0 with GameObject p6 and no match), and it is sent for blows of 0 damage; the port compared the damage after resistances and dropped zero-damage blows. And a whole-body HitReactBehavior sends its p11 to the character's links as it starts (Hermes' 10:1228: p11 6). | Decoded (Character damage 0x100e7390: 0x100e779b / 0x100e77e9 / 0x100e7801 / 0x100e776b, hit reaction 0x100e6480 reads message +0x2a; HitReact start 0x100ebfa0; docs/game-logic.md §15.13): `fx/gas.ts resistanceForceMultiplier`, `manager.ts damage`, `ActorBlow.react`, `HitReactDef.message`, `actor.ts startReaction`; the player's bullets, melee and every Radius Damage pass `force` / `minForce` (world/damage.ts). Hermes takes no damage but fire (2:779) and wind (2:656) push him: a Molotov makes him react. | fixed [verified], tests |
 | 8-9 | world (Message Relay) | 8b: after a few jets were blocked the Hermes copies stopped coming back. | Relay 2413 picks one random link among the jets' Relays; blocking a jet destroys its Relay, and the port still picked destroyed links (the message went nowhere and the clone cycle ended). | A destroyed link leaves the pool and the pick is made again; the refill takes the live links only (0x100cbdc3 -> 0x100a9e90, the counter taken back at 0x100cbdd7; 0x100cb8f0) [verified] (`logic.ts relay`). | fixed [verified], test |
 | 8-10 | route | 8a: the yard ambush killed the harness in every run (row "8a yard ambush" of the open list). | No way up to the guard house roof was found: its walls are 6 m, a clamber 4.5 m at most. | The crate 193a pulled and pushed under Clamber Point 2288, the first-person jump onto it (2.05 m), the clamber (4 m); the CartWheelers flee from the roof (27fc). Harness: `clamber here`, `route relTo`. | fixed (route) |
-| 8-11 | route | 8b: Jimmy's scene "Camera" 1eb1 never played and nothing of him reached 9. | The route ran ahead of his escort (WaypointBehavior 1753 walks a leg only while the player is within 10 m). Being carried to 9 was a misreading: 9's arrival point ca5 has no p4 / p5, and his scene kills him. | `follow` steps after him to the walkway (Detector 26b5); the carry stays empty by data. | route |
+| 8-11 | route | 8b: Jimmy's scene "Camera" 1eb1 never played and nothing of him reached 9. | The route ran ahead of his escort (WaypointBehavior 1753 walks a leg only while the player is within 10 m). Being carried to 9 was a misreading: 9's arrival point ca5 has no p4 / p5, and his scene kills him. | `follow` steps after him, the ravine cleared ahead of him (`8b.ravine`); the carry stays empty by data. | route (he still dies in the ravine: open) |
+| 8-12 | route (after the collision trees) | 8a: the ford's running jump fell into the channel; the walk down the west bank stopped on its edge. | Since the collision trees (docs/game-logic.md §14.10) the west bank's water-level rock (84.1), the ledge the old route stood on, is a model whose tree has no nodes: its drawn faces are for rays only, movers pass it [verified decode, not a port bug]. | The jump is made from the bank top (87.5) straight onto the east ledge (84.7, 3.8 m across, 2.7 m down; FP jump p215 / p214), the cave wall behind the ledge stopping it; `8a.ledge` ends where the east ledge does for the planner. | route |
 
 ### Results (Medium, headless Brave / WebGPU, 1280x720, a GPU shared with other agents' runs)
+
+- **After rows 8-8 .. 8-12** (2026-10-22, e170605 plus this work):
+  - **8a** (`--level 8a --to 8b.exit`, run full2): from the 3a arrival to the arrival in 8b with
+    no teleport and no logic shortcut. The refuge: the crate 193a pulled and pushed (1.9 / 10.3
+    m), the jump onto it, the clamber 99.66 -> 103.63, "PaddyWagon" shot from the roof's north
+    edge, down and over the wagon (checkpoint 1e08), the truck scene, the new ford jump (from the
+    bank top, landing on the east ledge at 84.74), the rocks 84.74 -> 87.73 -> 89.72, checkpoint
+    1e0a, the vision, the Slayer wave, Detector 1b70. One death: on the roof after the wagon shot,
+    the Slayer 2752's bullets (3 each), retried with invulnerability. A 1b80 shot from the roof
+    in the separate run a4 (the roof steps clean, the same death on the way down in its first try).
+  - **8b, Hermes' room** (exploration session: teleported to the walkway, logged, the route's own
+    steps from `8b.hermes` on): the valves, the crate 2404 on its jet, the three lamps, a Molotov
+    at the copy by the stove: Hermes reacts (type 5, force 18.7, no damage) and sends Triggered ->
+    1f0d -> 2496 -> "Hermes" 1f0f; the stove door closed (1e37) -> Count Down 1f15 at zero ->
+    Relay 26ae -> "Camera" 24e7 (8.9 s) -> "Door" 24ff; up the ladder 1ec7: Detector 1f2f ->
+    **9 Lighthouse**. No logic shortcut (the forced Relay 26ae step is gone).
+  - **8b, Jimmy**: freed, he talks and walks his escort (1752 -> 1753 -> 1758 -> 1759); in two
+    runs the ravine's Burrower 16f5 and Slayer 16f4 (Detector 1793) killed him on 1759's legs
+    (the harness, ahead in the ravine, could not kill the Burrower in 240 s), so 1ed5 played, as
+    the level has it for a dead Jimmy. His scene 1eb1 by play is still to be seen.
+  - The full chapter run stops at `8b.climb` (open: the clamber room after the collision trees);
+    the 8b runs above went past that ledge by a teleport (logged).
 
 - **8a** (`--level 8a --to 8b.exit`, run f1 of 2026-10-14, with rows 8-1, 8-2, 8-5): from the
   3a arrival to the arrival in **8b** on foot in 19 steps, no teleport and no logic shortcut. One
@@ -1411,6 +1464,16 @@ Hermes' room and its end).
   two at a time, and 2756 by the alley) shoot up at the player; a run died there before the wagon
   shot. The crate push needs latency to spare: under a loaded machine the pull overshot the guard
   house's line or the grab failed after a checkpoint restore.
+- **8b first ledges (world, clamber room; after the collision trees).** Clamber Point 1802's box
+  top is 98.75 but the ledge behind it is now the rock's collision box at 99.05: the room test's
+  sphere (half the player shape's width, from top + r + (H - 2r) / 4) overlaps it by 2.5 cm with
+  the port's 0.35 m radius and the clamber is refused ("Blocked"); `8b.climb` fails in every run
+  since e170605. The player shape's width is not decoded (a 0.3 m radius would just pass). The
+  exploration runs of 8b went past it by a teleport (not in the route).
+- **8b Jimmy in the ravine (combat / route).** On WaypointBehavior 1759's legs the ravine's
+  Burrower 16f5 and Slayer 16f4 (Detector 1793) kill him; the harness going ahead to clear the
+  ravine (`8b.ravine`, an arena) did not kill the Burrower in 240 s. With him dead the level plays
+  1ed5 as designed; "Camera" 1eb1 by play and the walkway Detector 26b5 are still to be seen.
 - **8b fifth jet (world, Pushable).** The crate 1f8d stands on a table; pushed off it, it lands
   0.4 m into the floor and cannot be grabbed again. The route leaves that jet open (the picks then
   alternate between it and the stove).
@@ -1480,6 +1543,9 @@ gone: rows 9-12 / 9-13.)
 | 9-13 | actors (mover) | bd5 (outside the base, Count Down c59) is placed 0.663 m under the terrain and walked held under it, "sinking -0.47". | The port's capsule rested on the terrain from below; the follower's Landscape fallback (0x100b6730 -> 0x100c0520: the Landscape under a point 2 m above the feet) was not modelled. c9c (0.196 m under) read as a drop-in with no ground and was hidden until woken. | With no walkable mover ground, the walkable Landscape under a point 2 m above the feet is the ground (`physics.ts landscapeGround`); `groundGap` takes a surface just above sunk feet with nothing under them as their floor. | fixed [verified probe; port limits inferred], tests |
 | 9-14 | actors (companion) | The guard bc9 died in every whole-chapter run (r2 / r4 / r5) and with him the way out of 9. | Character p161 is health regained per second (0x100e1410, called every frame from 0x100e58d0; capped at the maximum by 0x100a2d00); every companion template has 4. The port had no regeneration (§15.10 said "none found"). | `actor.ts regenerate`, every frame for every character (docs/game-logic.md §15.10). No class rule reacts to a companion's death (no game over); 9's level logic has no exit without him [data]. | fixed [verified], test |
 | 9-15 | world (collision) | The guard bc9 stalled at (297.3, 113.7, 244.2) by the burial ground from `9.escort3` on (run r1 of 2026-10-15): every escort leg failed there, Waypoint e08 was never reached and 9 could not be left. | The port collided with every drawn triangle; his capsule met the alpha-tested leaves of Static Object 884 (model 23:142) 1.2..4.4 m up. The original collides with the model's type-7 collision tree: 884 is one leaf box (2.2 x 5.9 x 14.5 m) north of his leg; 1844 of 1847 box trees in 9's packages list no faces at all. | Decoded the tree, which geometry movers and rays take from it, the classes and the AI sight flag (docs/game-logic.md §14.10): `formats/model-collision.ts`, `world/object-collision.ts`, `LevelData.collision`, dynamic bodies and crane loads from the tree; decals and draw occlusion on the drawn triangles. Runs r1 / r2 (2026-10-18): `9.escort3` and every escort after it passed. | fixed [verified], tests |
+| 9-16 | route / world (collision) | With the collision trees (row 9-15) `9.crank` could not grab the crank 9e1 (runs r2 / r5: "could not grab" three times, the lamp never turned and the gate stayed shut). | The lamp housing 9dc (39:29) has a leaf box 2.8 x 4.3 x 2.6 m round the machinery; the view ray from the old stand (350.4, 216.25) to the crank met it first, and the port's use prompt takes the object looked at (docs/game-logic.md §14.5: the original lists what touches the player, no view ray). | The stand moved south of the housing box (350.6, 215.6): the grab takes, the crank moves 0.37 m and its p55 output turns the lamp (Detector cab enabled). | fixed (route), verified in the browser |
+| 9-17 | route | After `9.ladder-down`, `9.base-door` sometimes ended on the floor above (118.1; runs r2 / r7, one in three in a session): the walk's first leg from the ladder's foot led into the ladder (its collision box now, row 9-15), which mounted it, and W climbed it. | The planner's path round the ladder box. | Step `9.ladder-off`: a straight route 1.5 m south-west off the foot first. Session: five of five clean. | fixed (route) |
+| 9-18 | route | `9.horace` timed out in runs r7 / r9: "Horace" cad never played and the gate stayed shut. | Detector cab (filter 0, the player; an 18 x 1 m slab across the road at the gate, 3.2 m from Waypoint e08) plays it; `9.gate` follows the guard and can end 6 m north of the slab, and `9.horace` only waited. | Step `9.cab` walks into the slab first. Run r10: "Horace" played (36.7 s) and the exit to 10 followed. | fixed (route) |
 
 ### Results (Medium, headless Brave / WebGPU, 1280x720, a GPU shared with other agents' runs)
 
@@ -1610,6 +1676,8 @@ Game, then the capture; logged), so the front end's own screens follow the endin
 | 10-12 | harness | The first wave's arena could time out silently with a Mainliner left (e17): Count Down 12b5 never reached 0, Timer 12a5 never enabled Detector b43, and the one-shot `look` at the vision filter missed. | An arena timeout without `force` was no problem; the vision was a single look. | An arena that times out is a problem; step kind `vision`: waits for the Detector to be enabled, keeps the player on the spot as a human (walks back when moved, changes back) and keeps looking until the scene plays. | fixed (harness) |
 | 10-13 | harness | Knocked into the sea or carried off the dock mid-fight, the player stayed there for the rest of the arena (e10, e14, e15, e17: at (470, 90.1, 270); v3: at (515, 84.5, 260)), and a fight could walk him off the edge after a creature in the water. | The planner has no way back up; fights closed on any target. | `sea` [y, point] on the dock steps: a fight does not close on a creature below y (the arena shoots it from the edge instead), and a player below y, or stranded with no path back, is put back on the dock (logged). | fixed (harness) |
 | 10-14 | harness | Every step on the Game Finished / credits screens waited 240 s for a "cinematic"; the bonus-movie check read a message sent to 13b2 as played (13b2 is not placed below Impossible). | The left level's player reads as disabled; Timer 1241 sends On to 13b2 whether it exists or not. | `cinematic()` is false on the end screens; `finish` checks each ending's objects (`endings`: movie, boat sequence, picture reached, none of the other endings') and the bonus movie by its own end output. `--reputation <n>` and `--expect-ending` (logged). | fixed (harness) |
+| 10-15 | route | `10.climb-out` failed in run r12 (three presses, the player shut in the pump room) after passing in r10. | Clamber Point 38f's template 2:850 allows 3.5 m of height (p2) and its top is 4.4 m over the pump room floor: it can never take from inside. Only 110b (template 2:455, p2 4.5) does, and the old stand at x 260 passed its side test by centimetres. | The step stands at (260.8, 285.3) facing north: 110b takes. Checked in the browser. | fixed (route) |
+| 10-16 | harness | Run r10: the Slayer fight past the bus followed a Slayer down into the gap (bed 84.5) and the player was stranded there for the rest of the run. | A fight closes on any target. | `10.slayers` carries `sea` (y 95): creatures below are shot from the edge, a stranded player is put back (logged). | fixed (harness) |
 
 ### Results (Medium, headless Brave / WebGPU, 1280x720, a GPU shared with other agents' runs)
 
@@ -1675,6 +1743,19 @@ Game, then the capture; logged), so the front end's own screens follow the endin
   retreat timers kept; it retreated, waited and handed over to 7f4, which taunted and fought
   (frame `boss-restored`). Before (run e5) the four restored asleep.
 
+- **r14** (2026-10-22, `--level 9 --to 10.finish`, no workaround flags; the collision trees,
+  docs/game-logic.md §14.10, rows 9-15..9-18, 10-15 / 10-16, 3-18): 67 of 81 steps, from the arrival
+  in 9 to the credits by play. One death on Medium in the first Inferna fight (c59), retried
+  invulnerable from the arrival checkpoint. The guard lived through 9: the burial ground, the
+  escorts, the lamp (crank, vision), `9.cab` and "Horace" (36.7 s), the gate and 10 with him. In 10
+  the bus clamber took (97.17 -> 99.50, `10.across` clean), the dock's two waves and visions, the
+  Black Ones (39 shots), the neutral ending's movie, boat scene and picture, Game Finished and the
+  credits. One logged put-back off the dock (row 10-13). The misses: arenas over time (the yard's
+  CartWheelers, the pipe-yard Infernas, the Mainliners, the gate Infernas), the guard's later
+  escorts in 10 (he fell behind or died on the road), `10.cp`'s autosave d29, `10.killjoy` 1.4 m
+  short, and the probe's "822 sinking". Earlier runs of the same build: r4..r13 stopped on single
+  failures fixed since (rows 9-16..9-18, 10-15, 10-16) or on a guard death in a fight (r11).
+
 ### Open (by owning area)
 
 - **Actors (companion) and levels (sea).** The guard's 10 copy 7b8 died on the road in r8
@@ -1685,9 +1766,13 @@ Game, then the capture; logged), so the front end's own screens follow the endin
   no code of Suffering.rfl.
 - **Fixed since: Black One save state** (row 10-9). The level has no checkpoint after Autosave
   d29, so a real game never restores mid-boss; only a manual save does.
-- **Harness / water: the bus gap.** In r2 the clamber onto the bus (13a0) did not start with the
-  feet at 90.1 in the gap, and the player was later stranded on the sea bed south of the gate
-  (water holds no one up since 7d1d93b; invulnerable, he did not drown). Not looked into here.
+- **Harness / water: the bus gap.** The clamber itself works: in a session with the bus fallen
+  (STOMP 884: the bus is Breakable 245, 23:171, whose collision tree is three boxes), `10.bus-climb`
+  went 97.17 -> 99.50 and `10.across` passed. In the r2 run of 2026-10-15 the player was already on
+  the 90.11 ledge in the gap when `10.bus` ended. "Camera" 883's hand-back moved him from
+  (244, 176.4) to (237.96, 178.66) in the session, and the falling bus sweeps that strip of road on
+  its way down; a body moved onto the player is the likely push, not confirmed. Once in the gap
+  there is no way out (the sea holds no one up). See the 9 -> 10 results below.
 - **Probe: 822 "sinking -0.33".** The Black One 822 reads 0.33 m under the dock while up; the
   bodies never move (§15.7.8), so this is the probe reading the model's root, not a fall
   [inferred].

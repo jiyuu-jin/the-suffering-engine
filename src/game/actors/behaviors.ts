@@ -99,7 +99,8 @@ export type Behavior = Base &
     | { kind: 'killjoy'; corpses: number[] }
     /** KilljoyRaiseDeadBehavior (Killjoy p175): p2 the raise clip, p3 the distance it may start from (m). */
     | { kind: 'raiseDead'; clip?: ClipRef; near: number }
-    | { kind: 'death'; clips: ClipRef[] }
+    /** p2 clips (one at random); p4 the blow angle (degrees) below which this entry is taken (deathPick). */
+    | { kind: 'death'; clips: ClipRef[]; angle?: number }
     | { kind: 'horace'; range: number; damage: number }
     | { kind: 'ratSpawn'; clip?: ClipRef }
     | {
@@ -510,7 +511,8 @@ export class BehaviorLibrary {
         // Spot choice, threat / ally teams, re-picks: flee.ts (decoded from Suffering.rfl).
         return { ...base, kind: 'flee', flee: fleeParams(v) };
       case 'DeathBehavior':
-        return { ...base, kind: 'death', clips: refs(v[2]) };
+        // p4: the Character death picker's angle bound (actor.ts deathPick) [verified].
+        return { ...base, kind: 'death', clips: refs(v[2]), angle: num(v[4], 360) };
       case 'KilljoyRootBehavior':
         // [verified: start 0x1007bd70, update 0x1007bea0, child done 0x1007c000] p2 the corpses.
         return { ...base, kind: 'killjoy', corpses: uids(v[2]) };

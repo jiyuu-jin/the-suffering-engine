@@ -1418,8 +1418,18 @@ Property reads look like `props->vt[2](propIndex, -1)`.
    `p5` = 0 plays the clip in mode 3 and sets bit 0 of character +0x26c (`p5` = 1: mode 2, bit
    cleared; only the corpse-pose behaviours like `12:793` use 1), `p6` = 1 hands the body to a
    global list with a count limit (0x100a15a0) [inferred: the corpse clean-up]; `p4` (90 / 270)
-   is not read in the start or play code [inferred: the hit direction the death is chosen for]. The port plays `p2` and
-   ignores the rest.
+   is not read in the start or play code; it is the **death picker's angle bound** [verified, Character
+   death 0x100e5d00, picker 0x100e6174..0x100e6392]: the angle (degrees, acos) between the body's +Z
+   axis (its back: the third row of its world matrix, times its scale) and the unit direction from
+   the blow's attacker (the damage record's source handle) to the body; the first entry of the p72
+   list whose `p4` is above it is played, else the first (an empty list sets the "no death
+   behaviour" flag). A record with no source (Damage Action Objects build theirs with none,
+   0x1008e9e7) keeps the zero vector: 90 degrees exactly; a zero direction counts as straight down
+   (90); past +-1 on a scaled body acos is NaN and the first entry is taken. Guards' p72 is 10:250
+   (`p4` 90: 10:301 / 10:1470, thrown back) then 10:22 (`p4` 270: 10:156, 5.7 s: he stands, sinks
+   to his knees, falls at the end): shot from in front the first, from behind or by a hazard the
+   second. `p2`'s clip is a random one (0x100ec168). Port: `actor.ts deathAngle / deathPick`
+   (`profile.deaths`, the attacker of the killing blow), tests `tests/electrocution.test.ts`.
    **The bug this fixed**: the Use target took the visible Shiv model itself (Ammo Box `5bfb`,
    nearer the crosshair than the spot, which has no model), so the Shiv was given but `8368`
    never fired p27: the inmate stayed posed and the help popup never came. Now the Shiv routes
@@ -3218,8 +3228,9 @@ record is the model's collision model:
   sets 0x20000 from template flag bit 10, or with instance flag 0x2000 from instance bit 0x1000000
   [verified]. 1a: 385 Static Objects (pillars, railings, the cell fronts), the cell doors (Switch
   9:2027), lamps; 9: 163 Static Objects with the burial-ground trees. The BouncingObject sweep
-  (0x100ceff0) passes 0x110 or 0, never 0x800: thrown things do not pass them [verified]; for
-  bullets the port keeps one rule with sight [inferred].
+  (0x100ceff0) passes 0x110 or 0, never 0x800: thrown things do not pass them [verified]. Bullets
+  pass nothing either [inferred: the Missile's own query was not traced]: 3a's gas tank 13c3, which
+  the level has the player shoot, carries template bit 10.
 
 **Port** (`src/formats/model-collision.ts`, `src/game/world/object-collision.ts`):
 - `parseLevel` with `collisionOf` builds `LevelData.collision`: the floor layers as drawn, and
@@ -3230,11 +3241,28 @@ record is the model's collision model:
   the model's largest submesh for footsteps and impacts [inferred].
 - The renderer builds `collision` from those parts, and `drawn` from the drawn triangles: decals
   lie on the drawn ones, the actors' draw occlusion looks at them with the old see-through rule
-  (WorldService.eyeThrough). WorldService.seeThrough (sight, shots) passes `sightPass` parts.
+  (WorldService.eyeThrough). WorldService.seeThrough (AI sight) passes `sightPass` parts;
+  WorldService.shotThrough (the player's shots, `weapons/system.ts solidHit`, `manager.raycast`)
+  passes no collision-tree geometry. NPC shot checks (`actor.ts lineOfFire`) still use the sight
+  rule.
 - Dynamic objects (dynamic.ts) and the cranes' hung objects (skinned-props.ts) build their bodies
   from the same trees. A placed object without a tree, or of a class no list names, has no body;
   skinned props keep their drawn triangles for shots (§14.7).
 - 9: the collision world has 157 000 triangles against 249 000 drawn (most of it the Landscape).
+- **The clamber room test** (Clamber Point 0x10011b30) [verified]: its sphere is half the
+  "width" of the player's EXE mover (Player +0xd0, vt+0x30 = 0x41b270: the largest radius of its
+  spheres), swept from top + r + (H - 2r) / 4 by 3 (H - 2r) / 4 with H the top of the movement
+  proxy's world box (engine vt+0x18 = 0x459410) above its origin. The proxy is Player p91 =
+  Collider 2:44 (model 2:27): four spheres of r 0.6 (at 0, 0.9, 1.306, 1.639), box -0.455..2.245,
+  so r = 0.3 and H = 2.245. The query clears the scene's class filter and turns on Static Object
+  alone (0x10011cb6..0x10011ccf). The port had swept its own capsule (r 0.35, 1.8 m) against
+  everything; 8b's Clamber Point 1802 (top 98.75) was "Blocked" by the ledge's collision box at
+  99.05, 2.5 cm into that capsule; the decoded sphere stays 0.11 m above it (`clamber.ts
+  clamberRoomShape`, `interact.ts roomShape`; static triangles of `solid` only, no dynamic body).
+- **8a's ford** [verified data]: the "water-level rock" at (462, 84.1, 543.8) the old route stood
+  on is the creek's water surface: a Static Object placed at the origin (models 7:545..7:555,
+  texture 7:396, alpha blend, the same sheet as 9's sea 7:590) whose collision tree is a sphere
+  tree without nodes. Movers pass it in the original as well; rays hit it.
 - Tests: `tests/object-collision.test.ts`.
 
 ## 15. NPCs, creatures and their behaviours (chapter 1)
@@ -3294,7 +3322,7 @@ Changers hand out the first one. When a chain ends the actor goes back to its p6
 | KillEnemiesBehavior, HostilityBehavior | fight (see 15.1) |
 | JumpAttackBehavior | [verified, §15.7.5] the Slayer's leap (CartWheeler p181); other users: plain hostile combat |
 | FleeBehavior | [verified, §15.14] run to the best Flee Position of its group (away from the p42 threat teams, near the p44 ally teams), stand there and choose again every p16..p17 s; leave a spot after hits |
-| DeathBehavior | p2 death clips; via a Behavior Changer the NPC dies (1c victim) |
+| DeathBehavior | p2 death clips (a random one); p4 the death picker's angle bound: the first p72 entry whose p4 is above the blow's angle [verified, §11.5 item 3]; via a Behavior Changer the NPC dies (1c victim) |
 | RatSpawnBehavior | initial behaviour of 1a's cloned rats: p2 emerge clip (10:419) played once, then the active behaviour; p3 (8) unknown [inferred] |
 | HoraceKillPlayerBehavior | [verified, §15.7.7] p2 / p3 are message ids (6 Triggered sent to Horace's links, 350 QuestStart received = attack now), p4..p5 / p6..p7 the two cycle delays; no reach or damage |
 | MainlinerJumpAttackBehavior, CeilingFloorTransitionBehavior, KilljoyRootBehavior | [verified] §15.7.4 / §15.7.5 / §15.7.8 |
@@ -3422,6 +3450,13 @@ behaviour unless a Behavior Changer gave it one.
 - Paths: straight line when clear, else A* over Move Nodes. An Edge Passage door on the next
   edge that is closed: an actor with an OpenDoorBehavior walks up, plays the push clip and
   sends the Switch its p61 activate message; locked doors (unless Switch p63) cut the edge.
+  A passive walk stuck against a closed door on the edge its goal lies on (within 1 m of it, from
+  a quarter of the way to the far node) opens it the same way [port: a goal placed in the doorway
+  has its nearest node on the walker's side, so its path crosses no door edge; how the original's
+  MoveTo ends there is not decoded]. 1a's second ambush CartWheeler 64f1 (Behavior Changer 8026 ->
+  WaypointBehavior 8027 -> Waypoint 8025 inside door 4e48) stood 0.51 m short of the shut leaf
+  (Collider radius 0.4), its leg failed, Count Down 73a5 never reached zero and the guard 609e
+  never went on to the door controls (`actor.ts doorInTheWay`).
 - Ladders on the graph: an Edge Passage may name a Ladder instead of a door (1c 7e4f: Ladder
   7c2f between Move Nodes 7b8a and 7c7f, 6.2 m apart in height). The character's
   LadderClimbBehavior (Character p102; 10:811: p2 / p3 rung up 2:234 / 2:243, p4 / p5 down,
@@ -4121,6 +4156,16 @@ p16 0x1008b820.
   - Each cone tip is placed in bind space so that its bone's skinning lands it on the lens
     (exact under any root motion [port]). A projector without a skeleton is its placement.
   - A hidden beam's triangles (those using vertex p12[i]) are drawn degenerate.
+  - Cut-out passes of the figure (2:904 on 10:90 / 10:196's cones) keep their > 200 / 255 alpha
+    test in the lit character path and through the projector's material clones (three r186's
+    `NodeMaterial.copy` drops `alphaTest`; `glow-mark.ts cloneWithGlowMark`). Without it 6a's
+    opaque figure 2135 drew its cone fans black, and an opaque Killjoy (1c's p6 = 100 once his
+    projectors break, Off) would too.
+  - Checked in the browser (before / after strips of 1b's booth, 5b's basement and theatre, 6a's
+    phone vision, 1a's Hermes): the beams now start at the lens of model-less projectors
+    (5b #1560) instead of fanning out from his bind tips, his faded body shows its front only
+    (face and apron detail instead of a washed-out double layer), the scene glow adds its halo
+    over the body (10:428's mark), and Hermes (also bit 23) is unchanged.
   - Characters whose model has header bit 23 are drawn front faces only (`app/character.ts`);
     the fading figure keeps its depth write (`render-data.ts translucentPassState`).
   - Before this, a missing or model-less projector's cone went back to its bind tip, about a
@@ -5315,6 +5360,18 @@ spawn 0x100ab180, update 0x100ab590; Electric Arc (0x6c5a0ad6) ctor 0x1001ff80, 
   is skipped, 0x100c3810) move along the model's y by sin(pi i / n) x U(p3, p4) / 100 x p2 x
   length: a bow to one side with a jagged edge, new every frame (0x100a9c40). Arcs hide with
   their target; the effect goes with it.
+- **The 1a electrocution, timed** [data]: the guard's arrival at Waypoint 752d (p0 On) fires
+  Relay 8a1b (once) and Relay 75de together. 8a1b -> Timer 81d5 (0.1 s) -> 75dd and 8185 at once
+  (200 damage, not per second: his 75 health is gone 0.1 s after he arrives). 75de -> Timer 5bd2
+  (0.1 s) -> Relay 7619 (the door and chair-room bolts, the spark generator, the Light Housings),
+  Relay 8475 (Horace's own Damage Action Objects 7b0b / 890f, Behavior Changer 8478), Point Light
+  6db4, Sound Effect 77a1, and Relay 7a77 -> Timer 8a1c (0.25 s) -> Speech Player 8b33: Horace
+  7a47 (unseen, in the chair room) says one of four lines (12:351..12:354), 0.35 s after the
+  arrival. The guard says nothing there. What keeps him on his feet is his death clip: the
+  Damage Action Object's damage names no attacker, so the death picker takes his second
+  DeathBehavior 10:22 (10:156: upright for about 0.5 s, on his knees from 1.5 s to 5 s, down at
+  5.7 s), §11.5 item 3 (DeathBehavior p4). The port took the first (10:250: 10:301 down by 0.5 s, or
+  10:1470).
 - **The 1a electrocution** (Relay 8a1b at the guard's Waypoint 752d): Timer 81d5 fires 75dd
   (3:2898, with light generator 3:2940) and 8185 (3:2941, 200 damage) at guard 609e: one arc
   each travelling over his bones for 15 s (3:2899: 0.5..3 m, bow 60 x 0.3..1 %, 0.5..1 s,

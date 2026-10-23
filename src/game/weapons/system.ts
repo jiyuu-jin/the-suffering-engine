@@ -762,10 +762,11 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
   const aiNoise = (at: THREE.Vector3Like, r: ResRef | undefined) => {
     if (r) (ctx.services.actors as { noise?(at: THREE.Vector3Like, sound: ResRef, source?: 'player'): void } | undefined)?.noise?.(at, r, 'player');
   };
-  // Bullets fly through what the eye sees through (cell bars, grates, chain-link):
-  // WorldService.seeThrough, the same test the actors' sight uses.
+  // What bullets pass: WorldService.shotThrough (with collision trees nothing; otherwise what the
+  // eye sees through: cell bars, grates, chain-link; docs/game-logic.md §14.10).
   const solidHit = (o: THREE.Vector3, d: THREE.Vector3, max: number) => {
-    const see = (ctx.services.world as { seeThrough?(h: unknown): boolean } | undefined)?.seeThrough;
+    const ws = ctx.services.world as { seeThrough?(h: unknown): boolean; shotThrough?(h: unknown): boolean } | undefined;
+    const see = ws?.shotThrough ?? ws?.seeThrough;
     let start = 0;
     for (let i = 0; i < 12; i++) {
       const h = view.collision?.raycast(o.x + d.x * start, o.y + d.y * start, o.z + d.z * start, d.x, d.y, d.z, max - start);

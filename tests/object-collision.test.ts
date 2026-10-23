@@ -150,3 +150,35 @@ test('retail 1a: the gas-chamber window Real_Glass 6342 (additive faces) stops m
   assert.equal(moverCollisionMesh(mdu, 2551), undefined);
   assert.ok(rayOnlyCollisionMesh(mdu, 2551));
 });
+
+test('retail 3a: the gas tank 13c3 the route shoots carries the AI sight flag (template bit 10), so shots cannot use that flag', { skip }, async () => {
+  const { SrscFile } = await import('../src/formats/srsc');
+  const { readLevelHeader, parseLevelObjects } = await import('../src/formats/level');
+  const { findLevelDependencies, loadPackages } = await import('../src/app/loader');
+  const { dirname } = await import('../src/app/gamefs');
+  const { readObjectTemplate } = await import('../src/formats/entities');
+  const fs = nodeFS();
+  const deps = await findLevelDependencies(fs, 'LEVELS/3 YardCellBlock/3a YardCellBlock.lvl');
+  const lvl = new SrscFile(await fs.read(deps.lvl));
+  const packages = await loadPackages(fs, dirname(deps.lvl), readLevelHeader(lvl).dependencies, () => {});
+  const o = parseLevelObjects(lvl).find((x) => x.uid === 0x13c3)!;
+  const t = readObjectTemplate(packages, o.template)!;
+  assert.equal(sightPasses(o.flags, t.flags), true);
+});
+
+test('retail: the clamber room test sweeps half the widest sphere of the player proxy 2:44 (r 0.3) up to its box top 2.245', { skip }, async () => {
+  const { clamberRoomShape, clamberRoom } = await import('../src/game/world/clamber');
+  const { readModelBoundsBox } = await import('../src/formats/model-spheres');
+  const { readObjectTemplate } = await import('../src/formats/entities');
+  const { packages } = await level9();
+  const t = readObjectTemplate(packages, { pkg: 2, id: 44 })!;
+  const mdu = packages.get(t.modelRef!.pkg)!.mdu!;
+  const c = readModelCollision(mdu, t.modelRef!.id)!;
+  const box = readModelBoundsBox(mdu, t.modelRef!.id)!;
+  const shape = clamberRoomShape(c.leaves.flatMap((l) => (l.kind === 'sphere' ? [l.radius] : [])), box.corner[1] + box.edges[1][1])!;
+  assert.ok(Math.abs(shape.radius - 0.3) < 1e-6 && Math.abs(shape.height - 2.245) < 1e-3, JSON.stringify(shape));
+  // 8b's Clamber Point 1802: its top 98.75, the ledge's collision box 0.3 m higher. The swept
+  // sphere's lowest point stays above it (with the port's old 0.35 / 1.8 capsule it reached 99.025).
+  const room = clamberRoom({ x: 0, z: 0 }, 98.75, shape.height, shape.radius);
+  assert.ok(room.y0 - room.r > 99.05, `${room.y0 - room.r}`);
+});

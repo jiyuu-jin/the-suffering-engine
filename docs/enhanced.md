@@ -22,7 +22,9 @@ The URL wins over the saved settings (`suffering.settings.v1`, see `config.ts re
 The mode is fixed for the page's lifetime because it decides the back-buffer format and every
 material's shader. A change on the Graphics page takes effect on the next start. The tier changes
 immediately: it only rebuilds the post chain and resizes the shadow maps. A `?tier=` URL override
-holds until the Quality row is actually changed. `tools/playthrough.mjs --query 'gfx=enhanced&tier=high'`
+holds until the Quality row is actually changed. The two rows are engine additions below Frame
+Rate Limit; to fit above Accept / Cancel, the graphics page's value rows close up from 8 % to 6 %
+spacing (`menu/gui-adapter.ts`). `tools/playthrough.mjs --query 'gfx=enhanced&tier=high'`
 runs any route in Enhanced mode.
 
 ### Original is untouched
@@ -187,14 +189,59 @@ The absolute numbers are therefore low and noisy. The relative cost between tier
 part. Each value is the frame probe's fps over 3 s, fly camera at the evidence poses, flashlight
 on.
 
-FPS_TABLE
+Each cell is the mean over the level's evidence poses, with the range across poses in brackets.
+60 is the headless browser's frame-rate ceiling (display rate). 1a was measured in a quieter
+run than 3a and 6a.
+
+| Level (poses) | Original | Low | Medium | High | Ultra |
+|---|---|---|---|---|---|
+| 1a Death Row (cell row, guard corridor, gas chamber ×2, electrocution controls) | 57 (45-60) | 57 (46-60) | 59 (56-60) | 56 (43-60) | 38 (18-48) |
+| 3a Yard, night (2) | 36 (35-37) | 43 (41-45) | 42 (42-43) | 34 (33-34) | 28 (25-31) |
+| 6a Woods, night and rain (2) | 56 (54-59) | 57 (56-58) | 53 (53-53) | 47 (37-57) | 35 (26-44) |
+
+Read the rows this way:
+
+- Low and Medium cost about as much as Original. Low draws the scene at 0.75 scale, and in 3a
+  Original's own scene glow pass costs more than Low's whole post stack.
+- High adds TRAA, a lamp cube shadow and the 2048 moonlight map. It holds the frame rate in
+  enclosed rooms and costs roughly 15-25 % outdoors.
+- Ultra runs full-resolution volumetrics (40 steps) and GTAO, two lamp cube maps with all six
+  faces every frame, and a 4096 moonlight map. It is the expensive tier: 18 fps at the 1a
+  electrocution controls, where two strong lamps are both cube-shadowed. Auto settles one tier
+  lower where that happens.
 
 ## Evidence
 
 Frame strips at the same camera pose, each Original | Low | Medium | High | Ultra. Captured with
 `?level=…&fly`, the Flashlight given, and the camera set through `__view.controls.setPose`.
 
-EVIDENCE_LIST
+The strips are not in the repository because they are made from the game's data. They are in
+the session scratch directory `scratchpad/enhanced/strips/`, and `all.jpg` stacks every strip:
+
+| Strip | Scene |
+|---|---|
+| `1a-cell-row.jpg` | 1a death row cell block, the corridor lamp and cell bars, flashlight on |
+| `1a-guard-corridor-red-alarm.jpg` | 1a guard post hall: the red alarm Lighting Effect (1 Hz; frames catch either phase), the flashlight's real shadow of the pillar |
+| `1a-gas-chamber.jpg`, `1a-gas-chamber-wall.jpg` | the gas chamber window, which glows green in Original, and the tiled wall. Low caught the insanity vision that plays there. |
+| `1a-electrocution-controls.jpg` | the door controls where the guard is electrocuted (static: the scripted shock is not triggered) |
+| `3a-yard-night.jpg`, `3a-yard-night-2.jpg` | 3a yard at night: moonlight shafts and lamp halos (Medium and up) |
+| `6a-woods.jpg`, `6a-woods-2.jpg` | 6a woods at night in the rain: the flashlight in the rain and the foliage's cut-out shadows |
+
+How they were made: a dev server and headless Brave, `?level=<lvl>&fly` (Original) and
+`&gfx=enhanced&tier=low` (Enhanced, tiers switched live with `__enhanced.setTier`), the
+Flashlight item given, the pose set with `__view.controls.setPose`, and four seconds of settling
+before each frame. The 1a electrocution shot shows the location only; it does not trigger the
+scripted shock.
+
+What the strips show:
+
+- Enhanced is darker and colder overall. Lamps read warm and sickly, and the flashlight dominates
+  as a light with real shadows (bars, pillars) and wet specular floors.
+- The authored lamp positions, the red alarm and the fog colour all survive.
+- Colours bright enough to saturate lose their hue under AgX. The gas chamber's green glass turns
+  near white. A per-material emissive tint is a candidate refinement.
+- 3a at night is much darker than Original away from the lamps. The moonlight shafts are the
+  only fill there.
 
 ## Extension points
 

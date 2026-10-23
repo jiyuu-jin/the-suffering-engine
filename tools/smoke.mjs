@@ -308,6 +308,27 @@ async function main() {
         90_000,
         `(() => { const v = window.__view; return !!v && !!window.__enhanced && v.enhanced?.tier === 'low' && v.renderer.info.render.triangles > 10000; })()`,
       );
+      // Levels outside chapter 1 render too, with the scene glow on and in Enhanced mode
+      // (1c6b915 shipped chapter 5 throwing from the renderer on every frame: a cloned
+      // material's glow mark came back a plain object). Two seconds of frames after the first
+      // one, any exception fails the check (above); something must still be drawn.
+      for (const [name, path] of [
+        ['5a', 'LEVELS/5%20Asylum/5a%20Asylum.lvl'],
+        ['3a', 'LEVELS/3%20YardCellBlock/3a%20YardCellBlock.lvl'],
+        ['5a enhanced', 'LEVELS/5%20Asylum/5a%20Asylum.lvl&gfx=enhanced&tier=low'],
+      ]) {
+        await check(
+          `level ${name} loads and renders`,
+          `/?skipintro&level=${path}`,
+          90_000,
+          `(() => {
+            const v = window.__view, info = v?.renderer.info.render;
+            if (!v || !(info.triangles > 10000)) return false;
+            const st = (window.__smokeLevel ??= { at: performance.now() });
+            return performance.now() - st.at > 2000 && info.drawCalls > 0 && info.triangles > 10000;
+          })()`,
+        );
+      }
       await check(
         'player spawns on the ground',
         `/?skipintro&level=${LEVEL}`,

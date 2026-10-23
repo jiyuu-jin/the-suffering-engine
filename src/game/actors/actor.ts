@@ -156,6 +156,8 @@ export interface ActorProfile {
    * his bed dies in his bed pose when the shiv is pulled out).
    */
   death?: Extract<Behavior, { kind: 'death' }>;
+  /** The whole p72 list in order: the death picker chooses among them by the blow's angle (deathPick). */
+  deaths?: Extract<Behavior, { kind: 'death' }>[];
   /**
    * Hit reactions (p70 by damage, p71 by Special Hit Reaction; hit-react.ts). Undefined for a
    * profile built without game data: the kind's hit clips stand in.
@@ -1365,6 +1367,10 @@ export class Actor {
     }
     this.killedBy = actor;
     this.lastHitBy = sourceId(by);
+    // The blow's attacker for the death picker (deathPick): a character or the player; a hazard
+    // (a uid: Damage Action Object, trap) names nobody in its damage record.
+    const at = actor ? actor.position : by === undefined || by === 'player' ? env.player.position : undefined;
+    this.blowFrom = at ? { x: at.x, y: at.y, z: at.z } : undefined;
     // Driven by a sequence: its Stomp root behaviour swallows the attack stimulus (event 0x2001)
     // and the death event (0x2003) [verified: Stomp message handler 0x100e9dc0]. No hit reaction,
     // no fighting back; a body killed meanwhile dies once control is handed back (update()).
@@ -1409,7 +1415,7 @@ export class Actor {
       }
     }
     if (this.health <= 0) {
-      this.die(env);
+      this.die(env, undefined, this.blowFrom);
       return true;
     }
     if (amount > 0) {
@@ -1578,11 +1584,35 @@ export class Actor {
     return true;
   }
 
-  die(env: ActorEnv, b?: Extract<Behavior, { kind: 'death' }>) {
+  /** Where the attacker of the last blow stood (damage()); undefined: nobody (a hazard). The
+   * killing blow's goes to die(). */
+  private blowFrom?: THREE.Vector3Like;
+
+  /**
+   * The DeathBehavior of the character's p72 list for the killing blow (Character death
+   * 0x100e5d00, picker at 0x100e6174) [verified]: the angle between the body's +Z axis (its back:
+   * the row of its world matrix, times its scale) and the direction from the attacker to the body,
+   * in degrees; the first entry whose p4 is above it, else the first. A blow with no attacker in
+   * its damage record (Damage Action Objects build theirs with none, 0x1008e9e7) keeps the zero
+   * vector: 90 degrees exactly. Guards (p72 10:250 p4 90, 10:22 p4 270): shot from the front ->
+   * 10:250 (10:301 / 10:1470, thrown back), from behind or by a hazard -> 10:22 (10:156, 5.7 s:
+   * he stands, sinks to his knees and only falls at the end): 1a's guard 609e at the electrified
+   * door (Damage Action Object 8185, 200 damage).
+   */
+  private deathFor(f?: THREE.Vector3Like): Extract<Behavior, { kind: 'death' }> | undefined {
+    const list = this.profile.deaths;
+    if (!list || list.length < 2) return this.profile.death;
+    const p = this.motor.position;
+    const theta = deathAngle(this.yaw, this.scale, f && { x: p.x - f.x, y: p.y - f.y, z: p.z - f.z });
+    return list[deathPick(list.map((d) => d.angle ?? 360), theta)];
+  }
+
+  /** `from`: where the killing blow's attacker stood (none: a hazard, BlowUp, a script). */
+  die(env: ActorEnv, b?: Extract<Behavior, { kind: 'death' }>, from?: THREE.Vector3Like) {
     if (this.state === 'dead') return;
     this.health = 0;
     this.enterState('dead');
-    const own = (b ?? this.profile.death)?.clips.map((r) => env.clip(this, r)).filter((i) => i >= 0) ?? [];
+    const own = (b ?? this.deathFor(from))?.clips.map((r) => env.clip(this, r)).filter((i) => i >= 0) ?? [];
     const d = own.length ? own : this.kind.deaths;
     if (d.length) {
       this.play(d[Math.floor(Math.random() * d.length)], { loop: false, fade: 0.12 });
@@ -1603,7 +1633,7 @@ export class Actor {
     if (this.kind.decor || this.scripted) return;
     if (this.deathDeferred) {
       this.deathDeferred = false;
-      if (this.alive && this.health <= 0) return this.die(env);
+      if (this.alive && this.health <= 0) return this.die(env, undefined, this.blowFrom);
     }
     if (this.pendingRoot) {
       const b = this.pendingRoot;
@@ -3490,6 +3520,12 @@ export class Actor {
     if (this.stuckTimer > 1.5) {
       const moved = Math.hypot(pos.x - this.stuckFrom.x, pos.z - this.stuckFrom.z);
       if (moved < 0.4 && nav?.size) {
+        // Stuck against a closed door whose edge the goal lies on: open it (doorInTheWay).
+        if (passive && this.doorInTheWay(env)) {
+          this.stuckTimer = 0;
+          this.stuckFrom.set(pos.x, pos.y, pos.z);
+          return;
+        }
         // Stuck on the graph route as well: the move failed. Hunting, the actor gives up on
         // its target for a while (giveUpTarget); the route is planned afresh either way.
         if (useNav && ++this.navStuck >= 2 && !passive && this.target) {
@@ -3510,6 +3546,35 @@ export class Actor {
       this.stuckTimer = 0;
       this.stuckFrom.set(pos.x, pos.y, pos.z);
     }
+  }
+
+  /**
+   * A passive walk (a Waypoint leg, a talk's approach) stuck against a closed door on the Move
+   * Node edge its goal lies on opens it [port]. The original's path following pushes OpenDoor
+   * when the path crosses a door edge (0x1010ee84 -> 0x1010b200, docs/game-logic.md §15.5); a goal
+   * placed in the doorway itself has its nearest node on the walker's side, so the path is that
+   * node alone and no door edge is crossed: 1a's second ambush CartWheeler 64f1 (Behavior Changer
+   * 8026 -> WaypointBehavior 8027) walks to Waypoint 8025 inside door 4e48 and stood against the
+   * shut leaf, 0.51 m short of it (its Collider radius 0.4); the leg then failed (legStuck), it
+   * idled behind the door, Count Down 73a5 never reached zero and the guard 609e never went on to
+   * the door controls (Timer 7532 -> Behavior Changer 7527). The goal counts as on the edge within
+   * 1 m of the segment, from a quarter of the way to the door's far node on.
+   */
+  private doorInTheWay(env: ActorEnv): boolean {
+    const nav = env.nav;
+    if (!nav?.size || !env.closedDoor || this.profile.openDoor === null) return false;
+    const pos = this.motor.position;
+    const a = nav.nearest(pos.x, pos.y, pos.z, env.world, 6, this.radius * 0.9);
+    if (a < 0) return false;
+    const na = nav.nodes[a];
+    for (const b of na.edges) {
+      // (A door the walker may not pass, locked or not its kind, stays shut: system.ts navBlocked.)
+      if (env.closedDoor(a, b) === undefined || env.navBlocked?.(a, b, this)) continue;
+      const nb = nav.nodes[b];
+      if (!goalOnEdge(na, nb, this.lastSeen)) continue;
+      if (this.tryDoor(env, a, b)) return true;
+    }
+    return false;
   }
 
   private facingErr(dx: number, dz: number) {
@@ -3785,6 +3850,45 @@ function clearLineCached(a: Actor, env: ActorEnv, x: number, y: number, z: numbe
     clearWide(env.world, p.x, p.y + hi, p.z, x, y + hi, z, r);
   lineCache.set(a, { t: env.time, x, z, ok });
   return ok;
+}
+
+/**
+ * The death picker's blow angle (degrees, Character death 0x100e5d00) [verified]: acos of the
+ * body's +Z axis (yaw, times its scale) . the unit direction from the attacker to the body
+ * (`toVictim`); a zero direction counts as straight down; no attacker leaves the zero vector
+ * (90). Past +-1 (a scaled body) acos is NaN and deathPick takes the first entry.
+ */
+export function deathAngle(yaw: number, scale: number, toVictim?: { x: number; y: number; z: number }): number {
+  let nx = 0, nz = 0;
+  if (toVictim) {
+    const l = Math.hypot(toVictim.x, toVictim.y, toVictim.z);
+    if (l > 1e-6) {
+      nx = toVictim.x / l;
+      nz = toVictim.z / l;
+    }
+  }
+  return (Math.acos((Math.sin(yaw) * nx + Math.cos(yaw) * nz) * scale) * 180) / Math.PI;
+}
+
+/** The first DeathBehavior whose p4 is above the blow angle, else the first (0x100e6340). */
+export function deathPick(angles: readonly number[], theta: number): number {
+  for (let i = 0; i < angles.length; i++) if (theta < angles[i]) return i;
+  return 0;
+}
+
+/**
+ * A goal on the Move Node edge a -> b (actor.ts doorInTheWay): within 1 m of the segment and at
+ * least a quarter of the way from a to b (a goal well on the walker's side is not behind the
+ * door). Horizontal.
+ */
+export function goalOnEdge(a: { x: number; z: number }, b: { x: number; z: number }, g: { x: number; z: number }): boolean {
+  const ex = b.x - a.x, ez = b.z - a.z;
+  const l2 = ex * ex + ez * ez;
+  if (l2 < 1e-6) return false;
+  const t = ((g.x - a.x) * ex + (g.z - a.z) * ez) / l2;
+  if (t < 0.25) return false;
+  const k = Math.min(1, t);
+  return Math.hypot(a.x + ex * k - g.x, a.z + ez * k - g.z) <= 1;
 }
 
 /**

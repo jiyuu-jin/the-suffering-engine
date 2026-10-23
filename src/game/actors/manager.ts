@@ -109,6 +109,8 @@ export class ActorManager {
    * collision models instead (docs/game-logic.md §14.10). Unset: `world` / `seeThrough`.
    */
   occlusion: { world: () => CollisionWorld | null; seeThrough: SeeThrough | null } | null = null;
+  /** What a shot passes on its way to an actor (WorldService.shotThrough); unset: `seeThrough`. */
+  shotThrough: SeeThrough | null = null;
   /**
    * Would the zone / portal culling draw a sphere (x, y, z, radius) for the camera of the frame
    * just drawn (ZoneCuller.objectVisible; actors system)? A body in no visible zone is hidden
@@ -279,8 +281,8 @@ export class ActorManager {
     for (const r of templateList(values, CHAR.deaths)) {
       const d = B.fromTemplate(r);
       if (d?.kind === 'death') {
-        p.death = d;
-        break;
+        p.death ??= d;
+        (p.deaths ??= []).push(d);
       }
     }
     // LadderClimbBehavior p2 / p3 rung up, p4 / p5 rung down, p6 / p7 holds, p8 / p9 off at the
@@ -904,7 +906,7 @@ export class ActorManager {
       // Level geometry in front of the actor hides it, except what the eye sees through
       // (bars, grates: the shot passes them like the weapons' own wall test).
       const p = best.point;
-      if (sightBlocked(this.world, origin.x, origin.y, origin.z, p.x, p.y, p.z, 0.05, this.seeThrough)) return null;
+      if (sightBlocked(this.world, origin.x, origin.y, origin.z, p.x, p.y, p.z, 0.05, this.shotThrough ?? this.seeThrough)) return null;
     }
     return best;
   }

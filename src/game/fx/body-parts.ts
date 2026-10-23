@@ -290,7 +290,12 @@ export class BodyParts {
     if (!st.mats) {
       // Own materials: carriers of one kind share theirs.
       const m = mesh.material;
-      st.mats = (Array.isArray(m) ? m : [m]).map((x) => x.clone());
+      // three r186's NodeMaterial.copy drops alphaTest: keep the cut-out passes cut out.
+      st.mats = (Array.isArray(m) ? m : [m]).map((x) => {
+        const c = x.clone();
+        c.alphaTest = x.alphaTest;
+        return c;
+      });
       mesh.material = st.mats.length === 1 ? st.mats[0] : st.mats;
     }
     for (const m of st.mats) {

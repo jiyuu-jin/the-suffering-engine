@@ -27,6 +27,7 @@ import * as THREE from 'three/webgpu';
 import { Fn, float, texture, uniform, uv, vec2, vec4 } from 'three/tsl';
 import { DEFAULT_GLOW, GLOW_DOWNSAMPLE, GLOW_LEVELS, GLOW_MASK_REF, GLOW_TAPS, type SceneGlow as GlowState } from '../formats/render-data';
 import { BACK_BUFFER_TYPE } from './engine-light';
+import { glowMark } from './glow-mark';
 import { warmHooks, warmTargets } from './prewarm';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -41,9 +42,9 @@ export const GLOW_LAYER = 30;
 /** The mark material of a mesh's current material (surface-material.ts), if it has one. */
 export function glowMarkOf(m: THREE.Material | THREE.Material[] | undefined): THREE.Material | THREE.Material[] | null {
   if (!m) return null;
-  if (!Array.isArray(m)) return (m.userData.glowMark as THREE.Material | undefined) ?? null;
-  if (!m.some((x) => x?.userData.glowMark)) return null;
-  return m.map((x) => (x?.userData.glowMark as THREE.Material | undefined) ?? noMark);
+  if (!Array.isArray(m)) return glowMark(m) ?? null;
+  if (!m.some((x) => glowMark(x))) return null;
+  return m.map((x) => glowMark(x) ?? noMark);
 }
 
 /** Group slots of a multi-material mesh that do not mark: drawn without touching anything. */
