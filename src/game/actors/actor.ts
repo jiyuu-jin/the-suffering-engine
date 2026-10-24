@@ -33,7 +33,7 @@ import type { Entity } from '../../formats/entities';
 import { instanceRotation } from '../../formats/level';
 import type { CreatureKind, KindAttack } from './kinds';
 import { npcMotorConfig } from './mover';
-import { clearLine, clearWide, shortcutBarred, type NavGraph } from './nav';
+import { clearLine, clearWide, groundAlong, shortcutBarred, type NavGraph } from './nav';
 import type { Behavior, BehaviorLibrary, DialogLine, InvestigateProfile, NoiseSpec } from './behaviors';
 import { deathWeaponMode } from './drops';
 import { chooseFleeSpot, recentHits, type FleeSpot } from './flee';
@@ -45,7 +45,7 @@ import { ballisticLaunch, type ThrowAim } from './throw';
 import { missileStep, type MissileBody, type MissileFlight } from './missile';
 import type { ClipRef } from './clipmap';
 import { difficulty } from '../campaign/difficulty';
-import { npcBlowDamage, shapeWorld, sweepSpheres, type HitSphereLike, type NpcMeleeWeapon, type SwingWindow } from './npc-melee';
+import { npcBlowDamage, shapeWorld, sweepHit, type HitSphereLike, type NpcMeleeWeapon, type SwingWindow } from './npc-melee';
 import { chooseTarget, damageShare, DEFAULT_WEIGHTS, repickInterval, targetScore, type TargetCandidate, type TargetWeights } from './targeting';
 import { downTimeOf, flinchClip, pickHitReact, reactionBlocks, reactionRate, type HitPick, type HitTables } from './hit-react';
 
@@ -214,12 +214,14 @@ export interface ActorBlow {
 
 /**
  * Where a character's blow or shot landed on its victim and its damage type: the blade's
- * contact (npc-melee.ts sweepSpheres), the shot's point on the target. Part Caps read the
+ * contact (npc-melee.ts sweepHit), the shot's point on the target. Part Caps read the
  * struck hit sphere from it (dismember.ts).
  */
 export interface NpcBlowHit {
   point?: THREE.Vector3Like;
   type?: number;
+  /** The struck hit sphere's bone, when the blow knows it (a blade's sweep, a missile's contact). */
+  bone?: number;
 }
 
 /** What an actor needs from the outside world each frame. */
@@ -230,6 +232,12 @@ export interface ActorEnv {
   playerAlive: boolean;
   /** Player object uid (sender of player-caused events). */
   playerUid: number;
+  /**
+   * Port option "Enemies ignore the player" (src/game/port-options.ts; not in the original):
+   * no character takes him as a target, fights back at him or follows up his noise, and no
+   * special move starts on him. Stray blows, blasts, gas and fire still hurt him.
+   */
+  ignorePlayer?: boolean;
   /** Hit spheres of a body as posed now (skeleton sphere tree leaves; npc-melee.ts sweeps them). */
   hitSpheres?(who: Actor | 'player'): HitSphereLike[];
   /** The player as a target (Player GameObject p4 / p8, health fraction; targeting.ts). */
@@ -667,6 +675,13 @@ export class Actor {
   private killDone = false;
   /** Class special-move controller (specials/index.ts installs it; see update()). */
   special?: (dt: number, env: ActorEnv) => boolean;
+  /**
+   * A special's MoveTo: while set (and the special leaves the tick to the generic AI), the body
+   * walks there by the generic graph steering (Move Node path, doors, ladders, ground-checked
+   * shortcuts, the run clip) instead of its combat. The Inferna's KillObject chase and its
+   * FlamingKill repositioning are MoveTo children (specials/inferna.ts) [verified].
+   */
+  specialWalk?: THREE.Vector3Like;
   /**
    * Special-move damage rule (ActorManager.damage calls it first): returns the damage the body
    * takes from a blow (0 = none), given where / how it landed when known.
@@ -1160,14 +1175,20 @@ export class Actor {
     this.needsPlacement = false;
     const world = this.world;
     if (!world || this.anchored || this.scripted || this.template) return;
-    const gap = this.groundGap(world);
+    // A centre-probe mover (docs/game-logic.md §14.9) stands where its own ground pass puts it: a
+    // walkable plane above the feet within the foot radius is ground too, and the highest one wins
+    // (3a's guard 1e93 is placed 0.11 m under the floor at 107.31; the plain gap below took the
+    // collision box 0.25 m under his feet and set him into the floor). Otherwise the gap rule,
+    // which also places bodies laid out dead (under a bunk: not lifted onto it) [port].
+    const own = this.state === 'dead' ? null : this.motor.centreGroundHeight(AIRBORNE_GAP);
+    const gap = own !== null && own >= this.motor.position.y - 0.02 ? this.motor.position.y - own : this.groundGap(world);
     if (gap === null || gap > AIRBORNE_GAP) {
       if (this.state === 'dead') return;
       this.setDormantHidden(true);
       this.motor.onGround = false;
       return;
     }
-    if (Math.abs(gap) > 0.02 && gap > -0.25) {
+    if (Math.abs(gap) > 0.02 && (gap > -0.25 || own !== null)) {
       this.motor.position.y -= gap;
       this.sync(false);
     }
@@ -1417,7 +1438,9 @@ export class Actor {
       // (0x100f9eb0): the companions (1c 7569, 2 868, 6b 49a: 10:214 allies 2:384) take his hits
       // without fighting back; their Action Dialog's turn is the level logic's (director.ts).
       const allyPlayer = !!attacker?.player && !!(this.behavior?.kind === 'kill' ? this.behavior : this.profile.kill)?.allies.includes(PLAYER_TEAM);
-      if (attacker && !allyPlayer && !(actor && actor.team && actor.team === this.team)) {
+      // Port option "Enemies ignore the player": his hits take no grudge and no target.
+      const ignored = !!attacker?.player && !!env.ignorePlayer;
+      if (attacker && !allyPlayer && !ignored && !(actor && actor.team && actor.team === this.team)) {
         if (!this.target || !this.inCombat) this.grudge = attacker;
         this.target ??= attacker;
       }
@@ -1426,7 +1449,7 @@ export class Actor {
       // must not drag the chase towards them: the gas chamber's floor tiles pulled the
       // CartWheeler back to the tile centre 13 times a second, so it shuffled on the spot.
       const fromTarget = !this.target || (!!attacker && (attacker.player ? !!this.target.player : attacker.actor === this.target.actor));
-      if (from && fromTarget) {
+      if (from && fromTarget && !ignored) {
         this.lastSeen.set(from.x, from.y, from.z);
         this.lastSeenTime = env.time;
       }
@@ -1779,8 +1802,12 @@ export class Actor {
         this.updateDoor(dt, env);
         break;
       default:
+        if (this.specialWalk) {
+          this.setStateIf('chase');
+          this.moveTo(this.specialWalk.x, this.specialWalk.y, this.specialWalk.z, dt, env);
+        }
         // (A follower's investigation is its waiting Hostility's: runFollow keeps its path check.)
-        if (this.investigating && !this.seesTarget && this.behavior?.kind !== 'follow' && (this.state === 'idle' || this.state === 'move' || this.state === 'chase')) this.updateInvestigate(dt, env);
+        else if (this.investigating && !this.seesTarget && this.behavior?.kind !== 'follow' && (this.state === 'idle' || this.state === 'move' || this.state === 'chase')) this.updateInvestigate(dt, env);
         else if (this.inCombat) this.updateCombat(dt, env);
         else this.updatePassive(dt, env);
     }
@@ -2012,8 +2039,8 @@ export class Actor {
       // passes between a fence's rails); rising walkable ground on the way (stairs up to the
       // node) does not stop it.
       const r = this.radius * 0.9;
-      const a = nav.nearest(pos.x, pos.y, pos.z, env.world, 6, r);
-      const b = nav.nearest(x, y, z, env.world, 6, r);
+      const a = nav.nearest(pos.x, pos.y, pos.z, env.world, 6, r, 'floor', navType);
+      const b = nav.nearest(x, y, z, env.world, 6, r, 'floor', navType, true);
       const n = a >= 0 ? nav.nodes[a] : undefined;
       const fits = !n || clearWide(env.world, pos.x, pos.y + 0.9, pos.z, n.x, n.y + 0.9, n.z, r, true);
       ok = a < 0 || b < 0 || (fits && (a === b || !!nav.path(a, b, undefined, { navType })));
@@ -2256,7 +2283,7 @@ export class Actor {
     // character's NPC Exclusion Type at once (1c: the companion's way into the east yard, Move
     // Nodes 7b71 - 7b72, is off until the first yard group is dead; 7ee1 - 7ee2 keep him out).
     const nav = env.nav;
-    const here = nav?.size ? nav.nearest(this.position.x, this.position.y, this.position.z, env.world, 6, this.radius * 0.9) : -1;
+    const here = nav?.size ? nav.nearest(this.position.x, this.position.y, this.position.z, env.world, 6, this.radius * 0.9, 'floor', this.profile.navType) : -1;
     const reachable = here >= 0 ? (s: FleeSpot) => (s.node ?? -1) < 0 || !!nav!.path(here, s.node!, undefined, { navType: this.profile.navType }) : undefined;
     const uid = chooseFleeSpot(p, { me: this.position, threats, allies, spots, group: p.keepGroup ? st.group : -1, stay: st.stay, current: arrived ? -1 : st.spot, time: env.time, reachable });
     if (uid < 0) {
@@ -2513,8 +2540,8 @@ export class Actor {
     const nav = env.nav;
     const navType = this.profile.navType;
     if (!nav?.size) return straight;
-    const a = nav.nearest(pos.x, pos.y, pos.z, env.world, 6, this.radius * 0.9);
-    const b = nav.nearest(x, y, z, env.world);
+    const a = nav.nearest(pos.x, pos.y, pos.z, env.world, 6, this.radius * 0.9, 'floor', this.profile.navType);
+    const b = nav.nearest(x, y, z, env.world, 6, 0, 'floor', navType, true);
     const barred = navType !== undefined && (nav.crossesExcluded(pos.x, pos.y, pos.z, x, z, navType) || shortcutBarred(nav, a, b, navType));
     if (!barred && clearLineCached(this, env, x, y, z)) return straight;
     if (a < 0 || b < 0) return straight;
@@ -2541,6 +2568,8 @@ export class Actor {
     for (const n of noises) {
       if (n.source === this) continue;
       if (n.source instanceof Actor && n.source.team && n.source.team === this.team) continue;
+      // Port option "Enemies ignore the player": his footsteps, shots and impacts go unheard.
+      if (n.source === 'player' && env.ignorePlayer) continue;
       const d = Math.hypot(n.x - p.x, n.y - p.y, n.z - p.z);
       if (!noiseHeard(inv, n, d, this.investigating?.level)) continue;
       if (!hearsNoise(inv.chance, Math.random())) continue;
@@ -2844,15 +2873,16 @@ export class Actor {
       for (const v of victims) {
         if (win.hit.has(v)) continue;
         const spheres = env.hitSpheres?.(v) ?? [];
-        const p = sweepSpheres(prev[0], prev[1], cur[0], cur[1], win.weapon.shape.r, spheres.length ? spheres : bodySpheres(v, env));
-        if (!p) continue;
+        const struck = sweepHit(prev[0], prev[1], cur[0], cur[1], win.weapon.shape.r, spheres.length ? spheres : bodySpheres(v, env));
+        if (!struck) continue;
+        const p = struck.p;
         win.hit.add(v);
         // The wall test: a ray from the wielder (its x / z at the contact's height) to the contact.
         if (sightBlocked(env.world, pos.x, p[1], pos.z, p[0], p[1], p[2], 0.02)) continue;
         const onTarget = !this.target || (v === 'player' ? !!this.target.player : this.target.actor === v);
         const dmg = npcBlowDamage(win.weapon, a.scale ?? 1, onTarget);
         // The contact and the weapon's p70 type go with the blow: Part Caps cut by them.
-        const hit: NpcBlowHit = { point: { x: p[0], y: p[1], z: p[2] }, type: win.weapon.type };
+        const hit: NpcBlowHit = { point: { x: p[0], y: p[1], z: p[2] }, type: win.weapon.type, bone: spheres[struck.i]?.bone };
         if (v === 'player') env.damagePlayer(dmg, this, hit);
         else env.damageActor(v, dmg, this, hit);
       }
@@ -2908,7 +2938,7 @@ export class Actor {
       this.missiles.splice(i, 1);
       if (c.kind === 'expired') continue;
       for (const g of spec.impact) env.spawnFx?.(g, c.point, c.kind === 'world' ? c.normal : undefined);
-      if (c.kind === 'body') this.hitTarget(env, c.body, spec.damage, { point: c.point, type: spec.type });
+      if (c.kind === 'body') this.hitTarget(env, c.body, spec.damage, { point: c.point, type: spec.type, bone: c.bone });
     }
   }
 
@@ -3129,7 +3159,8 @@ export class Actor {
 
   private targetAlive(t: Target, env: ActorEnv) {
     if (t.prop !== undefined) return !!env.propTarget?.(t.prop);
-    return t.player ? env.playerAlive : !!t.actor && t.actor.alive && !t.actor.hidden;
+    // Port option "Enemies ignore the player": a player target counts as gone (dropped at once).
+    return t.player ? env.playerAlive && !env.ignorePlayer : !!t.actor && t.actor.alive && !t.actor.hidden;
   }
 
   private targetPos(env: ActorEnv): THREE.Vector3Like {
@@ -3196,6 +3227,8 @@ export class Actor {
    */
   private perceive(env: ActorEnv) {
     playerUidCache = env.playerUid;
+    // Port option "Enemies ignore the player": a grudge on him is forgotten as well.
+    if (env.ignorePlayer && this.grudge?.player) this.grudge = undefined;
     // A follower chooses targets only through the HostilityBehavior it waits with (FollowBehavior
     // p3 = 1); running to the leader that child is stopped (0x100ea6c0 / 0x100ea7a0) [verified].
     const fb = this.behavior?.kind === 'follow' ? this.behavior : undefined;
@@ -3313,7 +3346,8 @@ export class Actor {
         },
       });
     };
-    if (env.playerAlive) {
+    // Port option "Enemies ignore the player": he is never a candidate.
+    if (env.playerAlive && !env.ignorePlayer) {
       const p = env.player.position;
       const f = inBox(p.x, p.z) ? this.candidateOf('player') : undefined;
       const pp = env.playerTarget;
@@ -3489,8 +3523,8 @@ export class Actor {
     // way on from there; kept back, he goes round through the cell e3 when the player moves on).
     if (navType !== undefined && nav?.size && env.time >= this.reachCheckAt) {
       this.reachCheckAt = env.time + 1;
-      const a = nav.nearest(pos.x, pos.y, pos.z, env.world, 6, this.radius * 0.9);
-      const b = nav.nearest(this.lastSeen.x, this.lastSeen.y, this.lastSeen.z, env.world);
+      const a = nav.nearest(pos.x, pos.y, pos.z, env.world, 6, this.radius * 0.9, 'floor', this.profile.navType);
+      const b = nav.nearest(this.lastSeen.x, this.lastSeen.y, this.lastSeen.z, env.world, 6, 0, 'floor', this.profile.navType, true);
       this.goalReachable = a < 0 || b < 0 || a === b || !!nav.path(a, b, undefined, { navType });
       this.shortcutBarred = shortcutBarred(nav, a, b, navType);
     }
@@ -3514,7 +3548,7 @@ export class Actor {
       // Re-target when the goal moved; full replans are rare (graph search is the costly part).
       if (this.targetFrom.distanceToSquared(this.lastSeen) > 1.5 * 1.5) {
         this.targetFrom.copy(this.lastSeen);
-        this.targetNode = nav.nearest(this.lastSeen.x, this.lastSeen.y, this.lastSeen.z, env.world);
+        this.targetNode = nav.nearest(this.lastSeen.x, this.lastSeen.y, this.lastSeen.z, env.world, 6, 0, 'floor', this.profile.navType, true);
         this.pathTimer = Math.min(this.pathTimer, 0.3);
       }
       // Passive walks to a fixed goal keep their path (replanning from the middle of a
@@ -3524,7 +3558,7 @@ export class Actor {
         this.pathTimer = 2.5 + Math.random();
         // Start from a node the body fits through to (an open gate leaf can stand between it
         // and a node a thin ray still reaches).
-        const a = nav.nearest(pos.x, pos.y, pos.z, env.world, 6, this.radius * 0.9);
+        const a = nav.nearest(pos.x, pos.y, pos.z, env.world, 6, this.radius * 0.9, 'floor', this.profile.navType);
         const blocked = env.navBlocked ? (i: number, j: number) => env.navBlocked!(i, j, this) : undefined;
         const found = nav.path(a, this.targetNode, blocked, { navType: this.profile.navType });
         // No way on the graph to a target out of straight reach: MoveTo fails, and the fight
@@ -3544,7 +3578,7 @@ export class Actor {
           const n0 = nav.nodes[this.path[0]], n1 = nav.nodes[this.path[1]];
           const seg = Math.hypot(n1.x - n0.x, n1.y - n0.y, n1.z - n0.z);
           // (Only with room to walk straight to the second one: a shelf can stand in between.)
-          if (Math.hypot(n1.x - pos.x, n1.y - pos.y, n1.z - pos.z) < seg && !barred(n1.x, n1.z) && clearWide(env.world, pos.x, pos.y + 0.8, pos.z, n1.x, n1.y + 0.8, n1.z, this.radius * 0.9)) this.prevNode = this.path.shift()!;
+          if (Math.hypot(n1.x - pos.x, n1.y - pos.y, n1.z - pos.z) < seg && !barred(n1.x, n1.z) && clearWide(env.world, pos.x, pos.y + 0.8, pos.z, n1.x, n1.y + 0.8, n1.z, this.radius * 0.9) && groundAlong(env.world, pos.x, pos.y, pos.z, n1.x, n1.y, n1.z, this.radius)) this.prevNode = this.path.shift()!;
         }
         if (!this.path.length) this.pathTimer = 1;
       }
@@ -3561,7 +3595,7 @@ export class Actor {
       if (this.path.length > 1 && !(env.closedDoor && env.closedDoor(this.path[0], this.path[1]) !== undefined)) {
         const n1 = nav.nodes[this.path[1]];
         // Only on level ground: a line down a staircase passes over the stairwell edge.
-        if (Math.abs(n1.y - pos.y) < 0.6 && !barred(n1.x, n1.z) && clearWide(env.world, pos.x, pos.y + 0.8, pos.z, n1.x, n1.y + 0.8, n1.z, this.radius * 0.9)) this.prevNode = this.path.shift()!;
+        if (Math.abs(n1.y - pos.y) < 0.6 && !barred(n1.x, n1.z) && clearWide(env.world, pos.x, pos.y + 0.8, pos.z, n1.x, n1.y + 0.8, n1.z, this.radius * 0.9) && groundAlong(env.world, pos.x, pos.y, pos.z, n1.x, n1.y, n1.z, this.radius)) this.prevNode = this.path.shift()!;
       }
       if (this.path.length) {
         const n = nav.nodes[this.path[0]];
@@ -3636,7 +3670,7 @@ export class Actor {
     const nav = env.nav;
     if (!nav?.size || !env.closedDoor || this.profile.openDoor === null) return false;
     const pos = this.motor.position;
-    const a = nav.nearest(pos.x, pos.y, pos.z, env.world, 6, this.radius * 0.9);
+    const a = nav.nearest(pos.x, pos.y, pos.z, env.world, 6, this.radius * 0.9, 'floor', this.profile.navType);
     if (a < 0) return false;
     const na = nav.nodes[a];
     for (const b of na.edges) {
@@ -3919,10 +3953,12 @@ function clearLineCached(a: Actor, env: ActorEnv, x: number, y: number, z: numbe
   const ok =
     Math.abs(y - p.y) < 1.5 &&
     clearWide(env.world, p.x, p.y + 0.8, p.z, x, y + 0.8, z, r) &&
-    clearWide(env.world, p.x, p.y + hi, p.z, x, y + hi, z, r);
+    clearWide(env.world, p.x, p.y + hi, p.z, x, y + hi, z, r) &&
+    groundAlong(env.world, p.x, p.y, p.z, x, y, z, a.radius);
   lineCache.set(a, { t: env.time, x, z, ok });
   return ok;
 }
+
 
 /**
  * The death picker's blow angle (degrees, Character death 0x100e5d00) [verified]: acos of the

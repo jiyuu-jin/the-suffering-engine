@@ -19,6 +19,7 @@ import { parseEntities } from '../formats/entities';
 import { staticLightingFromEntities, type StaticLighting } from '../formats/static-light';
 import { buildLevelZoning, lightRegions, parseSectorTree, type LightRegion } from '../formats/visgraph';
 import { findEntry, readDbId, TDU_TEXTURE, type PackageSet, type RiotPackage } from '../formats/model';
+import { COLLISION_LAYER } from './physics';
 
 /** Pseudo-path for the built-in procedural scene (no game files needed). */
 export const DEMO_LEVEL_PATH = '__demo__';
@@ -178,6 +179,8 @@ export async function loadLevel(
     nonSolidUids,
     moverPassUids,
     collisionOf: collisionOf(lvl, packages),
+    // Undrawn floor-layer triangles that hold movers up are Landscape like the drawn ones.
+    layerCollision: COLLISION_LAYER.solid | COLLISION_LAYER.landscape,
     zoneOf: zoning?.zoneOf,
     chunkSize: chunkParam !== null ? Number(chunkParam) : undefined,
   });

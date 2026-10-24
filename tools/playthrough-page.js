@@ -39,6 +39,45 @@
     if (s !== undefined && s > g.height && (window.__ptAvoidWater || s - g.height > 1.9)) return null;
     return g.height;
   };
+  // A drop of more than 3 m (or water over the head) 1.2 m ahead along the view: a fight does
+  // not walk on after its creature there (8a's clearing: the creature form chased a Slayer off
+  // the cliff into the creek, 20 m down, and the run was lost).
+  function edgeAhead() {
+    const p = P(), fx = -Math.sin(__player.yaw), fz = -Math.cos(__player.yaw);
+    for (const k of [0.8, 1.6]) if (floorAt(p.x + fx * k, p.y, p.z + fz * k, 0.6, 3) === null) return true;
+    return false;
+  }
+  // A lit fire within 1 m of the feet (a burning Inferna's footprints, 9 / 10).
+  function inFire() {
+    const p = P();
+    return (window.__fx?.effects?.fires ?? []).some((f) => f.lit && !f.gone && Math.hypot(f.pos.x - p.x, f.pos.z - p.z) < 1.0 && Math.abs(f.pos.y - p.y) < 1.5);
+  }
+  // Back-pedal / sidestep room for a fight's evade (S with A or D): the floor 1.5 m behind the
+  // view and to that side must be there within a step's drop (not off a roof or a dock: 8a's
+  // refuge, 10's sea). Returns the side keys that have room ([] for none).
+  // `area` [x, z, r] (an arena's): the step back is not taken away from its middle once the player
+  // is past half its radius, and the sidestep goes the way back towards it. After fights that
+  // drifted with their Infernas, 9's guard was found on the shore under the lighthouse's cliff
+  // (runs t9b, d9).
+  function evadeKeys(area = null) {
+    const p = P(), fx = -Math.sin(__player.yaw), fz = -Math.cos(__player.yaw);
+    // (Nor into a fire: an Inferna's burning footprints, 1 a touch, killed the player backing
+    // through them in run g9.)
+    const fires = (window.__fx?.effects?.fires ?? []).filter((f) => f.lit && !f.gone && Math.hypot(f.pos.x - p.x, f.pos.z - p.z) < 5);
+    const ok = (dx, dz) => { const h = floorAt(p.x + dx, p.y, p.z + dz, 0.5, 0.6); return h !== null && free(p.x + dx, h, p.z + dz) && !fires.some((f) => Math.hypot(f.pos.x - p.x - dx, f.pos.z - p.z - dz) < 1.1); };
+    // Firm ground 1.5 m and 3 m behind (not the rim of a drop).
+    if (!ok(-fx * 1.5, -fz * 1.5) || floorAt(p.x - fx * 3, p.y, p.z - fz * 3, 0.6, 1.5) === null) return [];
+    // Right of the view: forward is (-sin, -cos), right (cos, -sin).
+    const rx = Math.cos(__player.yaw), rz = -Math.sin(__player.yaw);
+    let pref = null;
+    if (area) {
+      const cx = area[0] - p.x, cz = area[1] - p.z, d = Math.hypot(cx, cz);
+      if (d > area[2] * 0.5 && -fx * cx - fz * cz < 0) return [];
+      if (d > 1) pref = rx * cx + rz * cz > 0 ? 'right' : 'left';
+    }
+    const right = ok(-fx * 1.2 + rx * 1.2, -fz * 1.2 + rz * 1.2), left = ok(-fx * 1.2 - rx * 1.2, -fz * 1.2 - rz * 1.2);
+    return { keys: ['KeyS'], right, left, pref };
+  }
   const free = (x, h, z) => asPlayer((c) => !c.capsuleOverlaps({ x, z, y0: h + STEP_UP + R, y1: h + H - R, r: R }));
   const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
   // Closed doors the player can open (unlocked, usable, moving kind): passable for planning.
@@ -215,7 +254,8 @@
       const dx = q.x - e.x, dz = q.z - e.z;
       __player.yaw = yawTo(dx, dz);
       // At the body's middle: 1 m up passed over 3a's rats (0.46 m tall) and they were never hit.
-      __player.pitch = Math.atan2(q.y + Math.min(1.0 * (a.scale ?? 1), 0.55 * (a.height ?? 1.8)) - e.y, Math.hypot(dx, dz));
+      // (An Inferna's ash pile lies on the ground: its middle.)
+      __player.pitch = Math.atan2(q.y + (infMode(a) === 'ash' ? 0.3 : Math.min(1.0 * (a.scale ?? 1), 0.55 * (a.height ?? 1.8))) - e.y, Math.hypot(dx, dz));
       return;
     }
     if (!ap.active) return;
@@ -415,6 +455,13 @@
   const lvlPath = __world.world.opts.levelPath ?? '';
   const COMPANIONS = [0x7569, 0x868, 0x49a, ...(/9 Lighthouse/.test(lvlPath) ? [0xbc9] : []), ...(/10 Docks/.test(lvlPath) ? [0x7b8] : [])];
   const isCompanion = (a) => COMPANIONS.includes(a.entity?.uid) && !a.target?.player && !a.grudge?.player;
+  // An Inferna's mode (specials/inferna.ts): it takes damage only as an ash pile; while flaming a
+  // hit burns down its flame timer (0.3 s a point); collapsing, reforming or igniting it takes
+  // nothing (docs/game-logic.md §15.7.6). Unlit it takes no damage either, but the hit's Damaged
+  // output is what 9's level logic lights them with (Count Down c59): still a target. Null for
+  // other classes.
+  const infMode = (a) => (a?.entity?.className === 'Inferna' ? window.__specials?.of?.(a)?.inf ?? null : null);
+  const infHits = (a) => { const m = infMode(a); return m === null || m === 'flaming' || m === 'ash' || m === 'unlit'; };
   function engage(range = 20, all = false, huntOnly = false, area = null) {
     const p = P();
     let best = null, bd = Infinity, bk = Infinity;
@@ -427,16 +474,25 @@
       if (!(a.hostile || a.provoked || onAlly) || isCompanion(a)) continue;
       // A step's `spare` list: characters a player leaves alone (the Prelude's fleeing guards).
       if ((window.__ptSpare ?? []).includes(a.entity?.uid)) continue;
-      if (area && Math.hypot(a.motor.position.x - area[0], a.motor.position.z - area[1]) > area[2]) continue;
+      // (A gunman shooting at the player from outside the area is shot back at all the same.)
+      if (area && Math.hypot(a.motor.position.x - area[0], a.motor.position.z - area[1]) > area[2] && !(a.state === 'shoot' && !!a.target?.player && canShoot(a.id))) continue;
       if ((ap.memo?.get(a.id)?.until ?? 0) > performance.now()) continue;
       // Allies (the escort guard) fight creatures, not the player.
       if (!a.hostile && !onAlly && !(a.target?.player || a.grudge?.player)) continue;
+      // (An Inferna that no hit affects now, unlit or collapsing / reforming: nothing to swing at.)
+      if (!infHits(a)) continue;
       const q = a.motor.position;
       const d = Math.hypot(q.x - p.x, q.z - p.z);
-      if (Math.abs(q.y - p.y) > 3) continue;
-      const hunting = onAlly || ['chase', 'attack', 'shoot', 'hurt'].includes(a.state);
+      // (Not one more than 3 m above or below, unless it is shooting at the player from there: 3a's
+      // tower guards 3c68 / 3c69, 9 m up, fire into the fenced yard by data, and a player shoots
+      // back at them; canShoot needs the clear line.)
+      if (Math.abs(q.y - p.y) > 3 && !(a.state === 'shoot' && !!a.target?.player && canShoot(a.id))) continue;
+      const hunting = onAlly || ['chase', 'attack', 'shoot', 'hurt'].includes(a.state) || infMode(a) === 'flaming';
       if (!hunting && (d > 6 || huntOnly) && !all) continue;
-      const dd = onAlly ? d - 8 : d;
+      // Order: whoever is after a companion, an Inferna's ash pile (its few seconds of being
+      // hurtable), a gunman shooting at the player (each second alive is bullets taken), then the
+      // nearest.
+      const dd = onAlly ? d - 8 : infMode(a) === 'ash' ? d - 6 : a.state === 'shoot' && !!a.target?.player ? d - 4 : d;
       if (dd < bk && d < range) (bk = dd), (bd = d), (best = a);
     }
     // A creature that takes no damage for 8 s while engaged (out of reach behind a shelf, up in
@@ -493,7 +549,10 @@
       const r = orig(a, amount, from, by, hit);
       if (a && (!a.hostile || COMPANIONS.includes(a.entity?.uid)) && a.entity && !a.template) {
         const who = typeof by === 'object' && by ? (by.entity?.uid ?? by.id ?? '').toString(16) + ' ' + (by.entity?.className ?? '') : String(by ?? '');
-        allyDmg.push({ t: +__world.world.time.toFixed(2), uid: a.entity.uid.toString(16), amount: +(+amount).toFixed(1), was: +(+before).toFixed(1), hp: +a.health.toFixed(1), by: who, type: hit?.type });
+        // (`by` a number: a uid, in hex like the rest; the call site for the record.)
+        const byS = typeof by === 'number' ? by.toString(16) : who;
+        const at = (new Error().stack ?? '').split('\n').slice(2, 5).map((l) => l.trim().replace(/https?:\/\/[^/]+\//, '').replace(/\?t=\d+/, '')).join(' < ');
+        allyDmg.push({ t: +__world.world.time.toFixed(2), uid: a.entity.uid.toString(16), amount: +(+amount).toFixed(1), was: +(+before).toFixed(1), hp: +a.health.toFixed(1), by: byS, type: hit?.type, at });
         if (allyDmg.length > 300) allyDmg.shift();
       }
       return r;
@@ -646,6 +705,10 @@
       // Ambient Creatures are moved by the director along their waypoints (6a's birds fly up into
       // the trees and vanish at the last one): not the AI's floating or sinking.
       if (a.entity?.className === 'Ambient Creature') continue;
+      // The Black Ones (10's boss) are not moved by a mover: they rise from the water at their
+      // placement with the appear clip and never move (specials/black-one.ts, docs/game-logic.md
+      // §15.7.11); their root under the dock is the rig's, not a sinking body.
+      if (a.entity?.className === 'Black One') continue;
       // A crawler in a ceiling / wall transit or a leap (its special's `reactGate` closed) goes
       // where its clips put it: 4a's wall CartWheeler 82d5 read "floating +3.96 / +5.99" at 4a.wake.
       if (a.reactGate && !a.reactGate()) continue;
@@ -717,10 +780,12 @@
   const inSea = (a) => typeof window.__ptFloor === 'number' && !!a && a.motor.position.y < window.__ptFloor;
   const bladeOnly = (a) => a?.entity?.className === 'Fester' || (!!window.__ptSaveRounds && !inSea(a));
   function canShoot(id) {
+    // (Transformed: the creature fights hand to hand; its guns are put away.)
+    if ((window.__insanity?.model?.form ?? 'human') !== 'human') return false;
     const wp = window.__weapons;
     if (!wp || !wp.service.weapons.some((x) => x.kind === 'ranged' && x.clip + x.reserve > 0)) return false;
     const a = __actors.manager.actors.find((x) => x.id === id);
-    if (!a || bladeOnly(a)) return false;
+    if (!a || bladeOnly(a) || !infHits(a)) return false;
     // A Burrower takes shots only while it is up (striking or hit): rounds are not spent on it underground.
     if (a.entity?.className === 'Burrower' && !['attack', 'hurt'].includes(a.state)) return false;
     const e = __player.eyePosition(), q = a.motor.position;
@@ -749,12 +814,80 @@
       if (wp.service.def(cur)?.kind === 'ranged' || (window.__ptSaveRounds && cur !== blade)) wp.service.equip(blade);
       return wp.service.fire();
     }
-    if (guns.length && wp.service.def(cur)?.kind !== 'ranged') wp.service.equip(guns.at(-1).id);
+    // The gun for the distance, as a player switches (the number keys need pointer lock): the
+    // shotgun close in (six pellets of 4 a shot, about 24 a second within a few metres), the
+    // Tommy Gun beyond (4.5 a round, five rounds a second, the same at any range), the
+    // revolver when neither has rounds. 4 / 7 m with hysteresis: a switch costs the draw.
+    // (Objects, `id` undefined: the gun in hand, or the last one picked up; a `break` step may
+    // have equipped one for a thin target.)
+    const tgt = id !== undefined ? __actors.manager.actors.find((x) => x.id === id) : null;
+    if (tgt) {
+      const dist = Math.hypot(tgt.motor.position.x - P().x, tgt.motor.position.z - P().z);
+      const has = (k) => guns.some((x) => x.id === k);
+      const pref = (dist < 4 || (cur === '4:84' && dist < 7) ? ['4:84', '4:260'] : ['4:260', '4:84']).concat(['4:5', ...guns.map((x) => x.id)]).find(has);
+      if (pref && cur !== pref) wp.service.equip(pref);
+    } else if (guns.length && wp.service.def(cur)?.kind !== 'ranged') wp.service.equip(guns.at(-1).id);
+    // An object (a door, a lock, a barricade) with the Tommy Gun in hand from a fight: the shotgun,
+    // as before the distance choice (pellets are damage type 13; 1b's locked door 64e1 has Damage
+    // Resistance 2:539, bullets (type 1) x 0, and took no Tommy Gun round in 150 s, run dr1). A
+    // `break` step's own `weapon` is equipped by the step.
+    else if (!tgt && cur === '4:260' && guns.some((x) => x.id === '4:84') && !window.__ptBreakWeapon) wp.service.equip('4:84');
     if (wp.service.fire()) return true;
     // An empty gun in hand (no reload left): back to the shiv.
     const now = wp.service.weapons.find((x) => x.id === wp.persist.current);
     if (now && now.kind === 'ranged' && now.clip + now.reserve <= 0) wp.service.equip('4:79');
     return false;
+  }
+  // Gunmen on the player: alive hostile characters with a ranged attack (Slayers, the guards with
+  // guns, Mainliners' needles) whose target is the player, within 40 m. `exposed`: the ones with a
+  // clear line from their gun height to the player's chest now. NPC shots need that line at the
+  // Fire marker (actor.ts fire: `clear && spreadShotHits`): a player out of it takes nothing.
+  function gunmen() {
+    const p = P();
+    const out = [];
+    for (const a of __actors.manager.actors) {
+      if (!a.alive || a.template || !a.ch.root.visible || a.dormantHidden || !a.profile?.ranged || !a.target?.player) continue;
+      if (a.entity?.className === 'Inferna') continue;
+      const q = a.motor.position;
+      if (Math.hypot(q.x - p.x, q.z - p.z) > 40) continue;
+      out.push(a);
+    }
+    return out;
+  }
+  const eyeOf = (a) => ({ x: a.motor.position.x, y: (a.bottom ?? a.motor.position.y) + (a.height ?? 1.8) * 0.75, z: a.motor.position.z });
+  function lineFrom(a, x, y, z) {
+    const e = eyeOf(a);
+    const dx = x - e.x, dy = y - e.y, dz = z - e.z, d = Math.hypot(dx, dy, dz);
+    if (d < 0.1) return true;
+    const h = __view.collision.raycast(e.x, e.y, e.z, dx / d, dy / d, dz / d, d);
+    return !h || h.distance > d - 0.3;
+  }
+  function exposed() {
+    const p = P();
+    return gunmen().filter((a) => a.state === 'shoot' && lineFrom(a, p.x, p.y + 1.3, p.z)).map((a) => ({ id: a.id, uid: a.entity?.uid ?? 0, st: a.state }));
+  }
+  // A spot within `maxR` m the player can walk straight to where no gunman on him has a line to
+  // his chest or head (a corner, a crate, a wall): the nearest one. Null when none.
+  function coverSpot(maxR = 8, area = null) {
+    const p = P(), g = gunmen();
+    if (!g.length) return null;
+    // (Kept to the fight's area only while the player is in it.)
+    if (area && Math.hypot(p.x - area[0], p.z - area[1]) > area[2]) area = null;
+    let best = null, bd = Infinity;
+    for (let r = 1.2; r <= maxR; r += 0.8) {
+      for (let k = 0; k < 16; k++) {
+        const ang = (k / 16) * Math.PI * 2;
+        const x = p.x + Math.cos(ang) * r, z = p.z + Math.sin(ang) * r;
+        if (area && Math.hypot(x - area[0], z - area[1]) > area[2]) continue;
+        const h = floorAt(x, p.y, z, 0.6, 1.0);
+        if (h === null || Math.abs(h - p.y) > 0.6 || !free(x, h, z)) continue;
+        if (g.some((a) => lineFrom(a, x, h + 1.3, z) || lineFrom(a, x, h + 1.7, z))) continue;
+        if (!walkable([p.x, p.y, p.z], [x, h, z])) continue;
+        if (r < bd) (bd = r), (best = [x, h, z]);
+      }
+      if (best) break;
+    }
+    return best;
   }
   // Is an actor (level uid) drawn on screen now: shown, not culled, its body (the centre of its
   // skeleton, which follows clips that carry the body away from the origin) inside the view?
@@ -797,6 +930,6 @@
     const front = c.clone().applyMatrix4(cam.matrixWorldInverse).z < 0;
     return { built: true, inScene: o === __view.scene, shown, baked, lit: +lit.toFixed(3), onScreen: front && Math.abs(ndc.x) <= 1 && Math.abs(ndc.y) <= 1, prompt: __world.pickTarget()?.w?.uid === uid };
   }
-  window.__pt = { lineTo, lineStand, isCompanion, canShoot, allyDmg, allyInFront, watchScene, sceneWatch, itemView, onScreen, trace, attack, world: w0, frames, seen, played, checkpoints, track, metrics, sanity, msgs: (n = 30) => seen.slice(-n).map((x) => x.join(' ')).join('; '), blockingDoor, openableDoors, withDoorsOpen, reach, dmg, engage, standFor, center, useAim, plan, go, ap, aimAt, state, hostiles, floorAt, free, walkable };
+  window.__pt = { inFire, edgeAhead, gunmen, exposed, coverSpot, evadeKeys, infMode, lineTo, lineStand, isCompanion, canShoot, allyDmg, allyInFront, watchScene, sceneWatch, itemView, onScreen, trace, attack, world: w0, frames, seen, played, checkpoints, track, metrics, sanity, msgs: (n = 30) => seen.slice(-n).map((x) => x.join(' ')).join('; '), blockingDoor, openableDoors, withDoorsOpen, reach, dmg, engage, standFor, center, useAim, plan, go, ap, aimAt, state, hostiles, floorAt, free, walkable };
   return true;
 })();

@@ -2208,9 +2208,11 @@ means the meaning was read off the retail values and the port's behaviour, not o
 
 Port: props are taken out of the static merge (`PROP_CLASSES` in `dynamic.ts`), get health,
 take `services.damage`, spawn their p18 generator, fire p21, and are hidden; the broken remains
-are new props (they can be broken again). Debris pieces are simulated about their own centre
-with gravity, bounce and a shrink-away at the end of the BouncingObject lifetime (p1..p2 ms
-[inferred]). Broken / damaged state is saved by the `props` save provider.
+are new props (they can be broken again). Debris pieces are BouncingObjects and fly the decoded
+launch (§14.2 "Debris"); there is no shrink-away. Broken / damaged state is saved by the `props`
+save provider.
+- p19 (face away from the attacker) is set by no retail Breakable template, so every break's
+  generator gets the Breakable's own matrix and its debris flies along that matrix [data].
 
 ### 14.2 Effects
 
@@ -2362,8 +2364,15 @@ with gravity, bounce and a shrink-away at the end of the BouncingObject lifetime
       so the first directional entry is the base light of the smallest region holding the
       point.
   - [inferred]: particles are drawn upright unless p49 spins them (drip textures hang down).
-    They stop on the floor below the emitter (particle collision is not decoded). The
-    p33 -> p34 colour of unlit particles runs over the lifetime.
+    The p33 -> p34 colour of unlit particles runs over the lifetime.
+  - **No ground test** [verified]: neither the emitter think (0x1011ab10) nor the engine's
+    particle update (SUFFERING.EXE 0x4ac1e0, called from 0x4ad1cb and 0x4ae85f) queries
+    collision. A particle moves by its velocity and gravity until its lifetime ends (the update
+    returns 1 and the loop frees it), so one that falls through a floor is hidden by the depth
+    test. The port used to stop every particle at the first surface straight below the emitter,
+    sampled once: 1a's wall-box sparks (Breakable 5d69, 9:2697) lay in mid-air on the box's own
+    collision box, 1.26 m above the floor (user report). It happened before the collision-tree
+    change as well.
   - Checked in headless Brave, spawned in the 1a cell with before/after strips: the 4:1162
     sparks, the 3:1468 door sparks, the 4:1146 metal impact, the 3:1524 sparks, gun blood
     4:1109 + 4:1125, shiv blood 4:1142 and 3:4658.
@@ -2382,6 +2391,9 @@ with gravity, bounce and a shrink-away at the end of the BouncingObject lifetime
   - **Launch** [verified: 0x100cf8b0].
     - The velocity is -(object matrix row +0x34, the local Z axis) x p1 units/s, or
       p1 + (p2 - p1) x strength when the launch carries a strength (never for a generator).
+    - The speed is p1, or (p2 - p1) + p1 = p2 when the launch gets a projectile record (type
+      2), which every generator spawn passes (0x100b5be1 -> 0x100282e0) [verified,
+      0x100cfa21..0x100cfa40: no strength or random factor is read]. The cap has p1 = p2.
     - Gravity is the world's x (p46 + uniform(-p47, p47)) % (0x100cfb81..0x100cfbd3).
     - The lifetime is p12 s.
     - The cap: 9.77 m/s, falling at 0.75 x 10.41 m/s² ± 5 %, for 25 s.
@@ -2490,7 +2502,50 @@ with gravity, bounce and a shrink-away at the end of the BouncingObject lifetime
     whose entries include 12:773 (p21 0.65: two or three Fires) and the endless 12:775 (p7 1 ±
     0.3, p28 50: one 12:768 burst a second). The port read p28 as a run time and ran every
     spawned generator for good: 6,000 .. 12,700 Fires and 10 .. 13 fps after the five breaks.
-  - p13 / p14 debris speed and spread, p20 debris cone [inferred].
+  - **What a spawn gets: p9..p20** (0x100b52a0) [verified unless marked]. Port:
+    `world/fx.ts generatorSpawn`, used for every spawn of `spawnList`.
+    - Velocity V: with p16 = 0, -Z x p9 m/s, turned by p11 deg about world up, p10 deg about the
+      local X axis and p12 deg about the local Z axis (right-handed: 0x1000f910 / 0x1000c5b0),
+      then V.y += (0.5 + rand) x p14 and V.x, V.z += uniform(-p13, p13). With p16 != 0 a cone:
+      -Z turned uniform(p15, p16) deg about local Y, then uniform(0, 2 pi) about local Z, and
+      p17 > 0 moves the spawn point p17 units back against it; V = that x p9.
+    - Matrix: the generator's own; p20 != 0 turns it about its own axis p19 (0 X, 1 Y, 2 Z) by
+      uniform(-p20, p20), which the code uses as radians (no degree conversion: the retail 180
+      / 45 are a random turn); p18 with V != 0 replaces the rotation by one facing V: local -Z
+      along V, Y from world up (0x1000d070) [roll inferred].
+    - Inherited velocity (the caller's argument) is added after p18: the generator's +0x2c and
+      +0x38 vectors, filled only from a parent generator's record (0x100b51de); zero for every
+      generator a level, a Breakable or a weapon makes.
+    - Only an Item (class 0x5a410dde) takes V (0x100b5a32 -> 0x10037b60). A BouncingObject or
+      Missile gets the matrix and a projectile record (0x100b5be1) and flies its own launch along
+      the matrix's -Z at p2; a Particle Fountain or nested generator gets the matrix. So debris
+      direction comes from p18 / p20 only. The port's old cone (p13 x 2.2 m/s, p20 as a cone,
+      tilted towards the attacker) was not original.
+- **Debris** (BouncingObject from a generator: break pieces, gibs, the cap, casings) [verified
+  unless marked]. Port: `world/fx.ts spawnDebris / updateDebris`, `weapons/system.ts
+  ejectCasing`.
+  - Launch as above: -local Z of the spawn matrix at p2 (break debris 3000 / 5000: 2.44 m/s;
+    the corpse gibs 3:3521 -500 / -2000: backwards along +Z at 0.98 m/s), p46 / p47 gravity,
+    p12 s of life, spin p3 / p4 / p5 deg/s about x / y / z capped at p6 (0x100cfc0a, 0x100cc400)
+    [strong; the axes' frame inferred]. The port read p1..p2 as a lifetime in ms: gibs with
+    negative values vanished at once (the dismemberment pass patched them with p12).
+  - The swept point is the object's position, or with **p25 = 1** its vt+0x64 point (the current
+    position getter 0x100cc1f0, the launch 0x100cf95c, the detonation 0x100d10b2) [strong: the
+    bounds centre; the 66 retail objects with p25 = 1 are pieces modelled metres from their
+    origin, the crate piece 3:4439 4.0..5.2 m up; with p25 = 0 they sit on it]. Pieces turn
+    about that point.
+  - Bounce and settle as the cap (front-face sweep grown by the bounds radius, mirror x (1 - p51
+    %) x (1 - surface p4 %)); every hit counts, at p49 it settles (p50 any surface, else a
+    floor) and goes p54 s later; at the end of its life its p34 generators spawn and it is
+    removed (no shrink).
+  - A piece whose origin starts on the floor bounces every frame and keeps (1 - p51 %) of its
+    whole speed each time, so it stops within a few frames: 1a's chairs (7:2032, p51 50, origin
+    at the floor) fall apart in place, their pieces turned by the generator's p20 = 180. Not
+    compared with the original's frames yet.
+  - Casings: the Ranged Weapon spawns its casing generator (p86) at the bone p88's world matrix
+    (0x10127a54..0x10127af9); 4:71 / 4:88 / 4:259 turn nothing, so the casing leaves the bone's
+    -Z at 2.44 m/s with 50 +- 10 % gravity [the bone frame as the port's bone matrix: inferred].
+    The thrown-object bounce also takes the surface's p4 now.
 - **Volumetric Fog** [inferred]: the template's unit cube × instance scale filled with additive
   puffs of texture p0 tinted p1 (p2 density, p11 opacity, p12 puff size, p8 drift), p13 on at
   start; inputs p15 On, p16 Off, p17 Destroy. Most are light shafts under skylights.
@@ -3233,7 +3288,8 @@ record is the model's collision model:
   the level has the player shoot, carries template bit 10.
 
 **Port** (`src/formats/model-collision.ts`, `src/game/world/object-collision.ts`):
-- `parseLevel` with `collisionOf` builds `LevelData.collision`: the floor layers as drawn, and
+- `parseLevel` with `collisionOf` builds `LevelData.collision`: the floor layers (drawn, and the
+  hidden ones below), and
   each placed object of a colliding class as its tree (boxes, listed faces, spheres as an
   80-face polyhedron around the sphere) at its placement and scale. Ray-only geometry (a sphere
   tree without nodes: the drawn faces) has `COLLISION_LAYER.decor`, player-only classes
@@ -3263,6 +3319,57 @@ record is the model's collision model:
   on is the creek's water surface: a Static Object placed at the origin (models 7:545..7:555,
   texture 7:396, alpha blend, the same sheet as 9's sea 7:590) whose collision tree is a sphere
   tree without nodes. Movers pass it in the original as well; rays hit it.
+- **Floors under node-less room models: the hidden floor layers** [verified unless marked]. 5b's
+  lobby, landing, upper floor and attic are drawn by Static Objects whose trees are sphere trees
+  without nodes (28:285, 28:278 the glass, 28:160, 28:236, 28:219, 28:298, 28:309) or box trees
+  that list only walls and a ceiling (the corridor pieces 28:246: six leaf boxes, no floor). Their
+  floors are floor layers (.lvl type 0x01) that are not drawn: 65 of 5b's 90 layers have no
+  material, lie at the drawn floor heights (97.66, 103.16, 108.66; one is named "collision") and
+  carry 0x30 on every cell. Re-reading the mover path did not change the table above: the narrow
+  phase 0x428b30 stands a node-less tree in for one node (the bounding sphere, or for a box tree
+  the model box, 0x428d90 / 0x428ed8), and 0x41c340 then releases a node-less sphere tree with no
+  contact (0x41c53f); the box fallback 0x41ef2a -> 0x41e090 (the object's box) is only for a model
+  not yet loaded. So these objects are drawn only, and the floor-layer cells hold movers up.
+  - Cell word (the first u16 of each 22-byte cell record, copied by the loader 0x4a0500):
+    bit 0x1 the diagonal (0x49db80: clear, the split runs (1, 0)-(0, 1) and triangle 0 is
+    fx + fz <= 1; set, (0, 0)-(1, 1) and triangle 0 is fx <= fz); 0x40 << t triangle t is a hole,
+    skipped by the Landscape lookups (the ray 0x4a6c03, the characters' probe Suffering.rfl
+    0x100c01cd); 0x10 << t triangle t is not drawn [strong: the loader ORs 0x30 into a cell whose
+    texture ref does not resolve, 0x4a05df]. Hidden is not a hole.
+  - Port (`level.ts LAYER_CELL`, `hiddenLayerCollision`): every floor-layer triangle that is not
+    drawn and not a hole goes into `LevelData.collision` as collision only (`LevelExtras.layerCollision`,
+    `solid | landscape` from the loader). Drawn cells collide as drawn, now split along their own
+    diagonal (before, always (1, 0)-(0, 1)). The data agree: of the 83 382 retail cells whose
+    corners are more than 0.3 m out of plane, the flag's diagonal joins the corner pair with the
+    closer heights in 95.5 % (the editor's short diagonal); the old fixed split drew the long one
+    on about half of them, up to 5.3 m off at the cell centre (10's cliffs). Before e170605 the drawn room floors collided and hid
+    the gap; with the trees the player stood 1 m under 5b's lobby on the basement's ceiling boxes.
+  - Census of the 18 levels (node-less trees of colliding classes with at least 1 m2 of drawn
+    floor or 2 m2 of wall; scratch census, not in the repo): the floors that matter are 5b's
+    room models (the glass 14b0 4 % -> 100 % of its drawn floor held, 288a 24 % -> 100 %, 1b43
+    7 % -> 95 %; the others were already over boxes). Every Move Node, Waypoint and spawn of
+    every level keeps its ground; 5b's lobby nodes (51) gain ground and its upper-floor nodes
+    (25) rise from the boxes 0.9 m under them to the drawn floor; 6a's Waypoints 1c7e / 2344 /
+    2345 and 7's Move Nodes 892 / 138e stand on hidden layers with nothing drawn under them; 8b's
+    Waypoint 1956 rises to its drawn floor. The rest pass movers in the original too: water and
+    light sheets at the origin (blend 1 / 2), 10's dock buildings 34:36 / 34:37 and the Prelude's
+    34:51 (off the walkable area), 2's 20:35, 5b's 28:74, the cut-out bushes 23:133 / 29:751 [inferred
+    for the last ones: no node stands on them].
+  - Open: a hidden cell's footstep surface (the cell record's texture ref, +2) is not read; the
+    port's hidden floors have no material.
+- **Copied .ldu refs (5b's upper corridor)** [verified loader, inferred rule]. The .ldu record
+  loader (SUFFERING.EXE 0x487610, type-9 resource) reads the record's model ref and drops it: only
+  the colours are kept, so the record does not choose an instance's model. The port took the
+  record's model. In 5b 48 instances (uids 31xx / 32xx, the theatre door 12ac, the Breakables
+  31eb..31ee) carry a ref copied from another instance whose model the record names; the
+  Breakables 31ed / 31ee (template model 7:251, a plank) were built as the 20 m gallery pieces
+  28:373 / 28:387 of fde / 1155, offset 20 m, and their single leaf boxes closed the upper
+  corridor west of door 2ad8 at x < 184. Port (`level.ts staleLduRefs`, used by the static
+  geometry and dynamic.ts): a record shared by several instances that names one of their template
+  models belongs to that one; the others use their template's model without its colours. No other
+  level has such shared records. The other instances whose record names another model than their
+  template (about 150 in all levels) still take the record's model: which one the engine draws
+  was not traced.
 - Tests: `tests/object-collision.test.ts`.
 
 ## 15. NPCs, creatures and their behaviours (chapter 1)
@@ -3447,6 +3554,33 @@ behaviour unless a Behavior Changer gave it one.
 
 - Gameplay clips carry the clip's hips offset like scripted ones (§7; seated / crouched /
   hanging poses).
+- **Where a point lies on the graph** [verified, Suffering.rfl; `nav.ts locatesOn`]. The nav code
+  keeps edges, not nodes: each edge's area is its two nodes' squares (half the node's size less
+  the walker's radius, turned by the node's yaw, 0x100d3da0) and the strip between them
+  (0x100d5400 / 0x100d6040) [sizes inferred]. The global search (0x100d87e0) walks the grid cells
+  around the point and returns the first edge that passes the walker's filter (0x100d8780 ->
+  0x100d5c30: usable, the walker's surface, wide enough, its passage kind and its NPC Exclusion
+  Types, 0x100dbf30) and holds the point; the incremental search (0x100d8bd0) and the A*'s goal
+  lookup (0x1011e436, with no walker: type 31, so an edge kept to listed types fails there too)
+  filter the same way. An edge's types come from its nodes at load (0x100dac90..0x100dadbd): both
+  "only" -> the types both list, "only"; one "only" -> its types less the other's excluded ones,
+  "only"; neither -> excluded when either node excludes. So a goal beside a room kept to another
+  type lands on the walker's own edge: 8b's Waypoint 1ea5 (Jimmy's last walk, WaypointBehavior
+  189f) lies 0.4 m from the walkway's node 207f and 1.5 m from 254a of Hermes' room (10:682 only,
+  type 0). Port: `NavGraph.nearest` with the walker's type skips the nodes barred to it, and a
+  path's goal takes the node whose area holds it (its radius across, 1.5 m up or down [inferred])
+  before any sight line is asked (207f / 1e7f lie 1 m under the doorway's floor, where no sight
+  line reached them). Before, the goal went to 254a, no path led there, the walk ended at the
+  ladder and the room's scene for a missing Jimmy ("Camera" 1ed5) played; now Detector 26b5 sees
+  him on the walkway and his "Camera" 1eb1 plays (session, 2026-10-23).
+- **Straight walks keep to the ground** [port; `nav.ts groundAlong`]. The original walks a MoveTo
+  along the graph's edge areas; the port's shortcuts off it (a straight walk on a clear line, a
+  skip to a later path node, the walk to the start node) also need ground under the body's
+  width every 0.6 m: no more than 1.5 m under the line and no steeper than 60 degrees. 9's guard
+  bc9 walked from the north rim of the inlet south of the lighthouse towards the gate (Waypoint
+  c63) along a line that skimmed the rim, slid down it and lay on the shore 28 m down, where no
+  Move Node is (runs t9b / d9; in a session from (324, 196): fell before, five walks stayed up
+  after).
 - Paths: straight line when clear, else A* over Move Nodes. An Edge Passage door on the next
   edge that is closed: an actor with an OpenDoorBehavior walks up, plays the push clip and
   sends the Switch its p61 activate message; locked doors (unless Switch p63) cut the edge.
@@ -3512,7 +3646,10 @@ behaviour unless a Behavior Changer gave it one.
   tested against what the collision query returns, characters and the player by the leaf spheres
   of their skeleton sphere tree (0x100caff0 / 0x100c9de0); the wielder and what rides on it are
   left out (0x100c9ca0) and there is no team test, so a blade hurts any character it passes
-  through, each once per Arm. A blocked ray from the wielder (its x / z at the contact's height) to
+  through, each once per Arm. The struck leaf (the damage record's +0x20, which the Part Cap test
+  reads) is the first leaf in node index order whose posed sphere meets either of the swept quad's
+  two triangles (0x100c9de0 -> 0x100c9680; node i at tree +0xbc + 24 i, leaves only) [verified];
+  the port had taken the deepest overlap and then the leaf nearest the blade's point. A blocked ray from the wielder (its x / z at the contact's height) to
   the contact cancels the blow (0x100c9490). Damage (0x100ca920): Melee Weapon p68, x the Attack's
   p6 when the victim is the weapon's target handle (+0x100; the attack's target [inferred]) or the
   handle is empty, type p70. The character damage code
@@ -3529,7 +3666,13 @@ behaviour unless a Behavior Changer gave it one.
   stack of spheres up its capsule [port]; a swing is animated every frame even off screen (the
   AI LOD would skip the 0.08 s windows). Before, the blow landed at the clip's first Arm time on the
   target alone when the bodies overlapped in height within 1.4 m [guess, removed], for p18 / 4
-  damage [guess; still the damage of attacks without Arm events]. The CartWheeler's ceiling slash
+  damage [guess, removed]. Attacks the port takes from a class's own attack behaviours' clips
+  (no MeleeAttackBehavior: Mainliner, Nooseman, Horace, Hermes, people templates without p87) also
+  hurt only through an armed Melee Weapon now (`clipmap.ts`); before, each landed a guessed 10 at
+  45 % of its clip with no damage type, which the Part Caps' type rule (§15.16) could not refuse:
+  in run d2a 2's Dallas bled out from a chest cut (Part Cap 10:863, p13 1 with bullets, blades,
+  fire and shivs listed, so none of them cuts it) after such a "blow" of Mainliner a60. Test
+  `tests/creature-attacks.test.ts`. The CartWheeler's ceiling slash
   (specials/cartwheeler.ts) still uses its reach test. Ranged [data]: a ProjectileAttackBehavior
   (p88; Attack p0 firing / throwing clip, p4 aim pose, p23 shots with p21..p22 s between them,
   §15.11; port: p19..p20 s between attacks) plus something to fire in
@@ -3796,6 +3939,30 @@ Struggle input: `PlayerController.attackOverride` takes Fire / Throw / Use while
 the player (weapons/system.ts, world.ts), `specials/hold.ts` counts them and Jump; the port had
 counted movement and crouch presses instead (the Nooseman's grip uses the same count).
 
+**Thrown needles** [verified unless marked; `actors/missile.ts`, `actor.ts updateMissiles`]. The
+needle is Missile 10:1814 in Character p55. Its Attack 10:210 throws clip 10:242, whose one shot
+marker is ThrowWeapon (230) at 0.278 s (no Fire), so it leaves through ProjectileAttack's case 230
+(0x100fd026) like the molotov, not through a Ranged Weapon: no Ranged Weapon p75 x Attack p19
+spread (the aim call gets a spread of 0, 0x100fd165), no lead.
+- Aim point: ProjectileAttack keeps one (+0x64), cleared at its start (0x100fee3e), taken at the
+  Fire state's entry while unset (0x100fcc31), and taken again at the marker only when the
+  behaviour's own p5 is 0 (0x100fd069 -> 0x10097b80, the ProjectileAttackBehavior template).
+  10:209 has p5 = 1 (18 of 20 retail behaviours do): the needle goes where the player was when
+  the throw clip started.
+- Launch: p0 = 1, the ballistic aim (`throw.ts`) with p1 45000 units/s (21.97 m/s), p46 20 % of
+  the world's gravity (2.08 m/s²), reach p9 20 m, fallback p10 45 deg; released (0x100ce190), it
+  flies p12 = 5 s.
+- Contact: the sweep vt+0x5c (shared with BouncingObject): world front faces grown by its bounds
+  radius (0.20 m); bodies by their posed leaf hit spheres grown by the same radius (the skinned
+  path 0x419b20 is not traced) [inferred for bodies]. Any contact sets it off (touch vt+0x24
+  0x100cc120 -> vt+0x4c); the impact (vt+0x54 0x100d1450) deals p26 = 10 of type p32 = 1 to a
+  body and p34 (3:3199) spawns there. The thrower's own body is skipped [port].
+- The port before: a hit chance of 0.9 - 0.02 x distance (at least 0.25), then damage on
+  arrival if the player was within 0.9 m of where he had been.
+- Checked in level 2's cell block (`2.clones`, 18 throws): the needles land on the kept aim
+  point; 5 of 18 hit the player in the first run, the rest met the walkway, bars or stairs or
+  missed a player the harness had moved.
+
 #### 15.7.5 The Slayer: ceilings, transitions and the leap (cartwheeler.ts)
 
 The blade-armed "Slayer" is engine class CartWheeler (vtable 0x10152f88, ctor 0x10071dd0). Code:
@@ -4001,6 +4168,50 @@ character (no class test in 0x1007a550..0x1007afd0) [verified]: ignition range, 
 attack choice and the fireball aim. The bursts' Radius Damage hurts every character in reach as
 well as the player (the class rule, §8 throwables) [verified]; the Inferna itself is left out
 [inferred]. Before, the port aimed at and burnt only the player.
+
+**How it moves** [verified unless marked; behaviour factory 0x10107e00 ids: 1 MoveTo, 0x66
+InfernaKillObject, 0x67 InfernaFlamingKill, 0x69 InfernaCircleTarget, 0x6a its steering, 0x6b
+InfernaFlameAttack, 0x30 ProjectileAttack; tests `tests/inferna-move.test.ts`].
+- *Chase.* The KillObject's start (0x1007a550) pushes a MoveTo to its target with the arrival
+  distance p3 x 2048 (8 m; MoveTo request +0x1c, 0x100712f0): a walk on the Move Node graph like
+  any MoveTo (§15.5), lit or not; its update ignites the body at p2 (0x1007a620). The MoveTo's
+  success (child end 0x10079bd0) starts the FlamingKill (p5 radius, p4 limit); the FlamingKill's
+  success starts the MoveTo again while the target lives.
+- *Circling.* The FlamingKill's circle (0x10079e50 -> InfernaCircleTarget 0x1007a120) is
+  steering only: it pushes InfernaCircleTargetSteering (weight p2 = 1, movement mode 3) and
+  MovementAnim; the CharacterAvoidance / ObstacleAvoidance / SeparationSteer / WanderSteer /
+  SpotlightAvoidance children (p3 / p4 / p5 / p6 / p7) are pushed only when their weight is above
+  0, and 10:845 has them all 0. The wish (0x100796d0): n the unit vector to the target on the
+  ground plane, the tangent (n.z, -n.x) or (-n.z, n.x) by a 50 / 50 flag drawn at each start
+  (0x1007afd0), k = 1 - d / R inside the radius and R / d - 1 outside it, wish = tangent x
+  (1 - |k|) - n x k, at the circle clip's speed; the force (wish - velocity, 0x1007b300) goes to
+  the body's steering combiner (+0x60 +0x90, 0x100dd220), whose result (0x100de400) is the
+  body's velocity for the physics (0x100ddef0). Nothing on that way asks the graph or the ground
+  (ConstrainSteer, the only steering that would, is pushed by Scurry alone, 0x1010c1e4). So the
+  circle can leave the graph's areas: a target standing at a drop puts half the circle over it,
+  and the body falls where its follower finds no ground within p48 (1 m, §14.9) [strong: from the
+  decoded parts; not seen in the original]. The circle ends
+  when the target is more than p4 away on the ground plane (0x10079660).
+- *Stuck* (0x1007b0f0): over 0.15 s windows the steering keeps a circle round the body's ground
+  positions; a window whose circle is under 0.015 x the steering speed (a tenth of the window's
+  travel) reverses the direction; a second one running gives the steering up, and the body
+  stands in the circle until the next decision [inferred: the circle's child-end handler
+  0x10101530 does nothing]; a free window clears it.
+- *Decision* (0x1007aa00, on the p4..p5 timer while the circle runs; every circle start draws it
+  again): the 3D distance in the flame band gives a flame burst, in the fireball band a fireball;
+  no sight test there. In neither, p10 % picks the fireball band (else the flame band), a distance
+  is drawn from it and a MoveTo to the target follows: nearer than now it is the arrival distance,
+  farther the least distance (request +0x20). Its success (0x1007acb0) with the target in sight
+  (0x101263f0) gives the attack of the band drawn, without sight or on a failure the circle; an
+  attack's end gives the circle.
+- Port (`specials/inferna.ts`): the MoveTos are walked by the generic graph steering
+  (`Actor.specialWalk`: path, doors, ladders, ground-checked shortcuts, §15.5); a least-distance
+  goal is the point that far out on the line from the target, or the graph node there when the
+  line to it has no ground [inferred]; a MoveTo that gets nowhere for 4 s fails [port]. Before,
+  the port circled from 11 m, left the chase to the generic combat (which threw fireballs from
+  range and kept 14 m off), walked the reposition straight for 4 s and reversed on a stuck frame.
+  In a session at the inlet's north rim of 9 (player at (333, 112.8, 206.5)), bd4 / bd5 circled
+  over the rim to the shore 28 m down; by the decode above the original's circle does so too.
 
 #### 15.7.7 Horace (horace.ts)
 
@@ -5116,8 +5327,15 @@ the knockdown bleed-out), `player-body.ts` (killer death clips); tests `tests/di
   that have not fired go (p28 output, p29 message: flags +0x70 0x800 / 0x1000), then output p30,
   and the body is removed. 41 Character templates set p117 (the earlier note "no chapter-1 NPC
   sets it" was wrong).
-- **Port** [inferred unless marked]: the hit point picks the nearest posed leaf hit sphere not on
-  a cut bone; a bone's channel is itself or the nearest ancestor in the channel table. The
+- **Port** [inferred unless marked]: an NPC blade's blow carries the leaf it struck (the first in
+  node index order that its sweep meets [verified], §15.5), a thrown missile's the leaf it met
+  first; other blows pick the nearest posed leaf hit sphere to their point that is not on a cut
+  bone. Companions' Part Caps (10:862 on Dallas, Clem, Jimmy, the 1c inmate) [data, checked
+  again]: bone 48 (the rig's only head sphere: model 10:50 has no leaf on bone 49), p6 3.9, p7..p9
+  40..70 % at 15, p10 100, p11 100, p13 1 with p14 empty (every damage type cuts), p15 empty
+  (every attacker); nothing sets the cut gate's flags on them. In node order the pelvis, chest,
+  forearms and hands come before the head, so a blade passing the head and the body strikes the
+  body. A bone's channel is itself or the nearest ancestor in the channel table. The
   engine's draw batches are not decoded (they are not the file's material runs), so the port
   gives every triangle a segment (each corner's heaviest bone, up the tree to the nearest bit
   channel; the corners' majority) and drops the cut segments' triangles from the actor's own
@@ -5149,6 +5367,45 @@ the knockdown bleed-out), `player-body.ts` (killer death clips); tests `tests/di
   stump, blood spurt, head chunks, dead from the bleed (500 / s) within a frame; corpse 7b36 struck by a
   claw blow (35, type 8) is cut at the waist (cap 10:860, torso chunks fly) and the corpse rule
   pays −2.
+
+### 15.17 Port option: enemies ignore the player (not in the original)
+
+**What the original has** [verified]: the cheats are one object, Game Cheats (class 0x2b195280,
+template 2:935). Its p0..p24 are the 25 typed cheat phrases (string refs), p25..p32 sound lists and
+p33..p36 sounds. The dispatcher (Suffering.rfl `0x100013c0`, a 25-entry jump table at
+`0x1000187c`) acts on the Player only: reputation -50 / +50 (`0x10041460`) or set to p70 / p71,
+blood full (`0x1002b2d0`) and blood clear, health, suicide (a 100000 blow), weapons and items
+(`0x100421c0` with 0..8), ammo for the weapon in hand (`0x10037f20`), grenades refilled to 8
+(`0x1003a3a0`), two more Player state changes (`0x10042100`, `0x10033270`; insanity by their
+cheat names [inferred]), one entry that runs five others, and two screen-effect toggles (Game
+Cheats +0xd4 / +0xdc). None of them touches a creature, the KillEnemies candidate test or the
+noise list, and neither executable has a debug variable for it (no "notarget"-like strings). So
+there is nothing to mirror: the option is the port's own and is labelled so in the menu.
+
+**What it does** (`src/game/port-options.ts`, `ActorEnv.ignorePlayer`, set every frame by
+`actors/system.ts`):
+
+- Target choice (§15.15): the player is never a candidate; a player target counts as gone, so a
+  creature on him drops him at its next perception tick (0.15..0.25 s) and picks again (a
+  companion, an inmate, another team). A grudge on him is forgotten; his hits give none and no
+  last-seen point.
+- Hearing (§15.9): noises with the player as source (steps, shots, impacts) are skipped.
+- Specials: `fightTarget` returns nothing for a player target, so no CartWheeler leap or ceiling
+  attack, Mainliner leap, rat leap, Fester charge, Burrower or Inferna attack starts on him.
+  `PlayerHold.start` refuses (no Nooseman grab, no Mainliner ride); a Nooseman never drops for him;
+  a ride, a strangle or a rat's chew under way lets go when the option comes on. An Inferna that
+  loses its target mid-attack aims 5 m ahead of itself (`noTargetAim`), not at him. Horace fires no
+  volley and his shots miss; the Black One chooses no attack.
+- Unchanged: Detectors, Relays, sequences and every other piece of level logic; companions and
+  creatures fight each other as usual; incidental damage still lands on him (a blade swept
+  through him, a leap or charge aimed at someone else that touches him, Radius Damage blasts,
+  gas, fire, traps). Level logic that waits for a creature to see him (the ISeeYou output p31,
+  e.g. 8b's Hermes copies) does not fire while it is on.
+- Menu: "Enemies Ignore Player" Off / On on both Gameplay pages (front end and pause menu), saved
+  in the settings (`extra.ignorePlayer`), with a help line saying it is a port option and that
+  stray damage still applies. The HUD shows "ENEMIES IGNORE PLAYER (port option)" at the top
+  while it is on. `?ignorePlayer=1` / `=0` overrides the saved value for a page load;
+  `tools/playthrough.mjs --ignore-player` passes it (testing only).
 
 ## 16. Materials and surface rendering [verified unless marked]
 

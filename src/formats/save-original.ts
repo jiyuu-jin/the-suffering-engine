@@ -442,6 +442,61 @@ export function originalSettingsToPort(s: OriginalSettings): PortSettingsFromOri
   };
 }
 
+/**
+ * Export: the port's settings written over an original profile `base` (the player's imported
+ * Unspeakable.cfg, else defaults with the RFL's default bindings). The fields the port has no
+ * equivalent of (speaker setup, flags 0x40 / 0x80, +0x04..+0x0c, the bindings) keep `base`'s
+ * values; Archive pages and the "finished" flag are the union of both.
+ */
+export function portSettingsToOriginal(p: PortSettingsFromOriginal, base: OriginalSettings): OriginalSettings {
+  const clamp = (v: number, a: number, b: number) => (Number.isFinite(v) ? Math.min(b, Math.max(a, v)) : 1);
+  const bit = (flags: number, f: number, on: boolean) => (on ? flags | f : flags & ~f);
+  let flags = base.flags;
+  flags = bit(flags, SettingsFlag.Subtitles, p.subtitles);
+  flags = bit(flags, SettingsFlag.HelpText, p.extra.helpText);
+  flags = bit(flags, SettingsFlag.InvertPitch, p.invertY);
+  flags = bit(flags, SettingsFlag.Vibration, p.extra.vibration);
+  flags = bit(flags, SettingsFlag.EnvironmentFx, p.extra.environmentFx === 0);
+  if (p.gameFinished) flags |= SettingsFlag.GameFinished;
+  // "Read successfully" is the reader's to set (0x100079b4), not the file's.
+  flags &= ~SettingsFlag.Loaded;
+  const archives: [number, number] = [base.archives[0] | 1, base.archives[1] | 1];
+  for (const [set, page] of p.archivePages) if ((set === 0 || set === 1) && page >= 0 && page < 32) archives[set] = (archives[set] | (1 << page)) >>> 0;
+  return {
+    ...base,
+    effectsVolume: clamp(p.sfx, 0, 1),
+    dialogVolume: clamp(p.voice, 0, 1),
+    musicVolume: clamp(p.music, 0, 1),
+    turnSensitivity: clamp(p.mouseSensitivity, 0.25, 4),
+    pitchSensitivity: clamp(p.pitchSensitivity, 0.25, 4),
+    checkpoints: p.extra.checkpoints >= 0 && p.extra.checkpoints <= 2 ? p.extra.checkpoints : 2,
+    archives,
+    flags,
+    bindings: base.bindings.map((b) => ({ ...b })),
+    valid: true,
+  };
+}
+
+/** VA of the RFL's default control table (records as KeyBinding, ended by action 0xFFFFFFFF). */
+export const RFL_DEFAULT_BINDINGS = 0x10167520;
+
+/**
+ * The default bindings from the user's Suffering.rfl (`readPe` / `peOffset` give the file
+ * offset): the table 0x10006c80 walks until the action is -1 [verified]. That routine also adds
+ * controller entries of its own, so a profile written from this table alone has the keyboard /
+ * mouse defaults only [inferred].
+ */
+export function readDefaultBindings(rfl: Uint8Array, offset: number, max = 512): KeyBinding[] {
+  const r = new EngineReader(rfl.subarray(offset));
+  const out: KeyBinding[] = [];
+  while (out.length < max && r.remaining >= 20) {
+    const action = r.u32();
+    if (action === 0xffffffff) break;
+    out.push({ action, device: r.u32(), code: r.u32(), lo: r.f32(), hi: r.f32() });
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // <Level>.rsg
 

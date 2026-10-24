@@ -241,7 +241,8 @@ class Rat implements SpecialMove {
     const rad = Math.max(0.15, a.radius);
     const centre: [number, number, number] = [a.position.x, a.position.y + rad, a.position.z];
     const spheres = env.hitSpheres?.('player') ?? [];
-    if (env.playerAlive && ratTouch(centre, rad, spheres) >= 0) {
+    // (Port option "Enemies ignore the player": a leap that reaches him does not latch on.)
+    if (env.playerAlive && !env.ignorePlayer && ratTouch(centre, rad, spheres) >= 0) {
       this.stats.bites++;
       this.rt.hurtPlayer(this.p.bite, a, env);
       this.rt.log(a, `leap landed on the player: ${this.p.bite}`);
@@ -287,6 +288,13 @@ class Rat implements SpecialMove {
     a.yaw = yawTo(a.position, pp);
     a.state = 'fall'; // airborne: carried by the leap / hanging on the target
     a.sync();
+    if (env.ignorePlayer && env.playerAlive) {
+      // Port option "Enemies ignore the player": it drops off him.
+      this.phase = { kind: 'spent' };
+      a.state = 'idle';
+      a.motor.onGround = false;
+      return true;
+    }
     if (ph.clip < 0 || a.clipDone || !env.playerAlive) {
       // The chew is over: the rat dies (Rat vt+0x128), not by the player's hand.
       this.phase = null;

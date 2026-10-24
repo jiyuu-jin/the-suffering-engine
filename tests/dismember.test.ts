@@ -194,6 +194,20 @@ test('runtime: the arm only below p10 health; no point (a radius blow): no cut',
   assert.equal(parts.hit(a, { amount: 20, point: { x: 0.4, y: 1.3, z: 0 }, byPlayer: true })?.bone, 5);
 });
 
+test('runtime: a blow that carries its struck sphere (a blade\'s first touched leaf) is tested on that sphere\'s bone', () => {
+  const now = { t: 0 };
+  const { parts } = runtime(now);
+  const { a, parents } = body();
+  parts.setup(a, [UPPER, NECK], parents, [0, 2, 5]);
+  a.health = 40;
+  // The point lies by the head sphere, but the blade struck the forearm first: the arm is cut,
+  // the neck stays.
+  assert.equal(parts.hit(a, { amount: 20, point: { x: 0, y: 1.72, z: 0 }, bone: 6, byPlayer: false })?.bone, 5);
+  assert.deepEqual(parts.cutBones(a), [5]);
+  // A struck bone whose node is cut already: back to the point's nearest sphere left.
+  assert.equal(parts.hit(a, { amount: 20, point: { x: 0, y: 1.72, z: 0 }, bone: 6, byPlayer: false })?.bone, 2);
+});
+
 test('runtime: cutting a corpse pays p5 only after p4 s; parts cut at creation (p17, p18 0) bleed but spawn nothing', () => {
   const now = { t: 0 };
   const { parts, rep, spawned } = runtime(now);
@@ -238,6 +252,31 @@ test('runtime: cuts survive a save', () => {
   assert.equal(r.parts.bleeding(b.a), true);
 });
 
+test('retail: companions\' neck cap 10:862 and the hit spheres a blade meets first (model 10:50, Dallas)', { skip }, () => {
+  const pk = loadAllPackages();
+  // 10:862 (Dallas, Clem, Jimmy, the 1c inmate: their p16): bone 48, 500 a second, any blow of
+  // 3.9 at any health, 40..70 % at 15, no damage type and no attacker class kept out.
+  const neck = readPartCapRef(pk, { pkg: 10, id: 862 })!;
+  assert.deepEqual(
+    [neck.bone, neck.bleed, neck.minDamage, neck.chanceMin, neck.fullAt, neck.chanceMax, neck.healthPct, neck.healthWeight, neck.typeMode, neck.types, neck.attackers],
+    [48, 500, 3.9000000953674316, 40, 15, 70, 100, 100, 1, [], []],
+  );
+  for (const type of [1, 2, 5, 10, 11]) assert.equal(capAllows(neck, { amount: 4, type }, 100, 100), true, `type ${type}`);
+  assert.equal(capAllows(neck, { amount: 3.8, type: 2 }, 100, 100), false, 'under p6');
+  assert.equal(cutChance(neck, 7, 100), 40 + 30 * (7 / 15), 'a CartWheeler blade (p68 7)');
+  // The rig's only head sphere rides bone 48 (the neck channel), and in node index order the
+  // pelvis, chest, forearms and hands come before it: a blade passing the head and the body
+  // strikes the body.
+  const mdu = readSrsc('COMMON/NPCs/NPCs.mdu');
+  const leaves = modelHitSpheres(new Map([[10, { mdu }]]) as never, { pkg: 10, id: 50 }, new Map());
+  const order = leaves.map((n) => n.bone);
+  assert.deepEqual(order.filter((b) => b === 48), [48], 'one head sphere');
+  assert.ok(order.indexOf(48) > order.indexOf(3) && order.indexOf(48) > order.indexOf(55), order.join(','));
+  const tr = readSkeletonTrailer(mdu as never, 50)!;
+  const idx = leaves.map((n) => tr.spheres.indexOf(n));
+  assert.deepEqual(idx, [...idx].sort((x, y) => x - y), 'node index order');
+});
+
 test('retail Part Caps: humans lose heads to any blow of 3.9, arms below 60 %, torsos not to bullets', { skip }, () => {
   const pk = loadAllPackages();
   const cap = (id: number) => readPartCapRef(pk, { pkg: 10, id }) as PartCapRule;
@@ -277,6 +316,7 @@ import { readSkeletonTrailer } from '../src/formats/skeleton';
 import { ANIM_EVENT_MESSAGE, readAnimEvents } from '../src/formats/animation';
 import { readSkeleton } from '../src/formats/skeleton';
 import { spreadShotHits, spreadShotPoint } from '../src/game/actors/actor';
+import { modelHitSpheres } from '../src/game/fx/gas-system';
 import { decodeTemplateProps, readObjectTemplate, classByHash } from '../src/formats/entities';
 
 test('node flag 0x10: the cut bone and its subtree; the renderer hides the bit channels among them', () => {

@@ -49,6 +49,7 @@ import type { TierFeatures } from './config';
 import { warmPasses, type WarmPass } from '../prewarm';
 import { VolumetricNode } from './volumetric';
 import { TONE } from './tone';
+import { rcas } from './sharpen';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type N = any;
@@ -87,6 +88,8 @@ export const grade = {
   /** 1: encode sRGB (canvas); 0: linear (the insanity effects' scene target). */
   encode: uniform(1),
   time: uniform(0),
+  /** RCAS strength (sharpen.ts sharpenFor: from the render scale; 0 = unchanged). */
+  sharpen: uniform(0),
 };
 
 const LUMA = vec3(0.2126, 0.7152, 0.0722);
@@ -104,6 +107,11 @@ export class EnhancedPipeline {
   volumetric: VolumetricNode | null = null;
   /** QA: show one buffer instead of the graded frame ('scene', 'ao', 'volumetric', 'hdr'); null = off. */
   debugView: string | null = null;
+  /**
+   * Sharpen the finished frame (sharpen.ts RCAS, strength `grade.sharpen` from the render scale,
+   * src/app/render-scale.ts) before the compositor scales the canvas up. Read by build().
+   */
+  sharpen = false;
   private features: TierFeatures | null = null;
   private disposables: { dispose(): void }[] = [];
 
@@ -205,6 +213,8 @@ export class EnhancedPipeline {
       const lum = dot(c.rgb, LUMA);
       const excess = c.rgb.mul(lum.sub(grade.bloomThreshold).max(0).div(lum.max(1e-4)));
       const b = bloom(vec4(excess, 1), 1, 0.55, 0);
+      // Its internal resolution per tier (of the drawing buffer, itself the render scale's).
+      b.setResolutionScale(f.bloomScale);
       b.strength = grade.bloomStrength;
       this.disposables.push(b);
       c = c.add(b);
@@ -230,6 +240,11 @@ export class EnhancedPipeline {
       out = fx;
     }
     out = run('final', out);
+    if (this.sharpen) {
+      const src: N = convertToTexture(out);
+      this.disposables.push(src);
+      out = rcas(src, grade.sharpen);
+    }
     this.pipeline.outputNode = out;
     this.pipeline.needsUpdate = true;
   }

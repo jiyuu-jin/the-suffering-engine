@@ -166,6 +166,8 @@ interface Persist {
   throwable: string | null;
   /** Flashlight charge 0..1. */
   battery?: number;
+  /** Saves only: the lamp on (the renderer's state). */
+  light?: boolean;
 }
 const persist: Persist = { clips: {}, current: null, last: null, throwable: null, battery: 1 };
 
@@ -1560,8 +1562,9 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     ctx.services,
     'weapons',
     {
-      save: () => ({ clips: { ...persist.clips }, current: persist.current, last: persist.last, throwable: persist.throwable, battery: persist.battery }),
-      load: (d) => {
+      // `light`: the lamp on or off (the renderer's, which outlives the level's systems).
+      save: () => ({ clips: { ...persist.clips }, current: persist.current, last: persist.last, throwable: persist.throwable, battery: persist.battery, light: lamp.visible }),
+      load: (d, info) => {
         // Keys are item templates ("pkg:id"); old saves keyed by display name are mapped where
         // the name belongs to one template only (save/providers.ts migrateItemKey).
         const key = (k: string | null | undefined) => migrateItemKey(k, byName);
@@ -1573,6 +1576,8 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
         persist.last = key(d.last);
         persist.throwable = key(d.throwable);
         persist.battery = typeof d.battery === 'number' ? d.battery : 1;
+        // On a load only: a transition keeps the lamp as the player left the level.
+        if (typeof d.light === 'boolean' && info.reason === 'load') lamp.visible = d.light;
         stowed = null;
         pendingEquip = null;
         equip(key(d.current), { instant: true });
@@ -1588,6 +1593,64 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
       },
     },
     { scope: 'game', priority: 30 },
+  );
+
+  // Thrown objects in flight or burning on the ground (the player's throwables and NPC throws;
+  // spent casings are not kept). The original's BouncingObjects are level objects, saved with
+  // the level (docs/re/saves.md §3.3), so a checkpoint taken while a Molotov flies keeps it
+  // (save matrix, 6b: Clem's throw vanished on the restore).
+  interface ThrownSave {
+    /** The player's throwable (its weapon key), else the BouncingObject template (an NPC's). */
+    k?: string;
+    t: string;
+    p: [number, number, number];
+    v: [number, number, number];
+    f: number;
+    r: boolean;
+    b?: number;
+    a?: number;
+    /** The NPC that threw it. */
+    by?: number;
+  }
+  const r3 = (x: number) => Math.round(x * 1000) / 1000;
+  const offThrownSave = registerSave<ThrownSave[]>(
+    ctx.services,
+    'weapons.thrown',
+    {
+      save: () =>
+        thrown
+          .filter((t) => !t.casing)
+          .map((t) => {
+            const p = t.mesh.position;
+            const by = (t.by as { uid?: number } | undefined)?.uid;
+            return { k: t.def?.key, t: keyOf(t.td.template), p: [r3(p.x), r3(p.y), r3(p.z)] as [number, number, number], v: [r3(t.vel.x), r3(t.vel.y), r3(t.vel.z)] as [number, number, number], f: r3(t.fuse), r: t.rest, b: t.bounces, a: t.age, by };
+          }),
+      load: (list) => {
+        for (let i = thrown.length - 1; i >= 0; i--) {
+          if (thrown[i].casing) continue;
+          thrown[i].mesh.removeFromParent();
+          thrown.splice(i, 1);
+        }
+        for (const r of Array.isArray(list) ? list : []) {
+          const def = r.k ? weaponDef(epk, refOf(r.k)) : undefined;
+          const td = def?.thrown ?? thrownDefOf(epk, refOf(r.t));
+          if (!td) continue;
+          const model = def ? (td.model ?? def.model) : td.model;
+          const mesh: THREE.Object3D = (model && buildStaticModel(pkgs, model)) || new THREE.Mesh(sphere, matDust);
+          mesh.position.set(r.p[0], r.p[1], r.p[2]);
+          fxGroup.add(mesh);
+          if (def && !td.explosion) mesh.add(new THREE.PointLight(0xff3020, 25, 14, 1.5));
+          const by = r.by !== undefined ? (actors()?.list().find((a) => (a as { uid?: number }).uid === r.by) as ActorLike | undefined) : undefined;
+          const t: Thrown = { def, td, mesh, vel: new THREE.Vector3(r.v[0], r.v[1], r.v[2]), fuse: r.f, rest: !!r.r };
+          if (by) t.by = by;
+          if (r.b !== undefined) t.bounces = r.b;
+          if (r.a !== undefined) t.age = r.a;
+          thrown.push(t);
+        }
+      },
+    },
+    // After the actors (the thrower).
+    { scope: 'level', priority: 31 },
   );
 
   // Re-equip the weapon carried in from the previous level once the body exists.
@@ -1660,6 +1723,7 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     },
     dispose() {
       offSave();
+      offThrownSave();
       if (aimAssist.provider === aimProvider) aimAssist.provider = null;
       aimAssist.lock = null;
       document.removeEventListener('mousedown', onDown);

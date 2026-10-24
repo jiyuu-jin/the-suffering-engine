@@ -13,10 +13,12 @@ import { framePass } from './matrix-pass';
 import { context } from 'three/tsl';
 import { BACK_BUFFER_TYPE, EngineFog, GAMMA_BACK_BUFFER, LEGACY_LIGHTING, backBufferOutput, engineFogNode, engineLights } from './engine-light';
 import { frameProbe } from './frame-probe';
+import { uploadDynamicOnChange } from './dynamic-uploads';
 import { NO_GLOW, SceneGlow } from './scene-glow';
 import { warmObjects, warmTargets, warmHooks, warmViewmodelObjects, warmPasses, type WarmPass } from './prewarm';
 import { ENHANCED } from './enhanced/config';
 import type { EnhancedRenderer } from './enhanced';
+import { FramePacer, RenderScaler, type ScaleSetting } from './render-scale';
 
 
 export type BackendName = 'WebGPU' | 'WebGL2';
@@ -53,6 +55,16 @@ class BackBufferColor extends THREE.Color {
 const PRECOMPILE_LANES = 4;
 /** `?gputime`: WebGPU timestamp queries, each frame's GPU time to the frame probe (QA). */
 const GPU_TIME = new URLSearchParams(location.search).has('gputime');
+/**
+ * Frames handed to the GPU and not yet complete at most (render-scale.ts GpuBusy): a display frame
+ * is not drawn while this many are in flight. A GPU-bound frame otherwise queued up to five frames
+ * behind (Enhanced Medium at 3456 x 2234: 160 ms from the frame's task to its completion, all of
+ * it input lag). `?inflight=0` turns the limit off (comparisons).
+ */
+const MAX_IN_FLIGHT = (() => {
+  const v = new URLSearchParams(location.search).get('inflight');
+  return v !== null && Number.isFinite(Number(v)) ? Number(v) : 3;
+})();
 /** `?legacymerge`: no visibility chunks, every level triangle always drawn (profiling baseline). */
 const LEGACY_MERGE = new URLSearchParams(location.search).has('legacymerge');
 
@@ -154,6 +166,14 @@ export class LevelRenderer {
   textureFilter: 'off' | 'bilinear' | 'trilinear' = 'trilinear';
   private levelTextures: THREE.Texture[] = [];
   private lastFrameAt = -1e9;
+  private lastRawAt = -1;
+  /**
+   * Render scale and dynamic resolution (render-scale.ts): the drawing buffer is the internal
+   * resolution, CSS size × min(DPR, 2) × scale. `?scale=` / the Graphics Resolution row.
+   */
+  readonly scaler: RenderScaler;
+  /** Smooth pacing with the frame-rate limit Off on high-refresh displays (render-scale.ts). */
+  readonly pacer = new FramePacer();
   /**
    * Set while a level loads (src/app/main.ts): frame() draws nothing. Drawing the new level
    * behind the loading screen compiled its pipelines synchronously, frame after frame, racing
@@ -181,7 +201,7 @@ export class LevelRenderer {
     // The frame target is the engine's back buffer: 8-bit, holding gamma values (engine-light.ts
     // GAMMA_BACK_BUFFER, docs/re/renderer.md §5.1).
     this.renderer = new THREE.WebGPURenderer({ antialias: true, forceWebGL, trackTimestamp: GPU_TIME, outputBufferType: BACK_BUFFER_TYPE });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.scaler = new RenderScaler(this.renderer);
     // The engine writes gamma-space colours straight to the screen (Direct3D 9 fixed function):
     // no tone mapping. `?lighting=legacy` keeps the previous ACES look.
     this.renderer.toneMapping = LEGACY_LIGHTING ? THREE.ACESFilmicToneMapping : THREE.NoToneMapping;
@@ -248,6 +268,21 @@ export class LevelRenderer {
 
     new ResizeObserver(() => this.resize()).observe(container);
     this.resize();
+    // A display with another pixel ratio (the window moved, the browser zoomed).
+    const watchDpr = () => matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener('change', () => (this.resize(), watchDpr()), { once: true });
+    watchDpr();
+    // Back from a hidden tab: no decisions on the first frames' intervals.
+    document.addEventListener('visibilitychange', () => document.hidden || this.scaler.hold(2000));
+  }
+
+  /** The Graphics Resolution row (render-scale.ts): Auto or a fixed scale. */
+  setRenderScale(s: ScaleSetting) {
+    this.scaler.setSetting(s);
+  }
+
+  /** Internal resolution and scale, e.g. "2000 x 1290 (58 %, auto)" (debug overlay). */
+  renderInfo(): string {
+    return this.scaler.info();
   }
 
   static async create(container: HTMLElement): Promise<LevelRenderer> {
@@ -257,7 +292,10 @@ export class LevelRenderer {
     const enhanced = ENHANCED ? await import('./enhanced') : null;
     const r = new LevelRenderer(container, forceWebGL);
     await r.renderer.init();
+    r.scaler.gpu.device = (r.renderer.backend as { device?: GPUDevice }).device ?? null;
     coalesceNodeBuilds(r.renderer);
+    // CPU-rewritten vertex buffers: written when they change, not on every draw (dynamic-uploads.ts).
+    uploadDynamicOnChange(r.renderer);
     r.backend = (r.renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend ? 'WebGPU' : 'WebGL2';
     r.timer.connect(document);
     if (GAMMA_BACK_BUFFER && !ENHANCED && !NO_GLOW) r.glow = new SceneGlow(r.renderer, r.scene, r.camera);
@@ -299,6 +337,7 @@ export class LevelRenderer {
   private resize() {
     const w = Math.max(1, this.container.clientWidth);
     const h = Math.max(1, this.container.clientHeight);
+    this.scaler.resize(w, h, window.devicePixelRatio);
     this.renderer.setSize(w, h, false);
     const cam = this.camera;
     if (this.lens > 0 && cam.aspect !== w / h) {
@@ -312,26 +351,50 @@ export class LevelRenderer {
   }
 
   private frame(t: number) {
-    if (this.frameCap > 0 && t - this.lastFrameAt < 1000 / this.frameCap - 2) return;
+    const raw = this.lastRawAt < 0 ? 0 : t - this.lastRawAt;
+    this.lastRawAt = t;
+    // The frame-rate limit, or (Off) the pacer's every-other-display-frame on fast displays.
+    const cap = this.frameCap > 0 ? this.frameCap : this.pacer.cap;
+    if (cap > 0 && t - this.lastFrameAt < 1000 / cap - 2) {
+      this.pacer.sample(raw, false, 0, 0, t);
+      return;
+    }
+    // The GPU's backlog (never held for more than 100 ms: a lost completion cannot stop the game).
+    if (MAX_IN_FLIGHT > 0 && !this.suspended && this.scaler.gpu.pending >= MAX_IN_FLIGHT && t - this.lastFrameAt < 100) {
+      this.scaler.dyn.skip();
+      this.pacer.sample(raw, false, 0, 0, t);
+      return;
+    }
+    const interval = t - this.lastFrameAt;
     this.lastFrameAt = t;
     this.timer.update(t);
     const dt = Math.min(this.timer.getDelta(), 0.1) * this.timeScale;
     if (this.suspended) {
       // Loading: nothing is drawn (the loading screen covers the canvas) or moved.
       frameProbe.pause();
+      this.scaler.hold();
       for (const fn of this.frameListeners) fn(dt);
       return;
     }
     const probe = frameProbe;
+    const t0 = performance.now();
     probe.begin(t);
     if (this.walking) this.player.update(dt);
     else this.controls.update(dt);
     probe.lap('player');
+    // Auto's pixel budget follows the Enhanced tier (the menu, Auto quality's governor).
+    this.scaler.setBudget(this.enhanced ? this.enhanced.tier : 'original');
+    const drawAt = performance.now();
     this.draw();
     this.renderViewmodel();
     probe.lap('viewmodel');
     for (const fn of this.frameListeners) fn(dt);
     probe.end();
+    this.scaler.gpu.frame(drawAt);
+    const now = performance.now();
+    const hz = this.pacer.hz;
+    this.scaler.frame(interval, now - t0, now, this.frameCap > 0 ? this.frameCap : hz > 0 && hz < 60 ? hz : 60);
+    this.pacer.sample(raw, true, interval, now - t0, t);
     if (GPU_TIME && !this.gpuPending) {
       // The passes of the last frame resolved (one read-back at a time).
       this.gpuPending = true;

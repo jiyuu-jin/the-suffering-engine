@@ -35,7 +35,9 @@ export function modelHitSpheres(pkgs: PackageSet, ref: ResRef | undefined, cache
   if (!s) {
     const mdu = pkgs.get(ref.pkg)?.mdu;
     const tr = mdu ? readSkeletonTrailer(mdu, ref.id) : undefined;
-    cache.set(k, (s = tr ? leafSpheres(tr.spheres) : []));
+    // In node index order: the order the engine tests them in (a blade's first touched leaf is
+    // the struck one, actors/npc-melee.ts sweepHit; 0x100c9680).
+    cache.set(k, (s = tr ? leafSpheres(tr.spheres).sort((x, y) => tr.spheres.indexOf(x) - tr.spheres.indexOf(y)) : []));
   }
   return s;
 }
@@ -55,7 +57,7 @@ export function posedSpheres(ch: Pick<Character, 'root' | 'skeleton'>, leaves: r
     _v.set(n.center[0], n.center[1], n.center[2]).applyMatrix4(_m);
     const e = _m.elements;
     const scale = Math.hypot(e[0], e[1], e[2]);
-    out.push({ c: [_v.x, _v.y, _v.z], r: n.radius * scale });
+    out.push({ c: [_v.x, _v.y, _v.z], r: n.radius * scale, bone: n.bone });
   }
   return out;
 }

@@ -12,13 +12,14 @@
 //   gore/          blood and gore: wet films, droplets, wounds, the hurt view (opt-in with Enhanced)
 
 import * as THREE from 'three/webgpu';
-import { GRAPHICS, TIER_FEATURES, WEBGL_MAX_TIER, capTier, type QualityTier, type TierFeatures, type TierSetting } from './config';
+import { GRAPHICS, TIERS, TIER_FEATURES, WEBGL_MAX_TIER, capTier, type QualityTier, type TierFeatures, type TierSetting } from './config';
 import { installEnhancedShading } from './shading';
 import { EU, enhancedLights } from './lights';
 import { EnhancedShadows } from './shadows';
 import { EnhancedTextureMaps } from './maps/runtime';
 import { EnhancedGore } from './gore';
 import { EnhancedPipeline, grade, type EnhancedStage, type EnhancedStageHook } from './post';
+import { sharpenFor } from './sharpen';
 import { TierGovernor, probeAdapter, type AdapterProbe } from './auto-tier';
 import { engineLights } from '../engine-light';
 
@@ -37,6 +38,11 @@ export interface EnhancedHost {
   readonly backend: 'WebGPU' | 'WebGL2';
   readonly viewmodelPass: { scene: THREE.Scene; camera: THREE.PerspectiveCamera };
   frameCap: number;
+  /**
+   * Render scale (src/app/render-scale.ts RenderScaler): its scale sets the sharpening (sharpen.ts);
+   * Auto quality's tier steps wait for dynamic resolution.
+   */
+  readonly scaler?: { scale: number; cap: number; floor: number; readonly dynamic: boolean; setBudget(tier: QualityTier): void };
 }
 
 /** Something drawing screen effects over the scene (game/insanity/effects.ts ScreenEffects). */
@@ -123,6 +129,11 @@ export class EnhancedRenderer {
 
   private apply() {
     const f = (this.features = TIER_FEATURES[this.tier]);
+    // The tier's pixel budget first. The RCAS pass is always in the chain (strength 0 at native:
+    // the frame unchanged), so a change of the scale never rebuilds the pipeline.
+    const sc = this.host.scaler;
+    sc?.setBudget(this.tier);
+    this.pipeline.sharpen = !!sc;
     this.shadows.configure(f);
     this.maps.setTier(this.tier);
     // Real shadow maps replace the engine's projected character shadows from High up.
@@ -150,6 +161,8 @@ export class EnhancedRenderer {
     // Insanity: the screen effects' hallucination blur / vignette / flashes bend the lens.
     const fx = effects ? Math.min(1, (effects.blur ?? 0) * 1.4 + (effects.vignette ?? 0) * 0.6 + (effects.image?.alpha ?? 0) * 0.5) : 0;
     grade.insanity.value += (fx - grade.insanity.value) * 0.15;
+    const sc = h.scaler;
+    if (sc) grade.sharpen.value = sharpenFor(sc.scale);
     if (effects) effects.render();
     else {
       grade.encode.value = 1;
@@ -159,7 +172,12 @@ export class EnhancedRenderer {
     this.stats.drawMs = now - t0;
     if (this.setting === 'auto' && this.lastDraw > 0) {
       this.governor.target = h.frameCap > 0 ? h.frameCap : 60;
-      const next = this.governor.sample(now - this.lastDraw, now - t0, now);
+      let next = this.governor.sample(now - this.lastDraw, now - t0, now);
+      // Dynamic resolution acts first: a tier down only once it is at its floor, up at its cap.
+      if (next && sc?.dynamic && (TIERS.indexOf(next) < TIERS.indexOf(this.tier) ? sc.scale > sc.floor + 1e-3 : sc.scale < sc.cap - 1e-3)) {
+        this.governor.tier = this.tier;
+        next = null;
+      }
       if (next && next !== this.tier) {
         console.info(`[enhanced] auto: ${this.governor.log[this.governor.log.length - 1]}`);
         this.setTier(next);

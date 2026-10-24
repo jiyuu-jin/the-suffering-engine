@@ -1086,6 +1086,9 @@ export class CartWheeler implements SpecialMove {
   /** Killed on a ceiling: p177 (falls off, loop, landing) [verified slot]; else the generic death. */
   private deadUpdate(dt: number, env: ActorEnv): boolean {
     const a = this.a;
+    // A body off the ceiling crawls no more. (A restored body of a p180 ceiling starter: the
+    // constructor hung it as a crawler, and the dead keep no special state in a save.)
+    if (a.crawler && !a.ceiling && this.mode !== 'deathFall') a.crawler = false;
     if (this.mode === 'deathFall') {
       this.t += dt;
       switch (this.phase) {

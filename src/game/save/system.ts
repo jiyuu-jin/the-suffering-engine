@@ -6,7 +6,9 @@
 //   * Autosave objects (class "Autosave", input 0 inSave) request a checkpoint when they
 //     receive their message; Level Transitions announce their chapter (p3, Chapter
 //     Properties) for the save names;
-//   * takes requested checkpoints once the logic settled (2 frames) and no cinematic runs;
+//   * takes requested checkpoints once the logic settled (2 frames), no cinematic runs and the
+//     player is not on scripted locomotion (ladder, clamber, use animation, mounted gun, held)
+//     nor watching a movie or a monitor feed;
 //   * shows the game's checkpoint notice (HUD text UIP p28: Simple Text HUD #426, string
 //     5:107, centred at y 25 %) in the interface font;
 //   * vetoes manual saving with the original's rule (rules.ts, docs/re/saves.md: dead, under
@@ -27,6 +29,7 @@ import { SaveRegistry } from './registry';
 import { playerSaveProvider, releasePlayerControl, type SaveService } from './providers';
 import { saves } from './manager';
 import { autosaveAction, originalSaveVeto } from './rules';
+import { CutscenePlayer } from '../../app/cutscene';
 
 /** Checkpoint notice text (Interface string of HUD text #426). */
 const CHECKPOINT_TEXT = '5:107';
@@ -72,6 +75,7 @@ export function createSaveSystem(ctx: GameContext): GameSystem {
     const w = world()?.world;
     return !!w && (w.playerInCutscene() || w.activeCutscenes().length > 0);
   };
+  const busy = () => CutscenePlayer.modal > 0 || !!world()?.interact?.viewingMonitor;
   // The original's can-save predicate (RFL 0x100438a0, docs/re/saves.md): no enemy-proximity
   // rule; dead, cinematic control, morphing, airborne and ladder / scripted locomotion block.
   registry.addVeto(() => {
@@ -82,6 +86,9 @@ export function createSaveSystem(ctx: GameContext): GameSystem {
       morphing: mode === 'morphing' || mode === 'reverting',
       airborne: view.walking && !view.player.onGround,
       climbing: view.walking && !!view.player.motionOverride,
+      // A Movie Player's movie (3b's flashbacks) or a Security Monitor's feed: the original
+      // refuses saving in its View Monitor state and while the movie is modal [inferred].
+      busy: busy(),
     });
   });
 
@@ -173,7 +180,10 @@ export function createSaveSystem(ctx: GameContext): GameSystem {
     update(dt) {
       hookWorld();
       const alive = combat()?.player.alive ?? true;
-      saves.tick(dt, cinematic() ? 'cinematic' : !alive ? 'dead' : null);
+      // A checkpoint also waits for scripted locomotion to end (ladder, clamber, use animation,
+      // mounted gun, a creature holding the player): the controller's script is not saved, so a
+      // restore there would drop the player off the ladder (save matrix, docs/re/saves.md §6).
+      saves.tick(dt, cinematic() ? 'cinematic' : !alive ? 'dead' : view.walking && view.player.motionOverride ? 'scripted locomotion' : busy() ? 'busy' : null);
       if (noticeLeft > 0 || canvas.width) {
         noticeLeft = Math.max(0, noticeLeft - dt);
         drawNotice();

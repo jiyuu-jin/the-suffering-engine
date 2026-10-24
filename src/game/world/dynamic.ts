@@ -7,7 +7,7 @@ import { LEGACY_LIGHTING, engineLightMaterial } from '../../app/engine-light';
 import { texture, uniform, vec3, vertexColor } from 'three/tsl';
 import type { SrscFile } from '../../formats/srsc';
 import { parseEntities, readObjectTemplate, type Entity } from '../../formats/entities';
-import { instanceRotation, LDU_COLORS, parseLevelObjects, WORLD_SCALE, type LevelObject } from '../../formats/level';
+import { instanceRotation, LDU_COLORS, parseLevelObjects, staleLduRefs, WORLD_SCALE, type LevelObject } from '../../formats/level';
 import { findEntry, readMaterial, readModel, singlePassTexture, templateModelRef, TDU_TEXTURE, type PackageSet, type ResRef, type RiotModel, type SurfaceMaterial } from '../../formats/model';
 import { SurfaceMaterialCache } from '../../app/surface-material';
 import { hasSkeleton } from '../../formats/skeleton';
@@ -207,6 +207,7 @@ export class DynamicObjects {
   private ldu = new Map<number, { model: ResRef; colors: Uint8Array }>();
   private unlit: [number, number, number] = [0.3, 0.3, 0.3];
   private levelPkg?: number;
+  private staleLdu = new Set<number>();
   private readonly housingExtras = new Set<number>();
 
   constructor(
@@ -249,6 +250,8 @@ export class DynamicObjects {
     const score = new Map<number, number>();
     for (const o of objs.values()) if (o.ref.pkg && this.ldu.has(o.ref.id)) score.set(o.ref.pkg, (score.get(o.ref.pkg) ?? 0) + 1);
     this.levelPkg = [...score].sort((a, b) => b[1] - a[1])[0]?.[0];
+    // .ldu refs copied from another instance (formats/level.ts staleLduRefs): the template's model.
+    this.staleLdu = staleLduRefs([...objs.values()], this.levelPkg, (id) => this.ldu.get(id)?.model, (o) => templateModelRef(this.packages, o.template));
     // A lamp's p43 objects (flat light pools, housing.ts) are effects: no body.
     for (const e of entities.values()) if (e.className === 'Light Housing') for (const u of housingExtras(e.values)) this.housingExtras.add(u);
     for (const uid of uids) {
@@ -272,7 +275,7 @@ export class DynamicObjects {
   }
 
   private buildOne(o: LevelObject, e: Entity): DynamicObject | undefined {
-    let lit = this.levelPkg !== undefined && o.ref.pkg === this.levelPkg ? this.ldu.get(o.ref.id) : undefined;
+    let lit = this.levelPkg !== undefined && o.ref.pkg === this.levelPkg && !this.staleLdu.has(o.uid) ? this.ldu.get(o.ref.id) : undefined;
     let modelRef = lit?.model.pkg ? lit.model : templateModelRef(this.packages, o.template);
     // Some .ldu records name a model that does not decode (1a "Box Of Stuff" 7b1b: ldu 1680 ->
     // 4:106); fall back to the template's model (without baked colours) instead of dropping the

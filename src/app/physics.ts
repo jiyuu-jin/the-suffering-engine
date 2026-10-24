@@ -1496,6 +1496,28 @@ export class CharacterMotor {
   }
 
   /**
+   * The ground the centre probe would stand this mover on here (MotorConfig.groundProbe 'centre',
+   * docs/game-logic.md §14.9): the highest walkable surface under the feet point from the foot
+   * radius above the feet (a plane above the foot sphere's centre within its radius is a contact
+   * and counts) down to `reach` below them, else the Landscape fallback. Null: none, or not a
+   * centre-probe mover. Nothing is moved.
+   */
+  centreGroundHeight(reach: number): number | null {
+    const w = this.world;
+    if (!w || this.cfg.groundProbe !== 'centre') return null;
+    const prev = w.queryLayers;
+    w.queryLayers = this.layers;
+    try {
+      const up = Math.min(this.cfg.probeTop ?? this.cfg.stepHeight, this.cfg.stepHeight);
+      let g = centreGround(w, this.position.x, this.position.y + up, this.position.z, up + reach, this.cosSlope);
+      if (!g?.walkable) g = landscapeGround(w, this.position.x, this.position.y, this.position.z, reach, this.cosSlope) ?? g;
+      return g?.walkable ? g.height : null;
+    } finally {
+      w.queryLayers = prev;
+    }
+  }
+
+  /**
    * Move the feet sideways by (dx, dz) as a step of the capsule would: swept and slid along what
    * it meets, never into or through it (a push from outside, e.g. a body the player overlaps).
    * The height is kept; the next step's ground probe settles it.

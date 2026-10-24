@@ -211,7 +211,13 @@ export function resolveCreatureClips(pkgs: PackageSet, template: ResRef, modelPk
       b.values.forEach((v, i) => {
         if (((b.types[i] ?? 0) & 0xff) !== PropType.Animation) return;
         for (const r of refsOf(v)) {
-          if (ok(r) && !map.attacks.some((a) => a.clip.id === r.id && a.clip.pkg === r.pkg)) map.attacks.push({ clip: r, reach: 1.8, damage: 10 });
+          // Hurting only through a Melee Weapon the clip arms (Arm 100 / Disarm 101, npc-melee.ts):
+          // NPC melee damage comes from an armed weapon alone [verified 0x100ca210 / 0x100ca920].
+          // The Mainliner's and the Nooseman's clips arm none (their needles and grabs are their
+          // specials'); before, each landed a guessed 10 at its hit time with no damage type, which
+          // the Part Caps' type rule could not refuse: 2's Dallas bled out from a chest cut
+          // (10:863, which bullets and blades cannot cut) after a Mainliner's "blow" (run d2a).
+          if (ok(r) && !map.attacks.some((a) => a.clip.id === r.id && a.clip.pkg === r.pkg)) map.attacks.push({ clip: r, reach: 1.8, damage: 10, weaponOnly: true });
         }
       });
     }

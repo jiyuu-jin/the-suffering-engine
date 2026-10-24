@@ -181,7 +181,8 @@ class Mainliner implements SpecialMove {
       const dy = q.y - a.position.y;
       return flat(a.position, q) < a.radius + r + 0.55 && facing(a, q) >= Math.cos((this.jump.cone * Math.PI) / 180) && dy >= this.jump.height[0] && dy <= this.jump.height[1];
     };
-    if (env.playerAlive && !this.rt.holder && fits(env.player.position, 0.35)) return this.grab(env);
+    // (Port option "Enemies ignore the player": the leap passes him.)
+    if (env.playerAlive && !env.ignorePlayer && !this.rt.holder && fits(env.player.position, 0.35)) return this.grab(env);
     for (const o of env.actors) {
       if (o === a || !o.alive || o.hidden || o.kind.decor || o.template || !fits(o.position, o.radius) || !this.rideable(o)) continue;
       return this.grabNpc(o);
@@ -300,6 +301,7 @@ class Mainliner implements SpecialMove {
     a.motor.position.z = pl.position.z + fz * off;
     a.yaw = this.side ? pl.yaw : pl.yaw + Math.PI;
     if (!this.rt.playerAlive) return this.jumpOff(env, 'the player died');
+    if (env.ignorePlayer) return this.jumpOff(env, 'enemies ignore the player (port option)');
     const j = this.jump;
     const len = this.clipIdx >= 0 ? a.ch.clipData[this.clipIdx]?.duration ?? 2 : 2;
     this.ride += dt * (1 + (Math.random() * 2 - 1) * j.jitter);

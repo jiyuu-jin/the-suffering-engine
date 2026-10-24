@@ -38,6 +38,7 @@ import { instanceRotation, toOutputSpace } from '../../../formats/level';
 import type { Entity } from '../../../formats/entities';
 import type { ResRef } from '../../../formats/model';
 import { buildStaticModel } from '../../weapons/models';
+import { portOptions } from '../../port-options';
 import { Actor, type ActorEnv } from '../actor';
 import { clearLine } from '../nav';
 import type { ClipRef } from '../clipmap';
@@ -286,6 +287,8 @@ export class BlackOne implements SpecialMove {
 
   /** Random valid attack of slots [lo, hi) for the player's distance / bearing (0x1006fcf0). */
   private chooseAttack(lo: number, hi: number): boolean {
+    // Port option "Enemies ignore the player": no attack is chosen (every one is at him).
+    if (portOptions.ignorePlayer) return false;
     const p = this.rt.player.position;
     const d = flat(p, this.a.position);
     const dx = p.x - this.a.position.x, dz = p.z - this.a.position.z;

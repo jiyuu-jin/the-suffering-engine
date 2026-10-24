@@ -281,3 +281,21 @@ test('Character p161: health regained per second up to the maximum, never by the
   b.regenerate(10);
   assert.equal(b.health, 10);
 });
+
+test('the player is pushed out of a body he overlaps, but not while something holds his feet (a Mainliner ride)', () => {
+  const { a, e } = make();
+  const scene = new THREE.Scene();
+  const m = new ActorManager(new Map() as unknown as PackageSet, scene, null);
+  m.env = e;
+  m.adopt(a);
+  // A rider 0.45 m in front of the feet, as the ride places it every frame.
+  const at = { x: a.position.x, y: a.bottom, z: a.position.z + 0.45 };
+  const shoves: [number, number][] = [];
+  const motor = { position: { ...at }, cfg: { radius: 0.35 }, shove: (dx: number, dz: number) => shoves.push([dx, dz]) } as never;
+  m.pushPlayer(motor);
+  assert.equal(shoves.length, 1, 'free: pushed out of the overlap');
+  assert.ok(Math.hypot(...shoves[0]) > 0.05);
+  m.pushPlayer(motor, true);
+  assert.equal(shoves.length, 1, 'held: not pushed (the ride would drag him 0.3 m a frame)');
+  m.dispose();
+});

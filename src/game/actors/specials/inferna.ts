@@ -10,32 +10,112 @@
 //   * Ignites (StartFlaming: clip p2, model swap to p188, clip p3) on its p192 message, on
 //     MorphCharacter (220) while dormant, or when its target comes within KillObject p2 (20 m);
 //     p184 instances start alight. The flame lasts p185..p186 s.
-//   * Flaming, it circles the target at KillObject p5 (4 m; clips p182 / p183, direction
-//     reversed when blocked) while the target stays within p4 (11 m), and every FlamingKill
-//     p4..p5 s attacks: within p6..p7 (0..5 m) a flame burst (p3 clip; at its Fire marker the p2
-//     generator: fire, shake, screen fader and Radius Damage 20 -> 5 over 10 / 20 m); within
-//     p8..p9 (6..30 m) a fireball (ProjectileAttack p88: the p55 BouncingObject, 12.2 m/s,
-//     detonating Radius Damage); otherwise it repositions (p10 % toward the fireball band).
+//   * Movement (docs §15.7.6, "How it moves"): the KillObject walks a MoveTo on the Move Node
+//     graph to within p3 (8 m) of the target; then the FlamingKill circles it at KillObject p5
+//     (4 m; clips p182 / p183) by steering alone while the target stays within p4 (11 m), and
+//     every FlamingKill p4..p5 s attacks: within p6..p7 (0..5 m) a flame burst (p3 clip; at its
+//     Fire marker the p2 generator: fire, shake, screen fader and Radius Damage 20 -> 5 over 10 /
+//     20 m); within p8..p9 (6..30 m) a fireball (ProjectileAttack p88: the p55 BouncingObject,
+//     12.2 m/s, detonating Radius Damage); otherwise it repositions by a MoveTo (p10 % toward the
+//     fireball band). The circling steering has no graph or ground test.
 //   * Flame out: InfernaAsh collapses (p2), turns into the ash pile p190 with its ash effects
 //     (p191) and plays p3; it is vulnerable for p6..p7 s, then reforms (p4, flaming model, p5).
-// Port: the burn-on-hit effect (BurnFX 4:1335) is not applied; repositioning walks straight.
+// Port: the burn-on-hit effect (BurnFX 4:1335) is not applied.
 
 import * as THREE from 'three/webgpu';
 import { readSkinnedModel } from '../../../formats/skeleton';
 import { Character, decodeCharacterTextures } from '../../../app/character';
 import type { Actor, ActorEnv } from '../actor';
-import { clearLine } from '../nav';
 import { loadClip, type ClipRef } from '../clipmap';
 import { clipMarkers } from './clip-events';
-import { fightTarget, infernaParams, type InfernaParams, type RadiusDamage } from './params';
+import { fightTarget, infernaParams, noTargetAim, type InfernaParams, type RadiusDamage } from './params';
 import { drive, flat, rand, turnToward, yawTo, type SpecialMove, type SpecialRuntime } from './runtime';
+import { clearLine, groundAlong } from '../nav';
 
 const MARK_FIRE = 102;
 const MARK_THROW = 230;
 const MSG_MORPH = 220;
 
 type Mode = 'unlit' | 'igniting' | 'flaming' | 'collapsing' | 'ash' | 'reforming';
-type Act = 'none' | 'circle' | 'flame' | 'ball' | 'move';
+/** 'chase': the KillObject's MoveTo; 'circle': the FlamingKill's CircleTarget; 'move': its reposition MoveTo. */
+type Act = 'none' | 'chase' | 'circle' | 'flame' | 'ball' | 'move';
+
+/** InfernaCircleTargetSteering's stuck window (s), 0x1007afd0 / 0x1007b0f0 [verified]. */
+export const CIRCLE_STUCK_WINDOW = 0.15;
+/** Stuck: the window's positions within this x the steering speed (m per m/s) [verified]. */
+export const CIRCLE_STUCK_SPREAD = 0.015;
+
+/**
+ * InfernaCircleTargetSteering's wish (0x100796d0) [verified]: n is the unit vector from the
+ * Inferna to the target on the ground plane, the tangent (n.z, -n.x) for direction flag 0 and
+ * (-n.z, n.x) for 1 (the flag is drawn 50 / 50 when the steering starts); inside the radius
+ * k = 1 - d / R, outside k = R / d - 1, and the wish tangent x (1 - |k|) - n x k is scaled to the
+ * steering's speed (the circle clip's, movement mode 3). Returns the unit direction (x, z).
+ */
+export function circleWish(ax: number, az: number, tx: number, tz: number, radius: number, flag: 0 | 1): [number, number] {
+  const dx = tx - ax, dz = tz - az, d = Math.hypot(dx, dz);
+  if (d < 1e-4) return [0, 0];
+  const nx = dx / d, nz = dz / d;
+  const [ux, uz] = flag === 0 ? [nz, -nx] : [-nz, nx];
+  const k = d < radius ? 1 - d / radius : radius / d - 1;
+  const w = 1 - Math.abs(k);
+  const x = ux * w - nx * k, z = uz * w - nz * k, l = Math.hypot(x, z);
+  return l > 1e-6 ? [x / l, z / l] : [0, 0];
+}
+
+/**
+ * The steering's stuck test (0x1007b0f0) [verified]: over each 0.15 s window it keeps a circle
+ * round the body's ground positions (a position outside it moves the centre towards it and the
+ * radius to the mean of the two); at the window's end the body is stuck when that radius is under
+ * 0.015 x the steering's speed (a tenth of the window's travel). Stuck once, the direction
+ * reverses; stuck in the next window too, the steering gives up ('end': the circle goes on without
+ * it, the body stands until the FlamingKill's next decision [inferred: the CircleTarget's
+ * child-end handler 0x10101530 does nothing]); a free window clears the reversal.
+ */
+export class CircleStuck {
+  private left = CIRCLE_STUCK_WINDOW;
+  private cx = 0;
+  private cz = 0;
+  private r = 0;
+  private reversed = false;
+  reset(x: number, z: number) {
+    this.left = CIRCLE_STUCK_WINDOW;
+    this.cx = x;
+    this.cz = z;
+    this.r = 0;
+    this.reversed = false;
+  }
+  step(dt: number, x: number, z: number, speed: number): 'reverse' | 'end' | undefined {
+    this.left -= dt;
+    if (this.left > 0) {
+      const dx = x - this.cx, dz = z - this.cz, d = Math.hypot(dx, dz);
+      if (d > this.r) {
+        const r = (d + this.r) * 0.5;
+        this.cx = x - (dx / d) * r;
+        this.cz = z - (dz / d) * r;
+        this.r = r;
+      }
+      return undefined;
+    }
+    this.left = CIRCLE_STUCK_WINDOW;
+    const stuck = CIRCLE_STUCK_SPREAD * speed > this.r;
+    if (stuck && this.reversed) return 'end';
+    this.reversed = stuck;
+    this.cx = x;
+    this.cz = z;
+    this.r = 0;
+    return stuck ? 'reverse' : undefined;
+  }
+}
+
+/**
+ * The FlamingKill's reposition MoveTo (0x1007abc5) [verified]: towards the target, to a distance
+ * drawn from the band; nearer than now it is the MoveTo's arrival distance (request +0x1c), farther
+ * its least distance (+0x20). Done when the body is there.
+ */
+export function repositionDone(d: number, want: number, away: boolean) {
+  return away ? d >= want : d <= want;
+}
 
 interface Ball {
   from: THREE.Vector3;
@@ -52,8 +132,14 @@ class Inferna implements SpecialMove {
   private t = 0;
   private decide = 0;
   private circleDir = 1;
-  private stuck = 0;
+  /** The circling steering runs (it gives up when stuck twice; CircleStuck). */
+  private steering = true;
+  private stuck = new CircleStuck();
   private moveGoal = new THREE.Vector3();
+  private moveWant = 0;
+  private moveAway = false;
+  /** The reposition's attack, drawn with its band (FlamingKill +0x40: the fireball band). */
+  private moveBall = false;
   private fired = false;
   private ashLeft = 0;
   private phase = 0;
@@ -172,15 +258,24 @@ class Inferna implements SpecialMove {
     const a = this.a;
     this.balls.length && this.flyBalls(env);
     if (!a.alive) {
+      a.specialWalk = undefined;
       if (this.ash) this.showAsh(true);
       return false;
     }
+    if (this.mode !== 'flaming' && this.mode !== 'unlit') a.specialWalk = undefined;
     this.t += dt;
     if (this.ash && this.mode === 'ash') this.ash.update(dt);
     switch (this.mode) {
       case 'unlit': {
+        // The KillObject's MoveTo runs from its start, lit or not; the KillObject ignites the
+        // body once the target is within p2 (0x1007a620).
         const tgt = fightTarget(a, env);
-        if (tgt && flat(a.position, tgt.pos) <= this.p.igniteRange) this.ignite();
+        const d = tgt ? flat(a.position, tgt.pos) : Infinity;
+        this.walk(tgt && d > this.p.approach ? tgt.pos : this.holdStill(), 'none');
+        if (tgt && d <= this.p.igniteRange) {
+          a.specialWalk = undefined;
+          this.ignite();
+        }
         return false;
       }
       case 'igniting':
@@ -246,7 +341,7 @@ class Inferna implements SpecialMove {
   }
 
   private flaming(dt: number, env: ActorEnv): boolean {
-    const a = this.a, tgt = fightTarget(a, env), p = tgt?.pos ?? env.player.position;
+    const a = this.a, tgt = fightTarget(a, env), p = tgt?.pos ?? noTargetAim(a, env);
     // Burning voice lines now and then.
     if (env.time > this.voiceAt) {
       this.voiceAt = env.time + rand(this.p.voiceEvery[0], this.p.voiceEvery[1]);
@@ -254,6 +349,7 @@ class Inferna implements SpecialMove {
     }
     if (this.act !== 'flame') this.flame -= dt; // the flame attack pauses the timer (flag 0x80000)
     if (this.flame <= 0 && this.act !== 'flame' && this.act !== 'ball') {
+      this.walk(undefined, 'none');
       this.mode = 'collapsing';
       this.t = 0;
       this.act = 'none';
@@ -263,49 +359,75 @@ class Inferna implements SpecialMove {
       return true;
     }
     const d = flat(a.position, p);
-    if (this.act === 'none') {
-      if (!tgt || d > this.p.circleLimit) return false; // generic chase closes in
-      this.act = 'circle';
-      this.circleDir = Math.random() < 0.5 ? 1 : -1;
-      this.stuck = 0;
+    if (this.act === 'none' || this.act === 'chase') {
+      // The KillObject's MoveTo: on the graph to within p3 of the target, then the FlamingKill.
+      if (!tgt) return this.walk(this.holdStill(), 'none');
+      if (d > this.p.approach) return this.walk(p, 'chase');
+      this.walk(undefined, 'none');
+      this.startCircle();
     }
     a.state = 'act';
     switch (this.act) {
       case 'circle': {
-        if (d > this.p.circleLimit) {
-          this.act = 'none';
+        // The CircleTarget ends with the target beyond p4 (horizontally, 0x10079660); the
+        // FlamingKill then ends and the KillObject walks its MoveTo again.
+        if (!tgt || d > this.p.circleLimit) {
           a.state = 'chase';
-          return false;
+          return this.walk(tgt ? p : this.holdStill(), tgt ? 'chase' : 'none');
         }
         this.decide -= dt;
+        if (this.decide <= 0) {
+          this.chooseAttack(env);
+          break;
+        }
+        if (!this.steering) {
+          if (a.kind.idle >= 0) a.playClip(a.kind.idle, true);
+          turnToward(a, yawTo(a.position, p), 3, dt);
+          drive(a, dt, 0, 0, 0.01);
+          break;
+        }
         const clip = this.p.circle[this.circleDir > 0 ? 0 : 1];
         const i = env.clip(a, clip);
         if (i >= 0) a.playClip(i, true);
-        // Tangent around the target with a radial correction toward the circle radius.
-        const dx = a.position.x - p.x, dz = a.position.z - p.z;
-        const r = Math.max(0.1, Math.hypot(dx, dz));
-        const tx = -dz / r * this.circleDir, tz = dx / r * this.circleDir;
-        const k = 1 - r / this.p.circleRadius;
-        const wx = tx + (dx / r) * k, wz = tz + (dz / r) * k;
-        turnToward(a, Math.atan2(-wx, -wz), 6, dt);
+        const [wx, wz] = circleWish(a.position.x, a.position.z, p.x, p.z, this.p.circleRadius, this.circleDir > 0 ? 0 : 1);
+        if (wx || wz) turnToward(a, Math.atan2(-wx, -wz), 6, dt);
         const speed = i >= 0 ? Math.min(7, a.kind.speeds[i] || 5) : 5;
-        const moved = drive(a, dt, wx, wz, speed);
-        if (moved < 0.015 * speed * 10 * dt) {
-          if (++this.stuck === 1) this.circleDir = -this.circleDir;
-          else if (this.stuck > 20) this.decide = 0;
-        } else this.stuck = 0;
-        if (this.decide <= 0) this.chooseAttack(env);
+        drive(a, dt, wx, wz, speed);
+        const s = this.stuck.step(dt, a.position.x, a.position.z, speed);
+        if (s === 'reverse') this.circleDir = -this.circleDir;
+        else if (s === 'end') this.steering = false;
         break;
       }
       case 'move': {
-        const dm = flat(a.position, this.moveGoal);
-        turnToward(a, yawTo(a.position, this.moveGoal), 6, dt);
-        const i = a.kind.run >= 0 ? a.kind.run : a.kind.walk;
-        if (i >= 0) a.playClip(i, true);
-        drive(a, dt, -Math.sin(a.yaw), -Math.cos(a.yaw), a.kind.runSpeed);
-        this.t += dt;
-        if (dm < 1 || this.t > 4) this.chooseAttack(env, true);
-        break;
+        const d3 = Math.hypot(p.x - a.position.x, p.y - a.position.y, p.z - a.position.z);
+        if (repositionDone(d3, this.moveWant, this.moveAway)) {
+          // Arrived (0x1007acb0): the attack drawn with the band when the target is in sight,
+          // else the circle again.
+          this.walk(undefined, 'none');
+          if (clearLine(env.world, a.position.x, a.position.y + 1, a.position.z, p.x, p.y + 1, p.z)) this.startAttack(this.moveBall);
+          else this.startCircle();
+          break;
+        }
+        // A MoveTo that gets nowhere fails: the circle again [port: the original's MoveTo
+        // failure rule is the path's; the port gives it 4 s].
+        if (this.t > 4) {
+          this.walk(undefined, 'none');
+          this.startCircle();
+          break;
+        }
+        if (this.moveAway) {
+          const dx = a.position.x - p.x, dz = a.position.z - p.z, l = Math.hypot(dx, dz) || 1;
+          this.moveGoal.set(p.x + (dx / l) * this.moveWant, a.position.y, p.z + (dz / l) * this.moveWant);
+          // Off the ground (over a drop): the goal is the graph's node there instead (the
+          // MoveTo walks the graph's areas) [inferred].
+          if (!groundAlong(env.world, a.position.x, a.position.y, a.position.z, this.moveGoal.x, this.moveGoal.y, this.moveGoal.z, a.radius)) {
+            const nav = env.nav, k = nav?.nearest(this.moveGoal.x, this.moveGoal.y, this.moveGoal.z, env.world, 6, 0, 'floor', undefined, true) ?? -1;
+            if (nav && k >= 0) this.moveGoal.set(nav.nodes[k].x, nav.nodes[k].y, nav.nodes[k].z);
+            else this.moveGoal.set(a.position.x, a.position.y, a.position.z);
+          }
+        } else this.moveGoal.set(p.x, p.y, p.z);
+        a.state = 'chase';
+        return this.walk(this.moveGoal, 'move');
       }
       case 'flame':
       case 'ball': {
@@ -317,10 +439,8 @@ class Inferna implements SpecialMove {
           if (this.act === 'flame') this.flameBurst(env);
           else this.throwBall(env);
         }
-        if (a.clipDone || this.t > 4) {
-          this.act = 'circle';
-          this.decide = rand(this.p.decide[0], this.p.decide[1]);
-        }
+        // FlameAttack / ProjectileAttack done: the circle again (0x1007ad96).
+        if (a.clipDone || this.t > 4) this.startCircle();
         break;
       }
     }
@@ -328,32 +448,79 @@ class Inferna implements SpecialMove {
     return true;
   }
 
-  /** FlamingKill decision (0x1007aa00). */
-  private chooseAttack(env: ActorEnv, afterMove = false) {
-    const a = this.a, p = fightTarget(a, env)?.pos ?? env.player.position;
-    const d = Math.hypot(p.x - a.position.x, p.y - a.position.y, p.z - a.position.z);
-    const visible = clearLine(env.world, a.position.x, a.position.y + 1, a.position.z, p.x, p.y + 1, p.z);
+  /**
+   * In a fight with no target yet (the generic perception picks it): the KillObject is not
+   * running, and the generic combat (a ProjectileAttack throw, keeping its distance) is not the
+   * Inferna's; it stands where it is (a MoveTo to its own feet).
+   */
+  private holdStill(): THREE.Vector3Like | undefined {
+    return this.a.inCombat ? this.a.position : undefined;
+  }
+
+  /**
+   * A MoveTo child walked by the generic AI (Actor.specialWalk): returns false so that the tick's
+   * generic update moves the body; `goal` undefined ends the walk.
+   */
+  private walk(goal: THREE.Vector3Like | undefined, act: Act): false {
+    this.act = act;
+    if (goal) {
+      this.a.specialWalk = { x: goal.x, y: goal.y, z: goal.z };
+      if (this.a.state === 'act') this.a.state = 'chase';
+    } else this.a.specialWalk = undefined;
+    return false;
+  }
+
+  /**
+   * InfernaCircleTarget (0x10079e50 -> 0x1007a120): a fresh steering, its direction drawn 50 / 50
+   * (0x1007afd0), and the FlamingKill's decision timer p4..p5 drawn again (0x1011f020 on +0x2c).
+   */
+  private startCircle() {
+    const a = this.a;
+    this.act = 'circle';
+    this.circleDir = Math.random() < 0.5 ? 1 : -1;
+    this.steering = true;
+    this.stuck.reset(a.position.x, a.position.z);
     this.decide = rand(this.p.decide[0], this.p.decide[1]);
+  }
+
+  private startAttack(ball: boolean) {
+    const a = this.a;
     this.t = 0;
     this.fired = false;
-    if (d >= this.p.flameBand[0] && d <= this.p.flameBand[1] && (visible || !afterMove)) {
-      this.act = 'flame';
-      this.stats.flames++;
-      this.play(this.p.flame.clip);
-      this.rt.log(a, `flame attack at ${d.toFixed(1)} m`);
-    } else if (d >= this.p.ballBand[0] && d <= this.p.ballBand[1] && visible) {
+    if (ball) {
       this.act = 'ball';
       this.stats.fireballs++;
       this.play(this.p.ball.clip);
-      this.rt.log(a, `fireball at ${d.toFixed(1)} m`);
-    } else if (!afterMove) {
-      // Reposition: p10 % into the fireball band, else into the flame band.
-      const band = Math.random() * 100 < this.p.ballChance ? this.p.ballBand : this.p.flameBand;
-      const want = rand(band[0], band[1]);
-      const dx = a.position.x - p.x, dz = a.position.z - p.z, l = Math.hypot(dx, dz) || 1;
-      this.moveGoal.set(p.x + (dx / l) * want, a.position.y, p.z + (dz / l) * want);
-      this.act = 'move';
-    } else this.act = 'circle';
+    } else {
+      this.act = 'flame';
+      this.stats.flames++;
+      this.play(this.p.flame.clip);
+    }
+    this.rt.log(a, ball ? 'fireball' : 'flame attack');
+  }
+
+  /**
+   * FlamingKill decision (0x1007aa00) [verified]: on its timer while the circle runs. Within the
+   * flame band a flame burst, within the fireball band a fireball (no sight test here); in
+   * neither, p10 % picks the fireball band, else the flame band, and a MoveTo to a distance drawn
+   * from it follows (repositionDone).
+   */
+  private chooseAttack(env: ActorEnv) {
+    const a = this.a, p = fightTarget(a, env)?.pos ?? noTargetAim(a, env);
+    const d = Math.hypot(p.x - a.position.x, p.y - a.position.y, p.z - a.position.z);
+    const inFlame = d >= this.p.flameBand[0] && d <= this.p.flameBand[1];
+    const inBall = d >= this.p.ballBand[0] && d <= this.p.ballBand[1];
+    if (inFlame !== inBall) {
+      this.rt.log(a, `${inBall ? 'fireball' : 'flame attack'} at ${d.toFixed(1)} m`);
+      return this.startAttack(inBall);
+    }
+    this.moveBall = Math.random() * 100 < this.p.ballChance;
+    if (inFlame && inBall) return this.startAttack(this.moveBall);
+    const band = this.moveBall ? this.p.ballBand : this.p.flameBand;
+    this.moveWant = rand(band[0], band[1]);
+    this.moveAway = this.moveWant > d;
+    this.act = 'move';
+    this.t = 0;
   }
 
   /** Flame burst: the p2 generator's effects at the Inferna and its Radius Damage. */
@@ -366,7 +533,7 @@ class Inferna implements SpecialMove {
   }
 
   private throwBall(env: ActorEnv) {
-    const a = this.a, p = fightTarget(a, env)?.pos ?? env.player.position;
+    const a = this.a, p = fightTarget(a, env)?.pos ?? noTargetAim(a, env);
     const b = a.ch.skeleton.bones[this.p.ball.boneFrom];
     const from = new THREE.Vector3();
     if (b) b.getWorldPosition(from);

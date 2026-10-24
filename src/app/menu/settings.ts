@@ -10,10 +10,13 @@
 //   - Key bindings are not settings: they live in src/game/hud/bindings.ts. The Controller
 //     page's layout choice (`x.padLayout`) mirrors the bindings' pad layout.
 //   - Controller page options (`x.pad*`): src/app/gamepad.ts `pads.options`.
+//   - Port option `x.ignorePlayer` (Gameplay pages, "Enemies Ignore Player"): the live flag in
+//     src/game/port-options.ts (`?ignorePlayer=1` / `=0` overrides it per page load: MenuFlow).
 
 import type { AudioSystem } from '../audio';
 import { PAD_DEFAULTS, pads } from '../gamepad';
 import { input } from '../../game/hud/bindings';
+import { portOptions } from '../../game/port-options';
 
 export interface Settings {
   master: number;
@@ -119,6 +122,7 @@ export function applySettings(s: Settings, t: SettingsTargets): void {
     if ('alwaysRun' in l) l.alwaysRun = !!s.extra.alwaysRun;
   }
   applyPadSettings(s);
+  portOptions.ignorePlayer = s.extra.ignorePlayer === true;
 }
 
 /** Controller page options -> the gamepad manager and the bindings' pad layout. */

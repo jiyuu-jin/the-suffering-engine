@@ -13,7 +13,7 @@ import { Actor, type ActorEnv } from '../src/game/actors/actor';
 import type { Behavior } from '../src/game/actors/behaviors';
 import type { CreatureKind } from '../src/game/actors/kinds';
 import { chooseTarget, damageShare, DEFAULT_WEIGHTS, hostilityRetry, repickInterval, targetScore, targetWeights, type TargetCandidate } from '../src/game/actors/targeting';
-import { npcBlowDamage, sweepSpheres, type HitSphereLike, type NpcMeleeWeapon } from '../src/game/actors/npc-melee';
+import { npcBlowDamage, sweepHit, sweepSpheres, type HitSphereLike, type NpcMeleeWeapon } from '../src/game/actors/npc-melee';
 import { readModelSphereNodes, weaponShape } from '../src/formats/model-spheres';
 import { classByHash, decodeTemplateProps, readObjectTemplate, type EntityPackageSet, type Entity } from '../src/formats/entities';
 import { readLevelHeader } from '../src/formats/level';
@@ -271,6 +271,22 @@ test('weapon sweep geometry: swept blade vs spheres, once per window, damage off
   assert.equal(npcBlowDamage({ damage: 7 }, 1.3, false), 7, 'a bystander takes p68 only');
 });
 
+test('the struck sphere (0x100c9680): the first leaf in node index order the sweep touches, not the deepest', () => {
+  // A human's chest (bone 3: 1.61 m, r 0.245) before its head sphere (bone 48: 1.95 m, r 0.15),
+  // as model 10:50 orders them. A blade (r 0.05) swept across at 1.84 m overlaps both, the head
+  // deeper: the chest is struck.
+  const chest = { c: [0, 1.61, -0.02] as [number, number, number], r: 0.245, bone: 3 };
+  const head = { c: [0, 1.95, -0.06] as [number, number, number], r: 0.15, bone: 48 };
+  const hit = sweepHit([-0.6, 1.84, 0.6], [-0.6, 1.84, -0.6], [0.6, 1.84, 0.6], [0.6, 1.84, -0.6], 0.05, [chest, head]);
+  assert.equal(hit?.i, 0);
+  // Only the head in reach (a blade over the shoulders): the head.
+  assert.equal(sweepHit([-0.6, 2.0, 0.6], [-0.6, 2.0, -0.6], [0.6, 2.0, 0.6], [0.6, 2.0, -0.6], 0.05, [chest, head])?.i, 1);
+  // Nothing in reach.
+  assert.equal(sweepHit([-0.6, 3, 0.6], [-0.6, 3, -0.6], [0.6, 3, 0.6], [0.6, 3, -0.6], 0.05, [chest, head]), null);
+  // The contact point is on the blade, beside the struck sphere.
+  assert.ok(Math.abs(hit!.p[1] - 1.84) < 1e-9);
+});
+
 // --- retail data -------------------------------------------------------------------------------
 
 test('retail: KillEnemies / Hostility templates and weapon volumes read as decoded', { skip }, async () => {
@@ -317,4 +333,61 @@ test('KillEnemies taking the player as a new target fires the character output p
   step([c], e, 0.5);
   assert.ok(c.currentTarget?.player, c.activity);
   assert.deepEqual(sent.filter(([, m]) => m === 18), [[0x1f0d, 18]], 'once, on taking the player');
+});
+
+// --- port option "Enemies ignore the player" (src/game/port-options.ts, docs/game-logic.md §15.17)
+
+test('ignore player: never a KillEnemies candidate; a creature on him drops him within a perception tick', () => {
+  // The player 4 m ahead, the inmate 12 m: the nearer player is the pick with the option off.
+  const inmate = new Actor(kind('Unspeakable NPC', false), { x: 0, y: 0, z: -12 }, 0);
+  inmate.profile = { team: '10:212', active: IDLE, priority: 0.5, maxAttackers: 4 };
+  inmate.setBehavior(IDLE);
+  const hits: { who: string; amount: number }[] = [];
+  const c = creature(0, 0);
+  const e = env([inmate, c], new THREE.Vector3(0, 0, -4), hits);
+  step([c], e, 0.5);
+  assert.ok(c.currentTarget?.player, c.activity);
+  // On: dropped at the next perception tick (0.15..0.25 s), the inmate taken instead.
+  e.ignorePlayer = true;
+  step([c], e, 0.3);
+  assert.ok(c.currentTarget?.actor === inmate, c.activity);
+  // A fresh creature with it on never takes him, even alone with him.
+  const lone = creature(5, 0);
+  const e2 = env([lone], new THREE.Vector3(5, 0, -3), hits);
+  e2.ignorePlayer = true;
+  step([lone], e2, 1);
+  assert.ok(!lone.currentTarget, lone.activity);
+  // Off again: he is re-acquired at the next search.
+  e2.ignorePlayer = false;
+  step([lone], e2, 1);
+  assert.ok(lone.currentTarget?.player, lone.activity);
+});
+
+test('ignore player: his hits take no grudge, and his noise goes unheard', () => {
+  // A passive character fights back on whoever hurts it (grudge); not on the player with the option.
+  const hits: { who: string; amount: number }[] = [];
+  const p = new THREE.Vector3(0, 0, -3);
+  const npc = new Actor(kind('Unspeakable NPC', false), { x: 0, y: 0, z: 0 }, 0);
+  npc.profile = { team: '10:212', active: IDLE, kill: killOf(['10:119']), priority: 0.5, maxAttackers: 4 };
+  npc.setBehavior(IDLE);
+  const e = env([npc], p, hits);
+  e.ignorePlayer = true;
+  npc.damage(5, e, p, 'player');
+  step([npc], e, 0.5);
+  assert.ok(!npc.currentTarget, npc.activity);
+  // InvestigateBehavior's hearing (the per-tick poll, called directly: the test rig's bodies are
+  // anchored, and anchored bodies do not investigate): a player noise is skipped, another heard.
+  const ear = new Actor({ ...kind('Unspeakable NPC', false), anchored: false }, { x: 10, y: 0, z: 0 }, 0);
+  ear.profile = { team: '10:120', investigate: { extra: 20, minLevel: 0, chance: 100, linger: 2 } };
+  const e2 = env([ear], new THREE.Vector3(10, 0, -40), hits);
+  const hear = (n: NonNullable<ActorEnv['noises']>) => (ear as unknown as { hear(n: NonNullable<ActorEnv['noises']>, e: ActorEnv): void }).hear(n, e2);
+  e2.ignorePlayer = true;
+  hear([{ x: 10, y: 0, z: -6, radius: 10, level: 2, source: 'player' }]);
+  assert.equal(ear.investigating, undefined);
+  hear([{ x: 10, y: 0, z: -6, radius: 10, level: 2 }]);
+  assert.ok(ear.investigating, 'a noise of nobody known is heard');
+  ear.investigating = undefined;
+  e2.ignorePlayer = false;
+  hear([{ x: 10, y: 0, z: -6, radius: 10, level: 2, source: 'player' }]);
+  assert.ok(ear.investigating, 'the player noise with the option off');
 });

@@ -51,6 +51,28 @@ export function shortcutBarred(nav: Pick<NavGraph, 'path' | 'nodes'>, a: number,
 /** A character's NPC Exclusion Type (Character p45 -> template p0, 0..30); 31 = none [verified: 0x100dc070]. */
 export const NO_NAV_TYPE = 31;
 
+/**
+ * Where a point lies on the graph (the start or the goal of a path) [verified, Suffering.rfl]:
+ * the nav code keeps edges, not nodes. Each edge's area is its two nodes' squares (half the node's size less the
+ * walker's radius, turned by the node's yaw; 0x100d3da0) and the strip between them (0x100d5400 /
+ * 0x100d6040) [the sizes inferred]. The global search (0x100d87e0) walks the grid cells
+ * around the point and returns the first edge that passes the walker's filter (0x100d8780 ->
+ * 0x100d5c30: usable, the walker's surface, wide enough, and its passage kind and NPC Exclusion
+ * Types, 0x100dbf30) and holds the point; the incremental one (0x100d8bd0) and the A*'s goal
+ * lookup (0x1011e436, a walker-less filter: type 31, so edges kept to listed types fail there
+ * too) filter the same way. An edge's types come from its two nodes at load (0x100dac90..
+ * 0x100dadbd): both "only" -> only the types both list; one "only" -> its types less the other's
+ * excluded ones, "only"; neither -> excluded when either node excludes. So a goal placed beside a
+ * room kept to another type is located on the walker's own edge next to it: 8b's Waypoint 1ea5
+ * lies 0.4 m from walkway node 207f (any type) and 1.5 m from 254a (Hermes' room, 10:682 only),
+ * and Jimmy's walk 189f ends on the walkway, where Detector 26b5 sees him.
+ * Port: NavGraph.nearest with the walker's type skips the nodes barred to it (the nearest node
+ * stands for the containing edge).
+ */
+export function locatesOn(n: Pick<NavNode, 'types' | 'only'>, t: number | undefined): boolean {
+  return t === undefined || !(n.types || n.only) || navNodePasses(n, t);
+}
+
 /** May a character of NPC Exclusion Type `t` use the node (0x100dbf30)? */
 export function navNodePasses(n: Pick<NavNode, 'types' | 'only'>, t: number): boolean {
   const has = (((n.types ?? 0) >>> t) & 1) === 1;
@@ -219,8 +241,15 @@ export class NavGraph {
    * (no wall between, similar floor height). Checks the `tries` closest nodes.
    * With `radius` a node a body of that radius can walk to straight (clearWide) is preferred:
    * a thin ray passes between the bars of an open gate leaf that the body cannot.
+   * With `navType` (the walker's NPC Exclusion Type) nodes barred to it are not candidates: the
+   * original places a point on the graph through the walker's own edge filter (locatesOn).
+   * `goal`: a path's goal lies on the node whose area holds it (within its radius across, 1.5 m
+   * up or down) before any sight line is asked: the original's lookup is the area test alone
+   * (locatesOn) [the height window inferred]. 8b's walkway nodes 1e7f / 207f lie 1 m under the
+   * floor of Hermes' doorway, so no sight line reached them from Jimmy's goal 1ea5 and the goal
+   * went to 1e81 outside the door: he paced between the two.
    */
-  nearest(x: number, y: number, z: number, world: CollisionWorld | null, tries = 6, radius = 0, surface: NavSurface = 'floor'): number {
+  nearest(x: number, y: number, z: number, world: CollisionWorld | null, tries = 6, radius = 0, surface: NavSurface = 'floor', navType?: number, goal = false): number {
     // Keep only the `tries` closest candidates (insertion into a tiny sorted list).
     const cand: { i: number; d: number }[] = [];
     const up = surface === 'ceiling';
@@ -229,6 +258,7 @@ export class NavGraph {
     for (let i = 0; i < this.nodes.length; i++) {
       const n = this.nodes[i];
       if (n.ceiling !== up) continue;
+      if (!locatesOn(n, navType)) continue;
       const dy = Math.abs(n.y - y);
       if (dy > 6) continue;
       const d = Math.abs(n.x - x) + Math.abs(n.z - z) + dy * 2;
@@ -237,11 +267,22 @@ export class NavGraph {
       cand[k] = { i, d };
       while (k > 0 && cand[k - 1].d > cand[k].d) [cand[k - 1], cand[k]] = [cand[k], cand[k - 1]], k--;
     }
-    if (world && radius > 0) {
+    if (goal)
       for (let k = 0; k < Math.min(tries, cand.length); k++) {
         const n = this.nodes[cand[k].i];
-        if (clearWide(world, x, y + off, z, n.x, n.y + off, n.z, radius)) return cand[k].i;
+        if (Math.hypot(n.x - x, n.z - z) <= n.radius && Math.abs(n.y - y) <= 1.5) return cand[k].i;
       }
+    if (world && radius > 0) {
+      // Over ground first: a start node across a drop is not walked to (groundAlong); then any
+      // the body fits through to.
+      let wide = -1;
+      for (let k = 0; k < Math.min(tries, cand.length); k++) {
+        const n = this.nodes[cand[k].i];
+        if (!clearWide(world, x, y + off, z, n.x, n.y + off, n.z, radius)) continue;
+        if (up || groundAlong(world, x, y, z, n.x, n.y, n.z, radius)) return cand[k].i;
+        if (wide < 0) wide = cand[k].i;
+      }
+      if (wide >= 0) return wide;
     }
     for (let k = 0; k < Math.min(tries, cand.length); k++) {
       const n = this.nodes[cand[k].i];
@@ -300,6 +341,44 @@ export class NavGraph {
     }
     return null;
   }
+}
+
+/** Deepest drop under a straight walk that still counts as ground (m) [port]. */
+export const STRAIGHT_WALK_DROP = 1.5;
+/** Least up component of that ground's normal (60 degrees) [port]. */
+export const STRAIGHT_WALK_SLOPE = 0.5;
+
+/**
+ * Ground all along a straight walk from feet (ax, ay, az) to feet (bx, by, bz): every 0.6 m (64
+ * samples at most) rays down, on the line and `halfWidth` to either side, find a surface no more
+ * than STRAIGHT_WALK_DROP under it, no steeper than STRAIGHT_WALK_SLOPE [port]. The original walks a MoveTo along the Move Node graph's edge areas (docs/game-logic.md
+ * §15.5; locatesOn), which keep to the ground; the port's shortcuts off the graph (a straight
+ * walk on a clear line: actor.ts clearLineCached; skipping ahead to a later path node; the start
+ * node walked to: NavGraph.nearest) stand for that and must not leave it. 9's guard bc9, sent
+ * from the first Inferna fight to the gate (Behavior Changer c5a -> WaypointBehavior c5b ->
+ * Waypoint c63), walked the clear line from the north rim of the inlet south of the lighthouse
+ * (326, 194) towards the gate, went down its rim and lay on the shore at (324.4, 84.5, 181.5),
+ * 28 m down with no Move Node and no way back (runs t9b / d9; reproduced in a session).
+ */
+export function groundAlong(world: Pick<CollisionWorld, 'raycast'>, ax: number, ay: number, az: number, bx: number, by: number, bz: number, halfWidth = 0, maxDrop = STRAIGHT_WALK_DROP): boolean {
+  const len = Math.hypot(bx - ax, bz - az);
+  if (len < 1e-3) return true;
+  const n = Math.min(64, Math.ceil(len / 0.6));
+  // Across the body's width: the walk's centre wanders off the line as the body turns onto it.
+  const ox = (-(bz - az) / len) * halfWidth, oz = ((bx - ax) / len) * halfWidth;
+  const sides = halfWidth > 0 ? [-1, 0, 1] : [0];
+  const top = Math.max(ay, by) + 0.5;
+  for (let i = 1; i <= n; i++) {
+    const k = i / n;
+    const x = ax + (bx - ax) * k, y = ay + (by - ay) * k, z = az + (bz - az) * k;
+    for (const s of sides) {
+      // From over the higher end (a node can lie under the floor it stands for: 8b's 207f).
+      const hit = world.raycast(x + ox * s, top, z + oz * s, 0, -1, 0, top - y + maxDrop);
+      // Walkable: a steep rim the body would slide down is no ground either.
+      if (!hit || (hit.normal && hit.normal[1] < STRAIGHT_WALK_SLOPE)) return false;
+    }
+  }
+  return true;
 }
 
 /** True when nothing in the collision world blocks the segment a -> b. */

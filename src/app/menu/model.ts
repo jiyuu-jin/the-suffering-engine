@@ -94,6 +94,16 @@ export type MenuAction =
   /** Save into a new slot (no id) or over an existing save (confirmation first). */
   | { kind: 'saveTo'; id?: string; confirmed?: boolean }
   | { kind: 'deleteSave'; id: string; confirmed?: boolean }
+  /** Save files on the player's disk (src/app/menu/save-files.ts): */
+  /** One save / every save to a .json file. */
+  | { kind: 'exportSave'; id: string }
+  | { kind: 'exportSaves' }
+  /** .json export files back into the save list. */
+  | { kind: 'importSaves' }
+  /** The original game's .rsg saves and Unspeakable.cfg: a folder, or picked files. */
+  | { kind: 'importOriginal'; from: 'folder' | 'files' }
+  /** The settings and unlocks as an original Unspeakable.cfg. */
+  | { kind: 'exportOriginalSettings' }
   /** Graphics page "Use Defaults". */
   | { kind: 'graphicsDefaults' }
   /** Keyboard page "Default" (after its confirmation). */
@@ -118,6 +128,8 @@ export interface SaveRowView {
   damaged?: boolean;
   /** The "New Save" row of the save screen. */
   isNew?: boolean;
+  /** A file row of the list (import / export: engine wording, drawn like the New Save row). */
+  tool?: boolean;
 }
 
 /** Layout of the game's LoadSave GUI (Interface #145 / #244 / #694, docs/frontend.md §8). */
@@ -172,6 +184,8 @@ export type MenuItem = (
       save?: SaveRowView;
       /** Delete key on this item (save rows). */
       deleteAction?: MenuAction;
+      /** X key on this item (save rows: export the save to a file). */
+      exportAction?: MenuAction;
     }
   | { type: 'slider'; label: Label; setting: SettingKey; min: number; max: number; step: number; place?: Placed; meter?: MeterSpec }
   | {

@@ -372,8 +372,10 @@ sliders about 33 % wide.
 - Heading: texture 5:1120 rect (0, 42, 256, 28).
 
 **What the port applies** (`src/app/menu/graphics.ts`, settings `x.<row id>`; Use Defaults
-restores the engine defaults): Resolution = render scale of the window (50 / 67 / 75 / 100 %,
-the value text shows the render size); Pixel Shaders = post effects (insanity screen effects)
+restores the engine defaults): Resolution = render scale (`x.renderScale`: Auto, the default, or
+50 / 67 / 75 / 85 / 100 % of the native size, the value text shows the render size; Auto is a pixel
+budget per graphics mode / Enhanced tier plus dynamic resolution, `?scale=` overrides it per page:
+docs/perf.md "Perf A"); Pixel Shaders = post effects (insanity screen effects)
 on / off; Gamma = an sRGB gamma ramp over the game view and the menus; Texture Filtering =
 point / bilinear / trilinear + anisotropy on the level textures; an engine-added Frame Rate
 Limit row (off / 30 / 60), and the engine-added Graphics Mode (Original / Enhanced, applied on the

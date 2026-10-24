@@ -63,8 +63,10 @@
 //   event is Torque's death by a Slayer, Player p332 = 2:562 (bones 11, 31, 48: caps 2:766 /
 //   2:765 / 2:770, whose p6 1e9 no blow reaches).
 //
-// Port [inferred unless marked]: the hit point picks the nearest posed leaf hit sphere that is not
-// on a cut bone; a bone's channel is the nearest bone up the tree (itself first) in the model's
+// Port [inferred unless marked]: an NPC blade's blow carries the sphere it struck (the first leaf
+// in node index order its sweep touches [verified 0x100c9680], npc-melee.ts sweepHit), a thrown
+// missile's the sphere it met; other blows pick the nearest posed leaf hit sphere to their point
+// that is not on a cut bone; a bone's channel is the nearest bone up the tree (itself first) in the model's
 // channel table. The draw batches are the engine's; the port groups the mesh's triangles by
 // segment (the nearest bit channel up the tree from each corner's heaviest bone, the corners'
 // majority) and drops the triangles of the cut segments from the actor's own index (the vertex
@@ -467,14 +469,20 @@ export class Dismemberment {
    * A blow on the actor (after its health changed): 0x10119150. `point`: where it landed (no
    * point: no hit sphere, no cut); `from`: the attacker's position (the part flies away from it).
    */
-  hit(a: PartActor, blow: PartBlow & { point?: THREE.Vector3Like; from?: THREE.Vector3Like; byPlayer: boolean }): PartCapRule | undefined {
+  hit(a: PartActor, blow: PartBlow & { point?: THREE.Vector3Like; bone?: number; from?: THREE.Vector3Like; byPlayer: boolean }): PartCapRule | undefined {
     const s = this.st.get(a);
     if (!s?.rules.length || !blow.point) return undefined;
-    // The sphere tree skips the spheres of cut nodes (0x4271fd).
-    const spheres = this.deps.spheres(a).filter((x) => !s.gone.has(x.bone));
-    const i = nearestSphere(spheres, blow.point);
-    if (i < 0) return undefined;
-    const ch = channelOf(s.parents, s.channels, spheres[i].bone);
+    // The struck sphere's bone when the blow carries it (a blade's first touched leaf, npc-melee.ts
+    // sweepHit; a missile's contact); else the leaf nearest the point. The sphere tree skips the
+    // spheres of cut nodes (0x4271fd).
+    let bone = blow.bone !== undefined && blow.bone >= 0 && !s.gone.has(blow.bone) ? blow.bone : -1;
+    if (bone < 0) {
+      const spheres = this.deps.spheres(a).filter((x) => !s.gone.has(x.bone));
+      const i = nearestSphere(spheres, blow.point);
+      if (i < 0) return undefined;
+      bone = spheres[i].bone;
+    }
+    const ch = channelOf(s.parents, s.channels, bone);
     const r = ch >= 0 ? capFor(s.rules, ch) : undefined;
     if (!r || s.gone.has(r.bone)) return undefined;
     const health = a.alive ? a.health : Math.min(0, a.health);

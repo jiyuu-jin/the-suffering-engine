@@ -81,7 +81,11 @@ export function worldSaveProvider(world: World): SaveProvider<WorldSaveState> {
     // Destroyed first: World.setVisible will not show a destroyed object again.
     const wasDestroyed = w.destroyed;
     w.destroyed = !!r.d;
-    if (w.visible !== !!r.v) world.setVisible(w.uid, !!r.v);
+    // (World.setVisible refuses to show a destroyed object: its flag is put back as saved.)
+    if (w.visible !== !!r.v) {
+      if (w.destroyed) w.visible = !!r.v;
+      else world.setVisible(w.uid, !!r.v);
+    }
     if (w.destroyed !== wasDestroyed) {
       if (w.destroyed && !actor) hooks.destroyed?.(w.uid);
       else if (!w.destroyed && !actor) hooks.setVisible(w.uid, w.visible);
@@ -169,7 +173,13 @@ export function migrateItemKey(k: string | null | undefined, resolve?: ItemNameR
   return refs.length === 1 ? `${refs[0].pkg}:${refs[0].id}` : null;
 }
 
-export function inventorySaveProvider(inv: InventoryLike, clear: () => void, resolve?: ItemNameResolver): SaveProvider<InventorySaveState> {
+/**
+ * `put` writes a saved entry back as it was. It must bypass what the running systems hook onto
+ * `inv.add` (the weapons system treats a gun added there as a pickup: a loaded clip and the
+ * gun's start ammo on top, so every load added a pickup's worth of ammo: save matrix, level 2).
+ */
+export function inventorySaveProvider(inv: InventoryLike, clear: () => void, resolve?: ItemNameResolver, put?: (i: InventorySaveItem) => void): SaveProvider<InventorySaveState> {
+  const restore = put ?? ((i: InventorySaveItem) => inv.add(i.name, i.count, i.template, i.className));
   return {
     save: () => ({
       items: [...inv.items.values()].map((i) => ({ name: i.name, count: i.count, template: i.template, className: i.className })),
@@ -178,7 +188,7 @@ export function inventorySaveProvider(inv: InventoryLike, clear: () => void, res
     }),
     load(d) {
       clear();
-      for (const i of migrateInventoryItems(d.items ?? [], resolve)) inv.add(i.name, i.count, i.template, i.className);
+      for (const i of migrateInventoryItems(d.items ?? [], resolve)) restore(i);
       inv.maxHealth = d.maxHealth ?? inv.maxHealth;
       inv.health = d.health ?? inv.maxHealth;
     },

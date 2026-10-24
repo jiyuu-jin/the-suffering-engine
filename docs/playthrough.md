@@ -6,7 +6,8 @@ Regression tests: `tests/playthrough.test.ts`, `tests/playthrough-ai.test.ts`, `
 
 ```
 node tools/playthrough.mjs --tmp <scratch dir> --shots <dir> --out report.json [--keep]
-     [--from <step>] [--to <step>] [--level 1b] [--invulnerable] [--watch <s>] [--difficulty 0..3]
+     [--from <step>] [--to <step>] [--level 1b] [--invulnerable] [--ignore-player] [--watch <s>]
+     [--difficulty 0..3]
 
 --level starts that level through the developer deep link (logged; the shiv is given, logged).
 A level entered through a transition (`ARRIVALS`: 2 from 1c, 3a from 2, 3b from 3a) starts in the
@@ -18,6 +19,11 @@ to the deep link.
 --cine-strip <s> (with --shots) saves a frame of every cinematic each <s> seconds (8 at most).
 --save <file> restores a state captured with the control server's GET /capture?name= (exploring a
 later part of a level; logged). POST /run with a step object (JSON) tries a step not yet in ROUTE.
+--ignore-player turns on the port option "Enemies ignore the player" (`?ignorePlayer=1`,
+docs/game-logic.md §15.17; logged as a shortcut, `ignorePlayer: true` in the report). It is a
+testing aid for exploring and for checking level logic past a fight. It must never be used for
+the official campaign results. It is separate from --invulnerable: that one keeps the player alive
+while enemies still fight him, this one keeps them off him while stray damage still lands.
 ```
 
 The run boots the front end like a player (start gate click, logo movie skipped with Esc, main
@@ -158,6 +164,12 @@ outputs, STOMP Players and Level Transitions, and checked in the browser.
 | 61 | 1a electrocution (user report) | The guard fell at once at the electrified door; in the original he stays up amid the bolts while Horace's line plays, then falls. | Decoded the scene: his arrival at Waypoint 752d fires Relay 8a1b -> Timer 81d5 (0.1 s) -> Damage Action Objects 75dd (0) and 8185 (200 at once) and Relay 75de -> Timer 5bd2 (0.1 s) -> the bolts (7619) and Relay 7a77 -> Timer 8a1c (0.25 s) -> Speech Player 8b33, Horace's random line 0.35 s after the arrival; the guard has no line there. The death is at 0.1 s in the original too; what differs is the clip. The Character death picker (0x100e5d00) chooses among the p72 DeathBehaviors by the angle between the body's back axis and the attacker's direction (DeathBehavior p4 the bound); a Damage Action Object's damage record has no attacker (0x1008e9e7): 90 degrees, so the guard takes his second entry 10:22 (clip 10:156: upright ~0.5 s, kneeling 1.5..5 s, down at 5.7 s). The port always took the first (10:250: 10:301 down by 0.5 s, or 10:1470). | `actor.ts deathAngle / deathPick / deathFor` with the killing blow's attacker (`profile.deaths`, DeathBehavior `angle`); docs/game-logic.md §11.5 item 3, §17.3. | fixed, tests, verified on the real route (10:156 played; Horace's line 0.35 s after the arrival; a frame strip from the reference framing: upright amid the bolts with the line on screen to 1 s, on his knees 1.5..5 s, down at 5.5 s; `1a.guard-dies` and `1a.guard-gun` pass) |
 | 62 | 5a / 5b (deployed build 1c6b915) | Chapter 5 threw `material.customProgramCacheKey is not a function` from the renderer every frame (5a); 5b drew nothing. | The scene glow kept each surface's mark material in `material.userData.glowMark`. `Material.clone` / `copy` deep-copies userData through JSON, so a clone carried the mark as `Material.toJSON` output, a plain object, and the glow pass swapped that object in as the mesh's material. The clones were the sky objects (lights.ts) and security monitors (monitor-view.ts) of chapter 5, whose materials are flagged. | The mark is a non-enumerable userData property (`app/glow-mark.ts`): JSON skips it, so a plain clone has no mark. Only a real material counts as a mark. `cloneWithGlowMark` keeps it for the sky, the monitors and Killjoy's projector targets. Smoke now loads 5a, 3a and 5a in Enhanced mode. `tools/levelqa.ts --query` runs the QA in Enhanced mode. | fixed, test (`tests/scene-glow.test.ts`), smoke, levelqa: all 18 levels load with 0 errors in both modes |
 
+| 63 | actors (placement) | The probe's "1e93 sinking -0.36" at the 3a arrival: the guard 1e93 (RootPlayAnimBehavior 402d, a pose) stood 0.36 m under the floor he is placed on. | He is placed 0.11 m under a walkable floor at 107.31; `Actor.place` measured the ground from 0.5 m up, saw the feet under that surface, then took a collision box 0.25 m under the feet as the floor and set him down onto it (106.95), where the pose keeps him (no mover step runs). | A centre-probe mover places a body where its own ground pass would put it (docs/game-logic.md §14.9: a plane above the foot sphere's centre within its radius is a ground contact and the highest one is the ground): `CharacterMotor.centreGroundHeight`, used by `place` when that ground is at or above the feet; bodies laid out dead keep the gap rule [verified rule, its use at placement inferred]. | fixed, test (`tests/yard.test.ts`) |
+| 64 | actors (Mainliner ride) | Rides moved the player across the level: in 1b's sewer he ended inside the junk heap at (333.7, 73.2, 399.5) and every step after failed (run r1b); at 4b's ravine head he was put back at the arrival point (the fall-out rule) right after a ride (run b4b). | The ride keeps its rider 0.45 m off the player's feet every frame (`mainliner.ts rideUpdate`) and nothing puts the held player's feet anywhere (`PlayerHold` without `feet`); the manager then pushed the player out of the rider's body, 0.3 m a frame (0.45 against 0.75 of radii), so the pair slid away at about 18 m/s, into heaps and off floors. | No push out of bodies while something drives the player's feet (`ActorManager.pushPlayer(motor, held)`, `held` = `player.motionOverride`: a hold, a ladder, a clamber, a locked clip). The original's player / character contact is not decoded; the ride holds the player in place [inferred]. | fixed, test (`tests/actor-damage.test.ts`) |
+| 65 | route (checkpoints) | `1a.cp3`: "checkpoint #8397 not taken" (runs c1, d1); the log has it one step later. | Its Detector 8396 is a 1 m slab across the corridor (z 446..447) and the walk ended at z 447.3, short of it: the Autosave came on the way into the gas chamber. | The walk ends in the slab's middle (446.5). `expect.checkpoint` also waits on while the save manager has a checkpoint pending (one asked for during a cinematic is taken when it ends). | fixed (route, harness) |
+| 66 | harness (fights) | The harness fought every creature the same way: the last gun picked up (the shotgun, 24 a shot close in, little at range), walking up to whatever it shot, standing in an Inferna's flame and a gunman's line. Most deaths of the campaign runs came from that (9's first Inferna fight: 13.9 health and both bottles left in run r9). | Harness tactics. | `__pt.attack` picks the gun by distance (shotgun within 4..7 m, Tommy Gun beyond, the revolver when they are dry); objects take the shotgun as before, or a step's own `weapon` (doors and locks resist bullets: 1b's 64e1 has Damage Resistance 2:539, type 1 x 0, and took no Tommy Gun round in 150 s; 2's gunner gets single revolver shots, row 2-14). With a shot the fight holds its ground within 15 m. A burning Inferna within 7 m, or a creature swinging within 3 m while the player shoots, is met with a step back and aside (S plus A / D, only where the floor 1.5 and 3 m behind is there, and in an arena not away from its middle, the sidestep turning back towards it: `__pt.evadeKeys`; after fights that drifted with their Infernas, 9's guard bc9 was found in his HostilityBehavior on the shore 28 m under the lighthouse's cliff, runs t9b / d9, and 9 has no way out without him): an Inferna circles at 4 m and bursts within 5 m (Radius Damage 20 -> 5 over 8 m), from 6 m it throws fireballs at where the player stood. Ash piles (the only time an Inferna takes damage) and gunmen shooting at the player come first; an unlit Inferna is still shot (its Damaged lights the 9 fight, Count Down c59); none while it collapses or reforms. A gunman shooting at the player while he is under 70: cover within 8 m out of all their lines (`__pt.coverSpot`, they need a clear line at their Fire marker, `actor.ts fire`), held 8 s or until a line opens (not at full strength: 2's riot stalled with the player hiding). A gunman shooting from above (3a's tower guards, 9 m up) or outside the arena's area is shot back. No walking on over a 3 m drop (`__pt.edgeAhead`: 8a's creature form chased a Slayer off the clearing's cliff). The creature form keeps closing to melee. Measured in 9: the first Inferna fight 195 s -> 69 s, 86 health lost and both bottles -> 18 and none. | fixed (harness) |
+| 67 | harness (reports) | Deaths and companion losses said little about their cause. | | A death note sums the damage of its last 40 s by source; `__pt.allyDmg` keeps each blow's call site and a uid source in hex; escort and follow steps print the companion's state, health and last hurts (`allyDiag`) when they fail. A walk that ends in a drop is measured once the player has landed (6a's creek bank read as a miss from mid-air). A level change may take 420 s (a loaded machine). The probe leaves out the Black Ones (they never move: specials/black-one.ts; "822 sinking" was its rig's root under the dock). | fixed (harness) |
+
 ## Open observations
 
 - **Melee from below**: decoded and fixed (docs/game-logic.md §15.5, `actors/npc-melee.ts`). The
@@ -194,6 +206,55 @@ outputs, STOMP Players and Level Transitions, and checked in the browser.
   Flying Sound 78a6 on and off). Free-standing loops: 1a's Sound Effects 838f (6 m) and 86be
   (20 m). So 0 bed loops at most 1a steps is the data, not a bug; the harness now counts zone
   beds, looping emitters in earshot and Flying Sounds switched on.
+
+## Results: the whole campaign (2026-10-23, Medium, headless Brave / WebGPU, 1280x720)
+
+Every chapter's route was run once in order (the first column), its failures fixed at their root
+(bug log rows 63..67 and the chapters' rows 2-14 / 2-15 / C-7b, 4-14..4-16, 6-6..6-8, 10-17) and
+run again (the second column). The machine was shared with two other agents' runs throughout:
+times are not comparable between runs. A death is retried from the last checkpoint with
+invulnerability kept on from there (logged), so the steps after it are counted but were played
+invulnerable. Reports and frames are in the agent's scratch (`campaign2/`), not in the repository.
+
+| Route | First run (steps ok, deaths) | Last run (steps ok, deaths) | What is left, and why |
+|---|---|---|---|
+| `--level 0 --to 0.1a` | 8 / 9, 0 (d0) | (same run) | the probe's "stuck dda": a fleeing prisoner held against the pen's fence (probe note) |
+| `--to 1c.exit` (1a .. 1c) | 66 / 68, 1 (c1) | 66 / 68, 1 (j1) | a death in 1b's arena (the player came in with 51 health; CartWheeler blades, 8.2 a hit); `1a.cp2` once (the crate 80ed takes the view's pick in front of door 4ed6, passes in c1 / d1); `1a.cp3` passes (row 65), the 1c inmate lived and opened the exit himself; in run d1 (62 / 68) he died in the yard from a neck cut and 1c's last steps failed with him (row C-7b) |
+| `--level 2 --to 2.exit` | 23 / 29, 1 (b2) | 26 / 30, 1 (g2) | a death to the steam-pipe yard's Mainliner needles (10 a needle); Dallas dies there from a neck cut in every run (row C-7b; d2, f2, g2), and the middle block's inmates then never turn (`2.inmates` over time); a probe note. The gunner, the lever and the gate (row 2-14), the climb and 3a pass |
+| `--level 3a --to 3a.exit` (3a, 3b, 3a) | 53 / 57, 1 (b3a) | 57 / 58, 1 (d3) | a death to the guards' and Slayers' fire on the way west out of the fenced yard (`3a.gaurd1`); the fenced yard itself and the arrival probe (row 63) pass |
+| `--level 4a --to 4b.exit` | broken at `4a.yard` (b4; 4b on its own: broken at `4b.boulder`) | 62 / 65, 1 (e4) | a death to 4a's Slayers 5976..5978; two arrival tolerances fixed since (`4b.controls-floor`, `4b.ridge-west`) |
+| `--level 5a --to 5b.exit` | 5a: arena over time; 5b broken at `5b.upstairs` (c5) | 5a: 19 / 20, 1 (k5b, `--to 5a.exit`) | 5a: a death in the courtyard to the Burrower copies (21bf: 83 of the last 40 s; they can be hurt only while they strike), the retried courtyard then cleared; 5b: no way upstairs from the lobby (open, "5 Asylum"), so no 5b run was made |
+| `--level 6a --to 6b.exit` | 46 / 51, 1 (b6) | 49 / 52, 1 (d6) | the clearing's Slayers (a death), a harness race at `6a.exit` (fixed since), a Burrower "stuck" probe note; 6b by play to 1b with the new pier and hut routes; Clem dies on the beach (row 6-8) |
+| `--level r1b --to r1a.exit` (6b -> 1b -> 1a -> 3a) | stuck in the sewer's junk heap after a Mainliner ride (r1b) | 23 / 27, 1 (dr1) | a death to the Fester 7e08 and its rats (10 a bite); `r1b.cp2` (Autosave 8bec not taken); 1b's door 64e1 resists bullets (row 66: objects take the shotgun again since); a probe note |
+| `--level 8a --to 8b.exit` | lost in the creek after a creature-form chase (b8) | 56 / 67, 1 (d8); 8b on its own: 32 / 40, 1 (h8b) | 8a: a death on the roof to the yard's Slayers; the clearing's Slayer waves. 8b: the explosive crate's pulls fell short under load (d8; the last pull has 5 s and a second try since) and the run lost the stove blast and Jimmy's escort; in h8b a Slayer (18bc) stuck on the store room's stairs held the player upstairs for the horde's 360 s, and Jimmy died in the ravine from a neck cut. A session from the stove played the blast, Jimmy's escort through the ravine at full health and the ladder; his last walk ends at the ladder's foot ("8 Bluff", open) |
+| `--level 9 --to 10.finish` | 9's first Inferna fight: 13.9 health, both bottles (r9) | 69 / 81, 1 (g9) | one death in the first Inferna fight (their flames, and 52 from their burning footprints: row 66 steps out of fires since); the 10 guard 7b8 shot on the road by the Slayer 604 (5 x 3 a volley; his later escorts and farewell fail with him); the gate Infernas' arena over time; `10.valves` (35a: objects take the shotgun again since); `10.killjoy` (fixed since); `10.cp` passes |
+
+What is left, by kind:
+- **Fights the data makes deadly (harness, not fixed).** The Slayers' gunfire: 3 a bullet, five
+  guns a volley, two volleys an Attack and no spread on the common Attack 10:1506. A session in
+  6a's clearing (invulnerable, 40 s) measured 457 damage taken, 315 of it from the Slayers a09, 1c2f and 2337,
+  although the player kept a gun on them; the decode of their parent behaviour
+  (RangedCombatRepositionBehavior, vtable 0x10156c50: on a finished ProjectileAttack it starts the
+  next one at once, 0x100f2d70, and searches a new stand every p0..p1 s, 1..3 s for the Slayer's
+  10:544) gives no longer pause than the port's 2..4 s. The fights of 3a, 4a, 6a, 8a and 10's
+  road kill the harness or a companion there; cover (row 66) helps against one gunman, not two.
+- **Companions cut down (data).** Dallas (2), Clem (6b), Jimmy (8b) and 1c's inmate died from a neck cut:
+  Part Cap 10:862 bleeds 500 a second (row C-7b). 10's guard 7b8 falls to the Slayers' fire.
+  Checked again (2026-10-23): the cap's whole test is the data's (any type, any attacker, 3.9 and
+  up, 40..70 %), but the port picked the struck sphere wrongly for NPC blades (the deepest overlap,
+  then the leaf nearest the blade's point: the head often won); the original takes the first leaf
+  in node order the sweep meets, which puts the body before the head (docs/game-logic.md §15.5).
+  Re-run after that fix (2026-10-23/24, 11 companion stretches, "Companion survival" below): the
+  inmate lived 1 of 3, Dallas 0 of 2, Clem 1 of 3, Jimmy 2 of 2. Cuts killed 4 of the 7: neck
+  cuts by a CartWheeler blade (1c) and a Fester's blow (6b), a torso cut by a Fester's blow (6b),
+  and a torso cut after a Mainliner "blow" that the port had guessed (2). That guess is now
+  removed: a class's own attack clips hurt only through an armed Melee Weapon. The other deaths
+  were Slayer fire (1c) and the Mainliners' rides and grab (2).
+- **Engine, fixed since (2026-10-23).** Jimmy's walk to Hermes' room: his goal is placed on the
+  graph through his NPC Exclusion Type, and his "Camera" 1eb1 plays ("8 Bluff"). 9's guard on the
+  shore: straight walks keep to the ground ("9 Lighthouse").
+- **1a "Gaurd" #218 (user report, row 58).** Every chapter 1 run since the check was added
+  found guard 609f alive when #218 started (`1a.gaurd` passes, runs c1 / d1 / j1).
 
 ## Results (last full run: Medium, headless Brave / WebGPU, 1280×720)
 
@@ -383,6 +444,9 @@ level's opening leaves it to the next step).
 
 ### Results (Medium, headless Brave / WebGPU, 1280x720)
 
+The campaign run of 2026-10-23 (both runs of this chapter, what is left and why) is in
+"Results: the whole campaign" at the top of this file.
+
 - **r1** (before 0-1 / 0-2): the beating killed the harness standing still; the vision step's
   condition matched the Prefetch to Screen Fader e00 that Count Down de6 sends, so the creature
   form ran on until the meter's health drain killed him (Player p257 at an empty meter); retried
@@ -473,6 +537,8 @@ death retries the step that took the restored checkpoint; damage to allies logge
 | 2-11 | world (logic) | `2.gate` opened c36 by its own Activate message when Dallas was dead. | The gate is opened by the lever 1356 by the nest (p64 On), which Dallas's script pulls (Timer 314e) and which the player can use. | `2.gate` uses the lever (skipped when Dallas did; new step field `unless`). | fixed (fallback decoded: the player's lever) |
 | 2-12 | sequence | "Mainliner" 847 (0x40, no Camera track) held the run still; the scene played out of view. | The port treated header flag 0x40 as a camera cinematic. In the EXE only a track on the Camera object takes the view and input (run flag 0x200, 0x44f497 / 0x4bccf1); 0x40 is only "is a cinematic playing" (0x44c6e0). | `World.takesCamera`: `activeCutscenes` / Enter skip only those; the route watches 847 from the walkway in the player's view. Eight retail sequences are in-world (game-logic.md). | fixed [verified], test, verified in the browser |
 | 2-13 | actors (speech) | Speech Player 310f played Dallas's line 20:202 after his death ("by nobody"). | The port played a line with no live speaker at the Speech Player. Original: a dead character's speak returns at once (0x100e1b40 / 0x100a1ad0); the line still counts (p8 / p9 / p6 follow). Also decoded: p0 speaker source, p4 order, p6 destroy, p9 only after the round's last line. | `director.ts speakLine / speechPick` [verified]. | fixed [verified], tests |
+| 2-14 | route | `2.gate` could not reach the lever 1356 (run d2: "no full path ... 2.3 m short", then `2.climb` and the exit failed): the gunner 7f4 had died at his gun. | The lever stands in the nest, behind its door be4 (locked; the gunner's way out is Edge Passage 2e0f, p4 = 1). With the fights' Tommy Gun the shots that count his five Damaged (Count Down 2e11) killed him before he walked out, and the nest stayed shut. | `2.gunner` shoots single revolver shots (`shoot` takes `weapon`), and `2.riot` spares him (`spare`, out of its prey and its forced end): with the revolver alone the nest still stayed shut after the riot in run f2, whose fights had him among their prey. `2.gate-try` uses the lever once more when the first use found it out of view (the riot ending with the player transformed, run b2). | fixed (route) |
+| 2-15 | route (companion) | Dallas died in the steam-pipe yard behind the player: `2.cover` ended at once (he was within 9 m at its start) and the vents' copies and the steam were left to him. | The step waited for his distance only. | `2.cover` clears the yard: every vent's Count Down (2e92 / 2ea7 / 2ea0 / 2eb2 / 2e99, four copies each) at zero turns it off. | fixed (route); his deaths: below |
 
 ### Companion survival (1c's inmate 7569, 2's Dallas 868)
 
@@ -492,6 +558,7 @@ and what the player does. These port rules had him walk into fights or fight bad
 | C-5 | actors (stands) | Dallas fought Mainliners from wherever he stood. | Ranged Targeting Positions served fights against the player only. | The stand search takes the fight's target, whoever it is (0x100f74f0 -> 0x101265c0) (`ranged-positions.ts standTarget`). | fixed [verified], test |
 | C-7 | actors (shots) | Dallas missed about half his shots at 15 m, so the Mainliners on him lived longer. | NPC hit chance was a guess (0.9 - 0.02 x d, at least 0.25). | Decoded: a cone of Ranged Weapon p75 x Attack p19 degrees (0x100fcec0 -> 0x100958e0 -> 0x10127b30); prisoners' attacks have p19 = 0, guards' 1, Slayers' 0 / 0.3 (`actor.ts spreadShotHits`). | fixed [verified], test |
 | C-6 | harness | `2.north` / `2.talk` waited where Dallas, hanging back, never reached Detectors 904 / 2f90; the creature form killed him (35, run n2a); the inmates and creatures on him were fought only when they turned on the player; his own way on runs through the steam-pipe yard (the cell e3, nodes 1ccd .. 9ed; only the yard door 9bd is barred to him), where the vents' Mainliners the run had left alive killed him. | The steps assumed a follower at the player's shoulder; the ally check for the transformation was 12 m; `engage` skipped characters hostile only to a companion; `2.yard` runs through. | The player walks on past the Detectors; no transformation with a companion within 30 m; `engage` takes whoever is after a companion first (`playthrough-page.js`); `2.cover` goes back into the yard and fights until he has come up, `2.east` leads him on. | fixed |
+| C-7b | actors (dismemberment; data) | Dallas still died in the yard in runs b2, z, d2, each time from full health to 0 within 0.1 s after a blow (16.6 from a Mainliner, or 8.3 a frame "by 868", himself). | A blow on his neck cut it: Part Cap 10:862 (bone 48; p6 3.9 the smallest blow; p7..p9 40..70 % as the blow grows to 15; no type or attacker limit; **p2 500 bleed a second**), and the bleed (`Dismemberment.update`, decoded: bleed x frame time through the damage virtual, attacker the body itself) killed him (docs/game-logic.md §15.16, dismember.ts). The rule that could forbid cuts on a character (+0x6c & 0x100 / +0x70 & 0x80, the gate at 0x100e76b7..0x100e76d3) has two writers in Suffering.rfl: +0x70 bit 7 only by MorphTransformBehavior's helper 0x100f0af0 (from its vtable 0x101581d8 slots 8 / 9), and +0x6c bit 8 only by the Character virtual 0x100e2160 (13 vtables), which with the same switch also sets +0x74 bit 0 and passes it to the body's components +0x90, the mover +0x1ae and the follower +0x26c: by what it switches, the hold a script puts on the body [inferred]. Nothing sets either for a companion, so his neck is cut like anyone's [verified writers]. (The port does not apply the scripted-body gate; no run met a case.) | documented (data); the harness clears what attacks him first (`engage`, row C-6, and 2-15). Checked again 2026-10-23: the data stands, but NPC blades struck the wrong sphere (the head too often): fixed, the first leaf in node order (docs/game-logic.md §15.5). Re-run 2026-10-23/24 (below): the cuts left are the data's; one came from an untyped port-guessed Mainliner blow, removed since (`clipmap.ts`) |
 
 Runs (Medium, headless Brave; the companion's damage from `__pt.allyDmg`):
 
@@ -512,7 +579,31 @@ Runs (Medium, headless Brave; the companion's damage from `__pt.allyDmg`):
   lever 1356's, bug 2-11), so a playthrough losing him is within the decoded rules; keeping him
   needs a player who kills what is on him at once, which the harness does only roughly.
 
+**Re-run after the blade fix** (fac508f: an NPC blade strikes the first leaf in node order; runs
+of 2026-10-23/24, Medium, not invulnerable until the harness's first death; the cause read from
+`__pt.allyDmg` and the cut bones). Same rig for the inmate, Clem and Dallas (models 10:50 /
+10:93): its leaves in node order are pelvis 55, chest 3, forearms 12 / 14 / 32 / 34, then the
+head 48, so a blade or a fist meets the head first only when it reaches it before the body in
+that frame's sweep. Both the neck cap 10:862 (any type) and the torso cap 10:863 (not bullets 1,
+axe 2, fire 5, shiv 10, 12) bleed 500 a second; a Fester's blow is type 11.
+
+| Stretch | Runs | Lived | Deaths and causes | Before (campaign table) |
+|---|---|---|---|---|
+| 1c inmate 7569 (`--level 1c --to 1c.exit`) | c1a, c1b, c1c | 1 / 3 | c1a lived and reached Waypoint 7b8c. c1b died in the east yard (`1c.lead`): CartWheeler 7e16's blade, 14.3 (type 2), cut his neck (10:862). c1c died at his flee spot (FleeBehavior 7e3e) to Slayer 7e02's fire, 25 bullets of 3, with no cut. Bullets of 3 never make him leave the spot (it is left after 3 hits of 5 or more in 5 s, §15.14). | lived in j1; died from a neck cut in d1 |
+| 2 Dallas 868 (`--level 2 --to 2.exit`) | d2a, d2b | 0 / 2 | d2a, t 243: a 10 "blow" from Mainliner a60 with no damage type cut his torso cap 10:863, which no bullet or blade can cut. It was the port's guess: an attack clip without Arm events landed 10 at 45 % of the clip. Removed (`clipmap.ts`, `tests/creature-attacks.test.ts`). d2b, t 246, with the guess removed: the steam-pipe yard's Mainliners. a5e's needle 10, a61's ride 30, a60's grab 6.5 and ride 30, all decoded; no cut. | neck cut in every run (d2, f2, g2) |
+| 6b Clem 49a (`--level 6b`, the beach) | e6a, e6b, e6c | 1 / 3 | e6a lived through the shore (three Fester blows of 26, none cut). e6b died to Fester 147d, a 20 and then a 40 (type 11), neck cut both times (the death and its checkpoint retry). e6c died to Fester 147d, a 40, torso cut (bone 3). | died on the beach (row 6-8, neck cut) |
+| 8b Jimmy 1738 (`--level 8b --to 8b.exit`) | j8a, j8c | 2 / 2 | Both lived through the ravine to his scripted death (Hermes, "Camera" 1eb1); j8a took only 27.7 from the harness's own blast. j8b was interrupted mid-ravine and is not counted. | died in the ravine from a neck cut (h8b) |
+
+So the head is no longer struck by default: Dallas lost no neck in either run. The cuts left come
+from blows that reach the head or chest first. A Fester's fist and a CartWheeler's blade above 3.9
+cut 40..70 % of the time (more as the blow grows to 15), and either cap is fatal. That is the
+data's rule. The 6b runs were cut short after the beach (`6b.oil` stalled in e6a), and the
+interrupted 8b run was replaced by j8c.
+
 ### Results (last run, Medium, headless Brave / WebGPU, 1280x720)
+
+The campaign run of 2026-10-23 (both runs of this chapter, what is left and why) is in
+"Results: the whole campaign" at the top of this file.
 
 `--level 2 --to 2.exit`: arrival to **3a YardCellBlock** in 25 min (1489 s), 20 of 23 step records
 clean; one death (Mainliner 1029 in the steam-pipe yard, retried from checkpoint 334c with
@@ -600,6 +691,9 @@ stand's floor and surroundings) and `hold` (the fight kept within that many metr
 | 3-18 | route / world (collision) | With objects colliding as their collision trees (docs/game-logic.md §14.10, row 9-15) the 3b barricade still closed the doorway after `3b.barricade` broke crate 2f94, and the drop through the cell-floor hole ended on top of the rubble at 95.7, from where the planner found no way to the basement button. | The barrel 2f93 lying on crates 2f92 / 2f95 overhangs the gap 2f94 leaves at head height as its 0.7 x 1.5 m box (the drawn barrel left room); the rubble 2d56 / 2d57 (23:703) is two 2.5 m boxes from z 304.5. | The step breaks 2f94 and 2f95 (2f95's p21 message 11 brings 2f92 and 2f93 down); the hole route lands south of the rubble and `3b.basement` may drop 2.5 m. The manhole ladder 157b is now a box (x 287.7..287.8) between the ladder's foot and the old `3a.tanks` stand: the walk round it faced the ladder and remounted it, and the tank 13c3 was never hit; the stand is on the side the ladder leaves him (287.55, 384.1). The decoded clamber room test (docs/game-logic.md §14.10: the proxy's sphere swept to 2.245 m) blocks 3b's first ledge (Clamber Point 2a00) under the ceiling box 29c0 that covers its east half (2.18 m above the top): `3b.climb1` stands at x 408.6 (a scan of all 229 retail Clamber Points finds no other that lost room). Checked in the browser: the doorway is clear, `3b.hole` .. `3b.roof` and `3a.manhole` .. `3a.store-out` pass. The burnt gate 3ab0's hole is drawn only (one 0.3 x 2.7 x 2 m box): `3a.gap` is gone, the walk goes by the door ba2. The gas tank 13c3 took no bullet: its template has bit 10 (AI sight passes it), which the shots had shared with sight; shots now pass no collision-tree geometry (`WorldService.shotThrough`, docs/game-logic.md §14.10) [inferred], and the shotgun breaks it. | fixed (route, weapons) |
 
 ### Results (last run, Medium, headless Brave / WebGPU, 1280x720)
+
+The campaign run of 2026-10-23 (both runs of this chapter, what is left and why) is in
+"Results: the whole campaign" at the top of this file.
 
 With the character mover, run y3 of 2026-10-15: `--level 3a --to 3a.exit`, 58 of 59 records
 clean, 4a reached in 934 s. One death (the fenced yard's Slayer fire). No floating, sinking or
@@ -737,8 +831,14 @@ horizontal swings the crane, vertical raises / lowers the hook, until a conditio
 | 4-11 | route, 4a | With 4-10 the upper floor's CartWheelers fight the player at the top of the ladder; `4a.ladder`'s fight chased one along the narrow floor and over its edge, back into the arrival room, and the route was lost (no path back up to the crates). | The fight after the ladder moved with its target. | `4a.ladder` holds the player's place while it fights (`stay`), as the 3a walkway fights do. | fixed (browser: the crates, door and yard followed) |
 | 4-12 | harness, 4b | `4b.climb3` sometimes did not start the clamber ("feet 99.97 -> 99.11", both tries). | Not an engine issue as far as checked: pressed from the ground at the foot, Clamber Point 7f00 (templates 2:638..2:641, reach 2.5 m, minimum height p7 1 m) started every time (four stands around the foot, the route's own step, and `tryClamber` directly). The failing run read the feet 0.86 m above the ledge: the walk to the foot ended in the air (its stuck recovery jumps against the third ledge's rock face) [inferred]. | The clamber step waits for the player to be on the ground and at rest before reading the feet and before each press, and logs where a failed press came from. The same check found `4b.climb1` failing from its stand: Clamber Point 7d71 (template 2:455) allows at most p2 = 4.5 m from the feet to the ledge top (95.25), and the stand on a sloping rock left the feet at 90.70..90.83; from 90.75 up it starts every time. The stand is now the rock's flat top (267.0, 90.84, 645.9, `tol` 0.15). | fixed (harness / route; not an engine issue) |
 | 4-13 | route, 4a pit | The way down into the pit ended 16.8 m short, the player caught in a gap between the rocks at (492.5, 96.4, 668.2) that six jumps did not get him out of. | `4a.pit-edge`'s fight had chased down onto the rock steps to (492.0, 97.9, 668.6); from there the hand-laid route slid him into the gap (1 of 3 starts in a probe; from the edge it went down every time). | The fight at the edge holds the player's place (`stay`). The gap itself is open (world / collision): a player can walk into it. | fixed (route) |
+| 4-14 | route (after the collision trees) | `4a.yard` stopped on the ledge over the yard ("no full path ... 3.91 m short") and the rest of 4a was lost. | The planner finds no free landing cell at the wall's foot (z 636.5) 4 m down. | `4a.ledge` (to the ledge's end, z 635.5), then `4a.yard` as a hand-laid drop to (698.6, 103.7, 640) (session: landed at 103.72, no damage). | fixed (route) |
+| 4-15 | route | `4a.pit-edge` read as a miss in every run (0.9 / 1.2 / 1.4 m short). | Its point was on the first rock step 5 m down; the walk stops on the rim, and `4a.pit` takes the steps from the rim. | The step ends on the rim (492.1, 104.2, 669.6). | fixed (route) |
+| 4-16 | route (after the collision trees) | `4b.controls` / `4b.boulder`: the crane controls 7bd9 out of reach ("not mounted"); "Boulder" 7ef0 never played and 4b was lost from there. | The controls' platform (101.1) is walled off from the upper path (the level collision rises from 105 at x 353.8) and stands 1.7 m over the floor east of it (99.4). | `4b.controls-floor` down to that floor, `4b.controls` a first-person jump onto the platform (2.05 m: Player p215 / p214). `4b.cross` ends at the boulder's east end (382, 510.6), where `4b.climb-out` starts; `4b.ending` walks onto the middle of Detector 682d (a 1 m slab it stopped 0.9 m short of). Session: the boulder, the crossing, the detonator, Pedro, the pallet jumps, the ending scene and 5a. | fixed (route) |
 
 ### Results (last run, Medium, headless Brave / WebGPU, 1280x720)
+
+The campaign run of 2026-10-23 (both runs of this chapter, what is left and why) is in
+"Results: the whole campaign" at the top of this file.
 
 With the character mover (rows 4-10..4-13), run a7 of 2026-10-15: `--level 4a --to 4b.exit`
 reached **5a Asylum** in 1114 s, 67 of 70 records clean. One death (the chained inmates, 5b22),
@@ -864,6 +964,9 @@ already holds); new expectations `gone`, `awake`, `unlocked` and `dead`.
 
 ### Results (last run, Medium, headless Brave / WebGPU, 1280x720)
 
+The campaign run of 2026-10-23 (both runs of this chapter, what is left and why) is in
+"Results: the whole campaign" at the top of this file.
+
 `--level 5a --to 5b.exit` (run of 2026-10-14, `final`): from the 5a arrival to the arrival in
 **6a Woods** in 27 min (1637 s), on a machine shared with four other runs; 60 of 65 step records
 clean, no teleport and no logic shortcut. One death: the 5a courtyard (CartWheeler 1b28's blows
@@ -933,6 +1036,38 @@ Frames: `<shots>/final/` has one frame per step that takes a shot. `*-cine-*` ar
 
 ### Open (by owning area)
 
+- **Fixed (2026-10-23): the floors are hidden floor layers.** 5b's room models are drawn only;
+  material-less floor layers whose cells are all hidden (0x30) but not holes hold movers up at
+  97.66 / 103.16 / 108.66 (docs/game-logic.md §14.10, "Floors under node-less room models").
+  The port now puts every undrawn, non-hole floor-layer triangle into the collision world, and
+  splits each cell along its own diagonal (cell bit 0x1). The upper corridor west of door 2ad8
+  was then closed by the Breakables 31ed / 31ee, built as the 20 m gallery pieces their copied
+  .ldu refs name (§14.10 "Copied .ldu refs"); they use their template model now. Run of
+  2026-10-23 `--level 5a --to 5b.exit`: 63 / 66 steps, on to 6a Woods; the misses are the 5a
+  courtyard arena over time (as before), one 5a death to the Burrower copies, and
+  `5b.stage-room` (open below). Spot checks: `--to 1c.exit` 62 / 67 (the gas chamber, its window
+  and 1a pass; 1c's inmate 7569 killed by Slayer 7def, so the escort and the exit wait), `--level
+  9 --to 9.escort3` 10 / 11 (one death to the Infernas' fire; the escort passes the burial ground).
+  Tests: `tests/object-collision.test.ts`.
+- **Open (5b, door use).** `5b.stage-room`: "use #10dc: the view targets nothing" three times at
+  the double door 10dc / 10dd (x 159, z 186..189); the player stops 5.3 m short and Camera 1296
+  plays one step later. The use ray meets something else first (the frame 285a's box or the
+  skinned Switch 1bfc's drawn triangles are candidates; not traced).
+  The report as filed:
+- **World (collision trees): no way upstairs from 5b's lobby (2026-10-23, runs c5 / e5 and a
+  session).** Since objects collide as their collision trees (docs/game-logic.md §14.10) the
+  player stands 1 m under the lobby's drawn floor (96.65 against 97.66): the floor is drawn by
+  Static Objects whose trees are sphere trees without nodes (28:285 at (196, 97.7, 189), 28:160,
+  28:219, 28:278, 28:309; bounding radii 5..11 m), which the port leaves to rays only, and he
+  walks on the tops of the basement's walls (the box leaves of 28:186 / 28:191, 96.7). Between
+  them the lobby's north side is open to the basement, door 10de's threshold is a 1 m step, and
+  `__pt.reach` from the lobby finds 688 cells and no exit; `5b.upstairs` and every 5b step after
+  it fail (the player falls through to the fall-out respawn by the arrival). The movers'
+  gather (SUFFERING.EXE 0x41ee40 -> 0x41f2f1 -> 0x41c340) releases a node-less sphere tree's model
+  at 0x41c53f without contacts, as §14.10 has it; a lobby floor nobody can stand on cannot be the
+  original's, so some other path must give these room shells their floor (not found: the
+  dispatch 0x41f0ba..0x41f11c reads the leaf face list only for box trees). Open for the
+  collision owner; the 5b route cannot be played until then.
 - **Level data, not a bug.** The Autosave 2abf never fires: its input is Off while the Relay that
   feeds it (31e2) sends On [data]. The other three checkpoints (2ac0..2ac2) fire.
 - **Actors (Killjoy).** RaiseDead also brings the corpse's broken body parts back with the clip's
@@ -1049,6 +1184,9 @@ leads back to 6a. The routes were read from the levels' message graphs and check
 | 6-3 | actors (KillEnemies) | After the tank the stranger stood on his ledge for good. The second tank and his walk off never came. | A KillEnemies that a Behavior Changer handed out never completed, so the chain's p17 (Relay 2330) never fired. | A choice with no target completes it (§15.15, already decoded) [verified]. A handed-out one ends and its chain goes on; a character's own default one keeps searching (`actor.ts perceive`). | fixed, test, verified in the browser |
 | 6-4 | actors (sight) | Target choice could not see an object target whose centre lies inside its own collision (the tank seen from above). | The choice's line of sight did not count a hit on the target's own body, though the shot's line already did. | The same rule in the choice (`seeThroughFor`). | fixed, test |
 | 6-5 | route | `6a.molotovs` ran into the gully's end from the road and was trapped against the player-only box 1a47. | The gully's end is reached along the gully from the tanks, not from the road. | Route reordered: tanks, molotovs and ambush, back west, the ledge. | fixed |
+| 6-6 | route (after the collision trees) | `6b.plank` / `6b.pier-north`: no way north inside the pier ("route ended 7.5 m from its last point", "15.55 m short"). | The plank and the landing north of Clamber Point 1d49 are one leaf box of the pier's collision tree (Static Object 17bf, model 25:143: 5.1 x 5.5 x 5 m from the beams' floor up), docs/game-logic.md §14.10. | `6b.plank` goes east down to the pier's ground floor (77.7) and up its slope at x 450..452 onto the beams (81.6) north of the box: the way a walk found in a session. | fixed (route) |
+| 6-7 | route (after the collision trees) | `6b.exit`: the transition to 1b never came (run b6, session: "timed out waiting for level 1b"). | The hut's floor is a box 0.74 m over the ground at its south-west corner, over the player's step: the walk stopped 8.6 m short of Detectors 1e54 / d50. | `6b.hut` to its porch, then `6b.exit` jumps onto the floor (`jumpAt`) and walks through 1e54 and d50. Session: 1b's sewer, "Camera" 8283 67 s. | fixed (route) |
+| 6-8 | actors (dismemberment; data) | Clem died on the beach from 60 health within 0.2 s after a Fester's 40 blow (session, `6b.shore`). | As Dallas (row C-7b): the blow cut his neck (Part Cap 10:862, bleed 500 a second). With him dead Relay a42 opens the pier door and his farewell 6b8 cannot come. | documented (data) |
 
 Harness additions: Ambient Creatures are left out of the floating / sinking / stuck probe (the
 crows fly to their last waypoint and vanish). Clem (49a) is a companion, though the port marks
@@ -1057,6 +1195,9 @@ in the ally line of fire and in `allyDmg`, and no transformation near him. Feste
 with the blade, since their armour zeroes bullets (§15.7.3).
 
 ### Results (Medium, headless Brave / WebGPU, 1280x720)
+
+The campaign run of 2026-10-23 (both runs of this chapter, what is left and why) is in
+"Results: the whole campaign" at the top of this file.
 
 - **6a** (`--level 6a --to 6a.exit`, run r7): 28 of 33 step records clean, 738 s, 6b reached by
   play with no teleport.
@@ -1209,6 +1350,9 @@ to fight on the way to the foot).
 | 7-5 | harness | `checkpoint: true` failed after a transition with an arrival cinematic. | The transition checkpoint comes two settle frames after the cinematic, after the check. | Waits up to 10 s, as the numbered form does. | fixed |
 
 ### Results (Medium, headless Brave / WebGPU, 1280x720, a GPU shared with other agents' runs)
+
+The campaign run of 2026-10-23 (both runs of this chapter, what is left and why) is in
+"Results: the whole campaign" at the top of this file.
 
 - **The story, 6b -> 1b -> 1a -> 3a** (`--level r1b --visited <1a / 1b of a chapter 1 run>`, run 2):
   to the arrival in **3a YardCellBlock** ("North Spawn", mail 31:0 delivered to 3737) in 17 min (997
@@ -1402,6 +1546,9 @@ free spot up to 0.8 m away.
 
 ### Results (Medium, headless Brave / WebGPU, 1280x720, a GPU shared with other agents' runs)
 
+The campaign run of 2026-10-23 (both runs of this chapter, what is left and why) is in
+"Results: the whole campaign" at the top of this file.
+
 - **After rows 8-8 .. 8-12** (2026-10-22, e170605 plus this work):
   - **8a** (`--level 8a --to 8b.exit`, run full2): from the 3a arrival to the arrival in 8b with
     no teleport and no logic shortcut. The refuge: the crate 193a pulled and pushed (1.9 / 10.3
@@ -1470,10 +1617,32 @@ Hermes' room and its end).
   the port's 0.35 m radius and the clamber is refused ("Blocked"); `8b.climb` fails in every run
   since e170605. The player shape's width is not decoded (a 0.3 m radius would just pass). The
   exploration runs of 8b went past it by a teleport (not in the route).
-- **8b Jimmy in the ravine (combat / route).** On WaypointBehavior 1759's legs the ravine's
-  Burrower 16f5 and Slayer 16f4 (Detector 1793) kill him; the harness going ahead to clear the
-  ravine (`8b.ravine`, an arena) did not kill the Burrower in 240 s. With him dead the level plays
-  1ed5 as designed; "Camera" 1eb1 by play and the walkway Detector 26b5 are still to be seen.
+- **Fixed (2026-10-23): Jimmy's last walk.** The original places a path's goal on the graph
+  through the walker's own edge filter, NPC Exclusion Types included (docs/game-logic.md §15.5,
+  "Where a point lies on the graph"): Hermes' room nodes (254a, 1ef5, 2544 ..., 10:682 only) are
+  not Jimmy's (10:674), so 1ea5 lands on the walkway's 207f, 0.4 m from it, and the walkway's
+  nodes lead there from Ladder d05's edge. Neither a ladder edge, a straight walk, runtime links,
+  another failure rule nor a teleport is involved. The port's nearest node now skips nodes barred
+  to the walker and gives a goal the node whose area holds it (207f lies 1 m under the doorway's
+  floor). Session (`--level 8b`, Jimmy placed at 175c on 189f, logged): up the ladder, Detector
+  26b5 on the walkway (Relay 24e8 on), arrived at (327.3, 105.9, 220.0); `8b.hermes` then played
+  "Camera" 1eb1 (76.4 s), Behavior Changer 25d5 -> DeathBehavior; 1ed5 not played. Frames:
+  agent scratch `companions3/shots/8b.hermes-cine-2-*`. Tests: `tests/bluff.test.ts`,
+  `tests/lighthouse-mover.test.ts`. The report as filed:
+- **8b Jimmy: through the ravine now, but not up to the walkway (actors / nav).** With the
+  companions' regeneration (row 9-14) and the fight changes (row 66) Jimmy came through the
+  ravine at full health in the session of 2026-10-23 (the Burrower 16f5 hurt him 3.6 a blow, the
+  player killed it). His last walk then ends at once at the foot of Ladder d05: WaypointBehavior
+  189f goes straight to Waypoint 1ea5 in Hermes' room (327.3, 105.8, 219.6), whose nearest Move
+  Node is 254a, and the level's Move Nodes join the walkway (18a3 .. 1e95 .. 1e7f, 207f) to the
+  ravine but not to Hermes' room (254a, 1ef5, 2544 ...; 207f and 254a lie 1 m apart, no edge, no
+  EdgeToggler). The port's stand-in for a MoveTo that fails (a leg with neither a straight walk
+  nor a graph path, `actor.ts waypointLegFails`) ends the walk, he idles at node 126b, Detector
+  26b5 never sees him on the walkway and "Camera" 1ed5 plays (the level's scene for a missing
+  Jimmy). What the original's MoveTo does with a goal off the start's part of the graph (walk to
+  the part's node nearest the goal?) is not decoded; "Camera" 1eb1 by play is still to be seen.
+  In run h8b he died in the ravine all the same, from a neck cut (row C-7b: 8.3 a frame, "by
+  1738" himself).
 - **8b fifth jet (world, Pushable).** The crate 1f8d stands on a table; pushed off it, it lands
   0.4 m into the floor and cannot be grabbed again. The route leaves that jet open (the picks then
   alternate between it and the stove).
@@ -1546,8 +1715,12 @@ gone: rows 9-12 / 9-13.)
 | 9-16 | route / world (collision) | With the collision trees (row 9-15) `9.crank` could not grab the crank 9e1 (runs r2 / r5: "could not grab" three times, the lamp never turned and the gate stayed shut). | The lamp housing 9dc (39:29) has a leaf box 2.8 x 4.3 x 2.6 m round the machinery; the view ray from the old stand (350.4, 216.25) to the crank met it first, and the port's use prompt takes the object looked at (docs/game-logic.md §14.5: the original lists what touches the player, no view ray). | The stand moved south of the housing box (350.6, 215.6): the grab takes, the crank moves 0.37 m and its p55 output turns the lamp (Detector cab enabled). | fixed (route), verified in the browser |
 | 9-17 | route | After `9.ladder-down`, `9.base-door` sometimes ended on the floor above (118.1; runs r2 / r7, one in three in a session): the walk's first leg from the ladder's foot led into the ladder (its collision box now, row 9-15), which mounted it, and W climbed it. | The planner's path round the ladder box. | Step `9.ladder-off`: a straight route 1.5 m south-west off the foot first. Session: five of five clean. | fixed (route) |
 | 9-18 | route | `9.horace` timed out in runs r7 / r9: "Horace" cad never played and the gate stayed shut. | Detector cab (filter 0, the player; an 18 x 1 m slab across the road at the gate, 3.2 m from Waypoint e08) plays it; `9.gate` follows the guard and can end 6 m north of the slab, and `9.horace` only waited. | Step `9.cab` walks into the slab first. Run r10: "Horace" played (36.7 s) and the exit to 10 followed. | fixed (route) |
+| 9-19 | actors (Inferna) | With the player at the inlet's north rim (333, 112.8, 206.5) the Infernas bd3 / bd4 / bd5 went down to the shore 28 m below and fought from there. Also: they circled from 11 m, threw fireballs through the generic combat while chasing, and walked their repositioning straight. | Decoded how an Inferna moves (docs/game-logic.md §15.7.6 "How it moves"): the chase and the repositioning are MoveTos on the Move Node graph (to 8 m; to a distance from the band), the circle is steering alone (its wish, its 0.15 s stuck windows), with no graph or ground test anywhere on its way to the body's velocity. So the rim descent is the circle's, and the original's circle goes over a drop the same way [strong]. | `specials/inferna.ts`: the MoveTos walked by the generic graph steering (`Actor.specialWalk`), the circle from 8 m to 11 m, the steering's wish and stuck test as decoded, the attack after a reposition by the band drawn and sight, no generic combat for a fighting Inferna. The rim descent stays (as decoded). | fixed [verified], tests (`tests/inferna-move.test.ts`), browser: the first fight passes (`--level 9 --to 9.infernas`, one death to the footprints' fire, then the retry); the rim session still goes down |
 
 ### Results (Medium, headless Brave / WebGPU, 1280x720, a GPU shared with other agents' runs)
+
+The campaign run of 2026-10-23 (both runs of this chapter, what is left and why) is in
+"Results: the whole campaign" at the top of this file.
 
 Every step of the route was played in the browser in an exploration session (deep link, kit, one
 step at a time, captures after the truck, the yard, the generator, "Inferna 1", the escort south,
@@ -1594,7 +1767,24 @@ with the guard carried (row 10-1). Whole-chapter runs (`--level 9 --to 10.finish
 - **Fixed since: the guard's escorts stalled at the burial ground** (row 9-15: objects collide
   with their collision trees, not their drawn triangles; docs/game-logic.md §14.10).
 - **Combat.** The first Inferna fight (c59) killed the harness on Medium in r2, r3 and r4 (radius
-  fire 11..18 a hit, three Infernas); retried invulnerable.
+  fire 11..18 a hit, three Infernas); retried invulnerable. With the fight changes (row 66) it
+  took 69 s and 18 health without a bottle (t9b); run g9 died there once more, backing through
+  the Infernas' burning footprints (1 a touch; avoided since).
+- **Fixed (2026-10-23): the guard on the shore was a walk off the inlet's rim.** Not a fall in
+  the fight, knockback or the mover: his walk to the gate (WaypointBehavior c5b -> Waypoint c63)
+  from the fight's south-east end took a straight line (a skip to a later path node) that skimmed
+  the steep rim of the inlet south of the lighthouse; he slid down it and lay at (324.4, 84.5,
+  181.5), where t9b found him, with no Move Node down there. Straight walks, skips and the walk
+  to the start node now need ground under the body's width (docs/game-logic.md §15.5, "Straight
+  walks keep to the ground"). Session from (324, 196): fell before the fix, five walks from the
+  rim (324 / 325.5 / 322.5 / 326.5) stayed on top after it and reached c63. The Infernas bd4 / bd5
+  also went down there when the player stood at the edge: their circle, which the original
+  steers with no graph or ground test either (row 9-19). Test: `tests/lighthouse-mover.test.ts`. The report as filed:
+- **Actors: the guard on the shore (2026-10-23, runs t9b / d9).** After a first Inferna fight
+  that drifted with the Infernas toward the cliff, the guard bc9 stood in his HostilityBehavior
+  e7f on the shore 28 m under the lighthouse (332.8, 84.5, 196.5); 9 has no way out without him,
+  and the runs were stopped. Whether he walked off the cliff after an Inferna or was pushed off is
+  not traced; the fights' evasion keeps to the arena's middle since (row 66) and run g9 kept him.
 
 ## 10 Docks (route `10.*`)
 
@@ -1678,8 +1868,12 @@ Game, then the capture; logged), so the front end's own screens follow the endin
 | 10-14 | harness | Every step on the Game Finished / credits screens waited 240 s for a "cinematic"; the bonus-movie check read a message sent to 13b2 as played (13b2 is not placed below Impossible). | The left level's player reads as disabled; Timer 1241 sends On to 13b2 whether it exists or not. | `cinematic()` is false on the end screens; `finish` checks each ending's objects (`endings`: movie, boat sequence, picture reached, none of the other endings') and the bonus movie by its own end output. `--reputation <n>` and `--expect-ending` (logged). | fixed (harness) |
 | 10-15 | route | `10.climb-out` failed in run r12 (three presses, the player shut in the pump room) after passing in r10. | Clamber Point 38f's template 2:850 allows 3.5 m of height (p2) and its top is 4.4 m over the pump room floor: it can never take from inside. Only 110b (template 2:455, p2 4.5) does, and the old stand at x 260 passed its side test by centimetres. | The step stands at (260.8, 285.3) facing north: 110b takes. Checked in the browser. | fixed (route) |
 | 10-16 | harness | Run r10: the Slayer fight past the bus followed a Slayer down into the gap (bed 84.5) and the player was stranded there for the rest of the run. | A fight closes on any target. | `10.slayers` carries `sea` (y 95): creatures below are shot from the edge, a stranded player is put back (logged). | fixed (harness) |
+| 10-17 | route | `10.cp`: "checkpoint #d29 not taken" in every run; it came on the next step. | Detectors b01 ("Crane Arm") and 13e1 (Autosave d29) are 1 m slabs across the road, at z 188.7..189.7 and 195.3..196.3; the walk to (410, 196) stopped within its 1.5 m short of 13e1, past b01. | The walk ends past both (414, 196): run g9 took d29 in the step. `10.killjoy`'s point (433.5, 213) lay 1.3 m past the last cell the planner has before the gate c2a opens ("no full path ... 1.31 m short"), so the walk read as a miss although "Camera" b7d played: it ends past Detector b20 (a slab across the road at x 430.5..431.5) at (432, 213) now. | fixed (route) |
 
 ### Results (Medium, headless Brave / WebGPU, 1280x720, a GPU shared with other agents' runs)
+
+The campaign run of 2026-10-23 (both runs of this chapter, what is left and why) is in
+"Results: the whole campaign" at the top of this file.
 
 - **r8** (the same start as 9's r7, into 10 by play with the guard carried): `10.arrive`,
   "Inferna 1" and its two Infernas (Count Down 90b). One death on the road on Medium (the Burrower
@@ -1758,6 +1952,11 @@ Game, then the capture; logged), so the front end's own screens follow the endin
 
 ### Open (by owning area)
 
+- **Companion (data): the guard 7b8 under the Slayers' fire (run g9).** On the road (Detector
+  7ec) the Slayer 604 shot him dead (3 a bullet, five a volley) while the player fought the
+  Burrowers and Slayers there; his escorts 90f .. 945 and the farewell then fail (row 66 fights
+  whoever is after a companion first). He regains 4 health a second (row 9-14); the volleys
+  outrun it.
 - **Actors (companion) and levels (sea).** The guard's 10 copy 7b8 died on the road in r8
   (Burrowers / Slayers of Detector 7ec), after which his waypoints (7cf, 934, 947) start nothing:
   the pipe yard has other ways in (Detector 3dc / Timer 112f to Count Down 112c), the broken road
@@ -1829,3 +2028,218 @@ clean one).
   0x100, +0x70 & 0x80); damage type 7's users; the engine's batch building (the port groups
   triangles by segment). Browser frame strips not taken: the machine stayed at load ~200 and the
   harness could not bring a level up (see the agent report).
+
+## Save matrix (all levels; `tools/save-matrix.mjs`)
+
+`node tools/save-matrix.mjs [--sessions <ids>] [--storage] [--menus] [--revisit] [--ctl <port>]
+[--tmp <dir>] [--out report.json]`, or `--level <id> --configs a,b` for one ad-hoc session.
+
+Each session starts a level through the harness (`playthrough.mjs --keep`): a deep link with no
+route steps, or the chapter route played to a step (`route-*` sessions). The configurations of
+the session are then set up in turn, building on each other as play does. For each one:
+
+1. **take**: a save captured in the same frame as a fingerprint. The fingerprint is
+   `tools/playthrough-restore.js snap()` plus `tools/save-matrix-page.js extra()`: flashlight,
+   crouch, view mode, health, insanity form and meter, reputation, difficulty, the equipped
+   weapon and throwable, blood, the inventory, the visited levels and the chapter.
+2. **store**: the save is written to the browser store and read back. It must be the same JSON.
+3. **load in the same session**: the save is restored in place, as Load Game in the same level
+   does. The restored level is compared two frames later (`hard`: what the level logic, the
+   actors and the player run on). The save providers' own round trip is compared too: a capture
+   taken right after the save was applied, before any update, against the save that was loaded,
+   so `save(load(x)) = x`. A difference counts only when it is still there in a capture a few
+   frames later. If it is only there right after the load, it is a start-up applied on the
+   first update by design (director chains). If it is only there later, play went on.
+4. **play on**: a move key is held (W, else S, A or D). The player must move and stay alive,
+   and nothing may throw.
+5. **page reload**: after the last configuration the page is reloaded, so the store is all
+   that is left. Every save of the session is read back from IndexedDB, restored and compared
+   again with the fingerprint it was taken with.
+
+Comparison rules, so that time is not counted as a save error:
+- **Live continuation.** The live level is fingerprinted 3 frames and 1 s after each capture.
+  A restored value that matches it is what the level does by itself in that time: a Timer
+  firing, a creature on the move, a door's countdown.
+- **Second look.** A hard difference that is gone a second after the restore is `late`.
+- **Order-free lists.** Actor, cut and removed-uid lists are compared by uid.
+- **Kept by design** (actors/actor.ts getState):
+  - the AI's momentary state (`st`, only `fall` is restored);
+  - a dead body's behaviour slot and dormant clip;
+  - centimetres of a living creature's movement;
+  - a bleeding creature's health running down;
+  - the lamp's charge, the meter in creature form, swinging mechanisms;
+  - Archive pages, which belong to the player profile and are only ever added.
+
+Vetoed configurations (the original's can-save rule, `rules.ts`: on a ladder, mounted, morphing,
+in a cinematic, held by a creature) check the veto, then capture anyway. That is what a
+checkpoint taken there would hold, so what such a capture loses is listed as `forced`, not as a
+failure. Checkpoints themselves wait until scripted locomotion is over (below), so no save the
+game makes can be in such a state.
+
+`--storage`, `--menus` and `--revisit` run the checks of the same names (below).
+
+### Bugs found and fixed
+
+| # | Area | Found in | Issue | Cause | Fix | Status |
+|---|---|---|---|---|---|---|
+| S-1 | insanity | 1a creature | A save made in creature form loaded in human form. Manual saves were also refused while transformed (`transformed` veto), which the original allows. | The insanity provider saved `model.s` only, not the form. The veto made up for it. The original's can-save predicate refuses Morph (state 19), not Transformed (20) (§5, saves.md). | `insanity/system.ts` saves `form` (a morph counts as the form it goes to). A load in creature form transforms at once (`rules.ts restoreCreature`: no flash, the morph clip runs to its end pose). The veto is now only for the weapon put-away before a morph. | fixed, matrix (all sessions with `creature`) |
+| S-2 | weapons | review, matrix `flashlight` | The flashlight's on / off state was not in saves. The lamp outlives the level's systems, so a load kept whatever the session had, and a page reload started it off. | `view.flashlight.visible` belongs to the renderer and no provider saved it. | The weapons provider saves `light` and puts it back on a load (not on a transition). | fixed, matrix 1c / 5a / 9 `flashlight` after reload |
+| S-3 | save (world) | 1a base | An object destroyed while shown came back destroyed but with its shown flag cleared (1a's Animating Static 7bf3). | `World.setVisible` refuses to show a destroyed object, and the provider set `destroyed` before calling it. | `providers.ts`: a destroyed object's flag is put back directly. | fixed, test |
+| S-4 | world / weapons | 2 shotgun | Every load, and every level transition, added a gun pickup's ammo to the reserve, up to the carry limit (2: shells 34 → 40 after one load). | The inventory provider restored items through `inv.add`, which the weapons system wraps. A gun added there is a pickup: a loaded clip plus the gun's start ammo. | `world.ts` restores through an unhooked inventory over the same items (`inventorySaveProvider(…, put)`). | fixed, test, matrix 2 / 10 `shotgun` |
+| S-5 | renderer (glow) | 2, 3a, 3b, 4b, 8a, 9 base | After every fresh level load, hidden objects with glow marks were drawn: 2's Fire models (12), 3a's toggled Static Objects (101), 3b (34), 4b (6), 8a (19), 9 (1). A checkpoint restore, which skips the load-time precompile, showed the level correctly, so the first save of a session never matched it. | `scene-glow.ts` warm shows each glow mesh and its parents for the precompile, then restores them. Meshes share parents: a parent already shown for the first mesh was recorded as shown for the next one, and the restore left it shown. | `showWithParents()` keeps each object's own flag once. | fixed, test, matrix base rows |
+| S-6 | save (system) | 3a ladder | A checkpoint taken on a ladder (or mounted, clambering, in a use animation, held by a creature) restores the player standing in mid-air: the controller's script is not saved. | The port takes checkpoints whatever the player is doing. | The save system defers a requested checkpoint while `motionOverride` is set. Manual saves were already refused there (the original's rule). | fixed |
+| S-7 | save (manager) | menus, imported .rsg | A save without some game-scope provider's entry (an imported original save, an older save) kept that provider's state from whatever the session had played before: weapons, insanity and reputation outlive a level. | `levelReady` only applies the providers a save has. | Providers the save has no entry for are reset first (`SaveRegistry.reset(scope, except)`). | fixed, test, `--menus` |
+| S-8 | insanity | 1c, 3b, 6b dismember / gibs | The kill-combo window and count were lost on a load. | Not saved. | Saved with the insanity provider (`combo`). | fixed |
+| S-9 | store | `--storage` | Another tab deleting or upgrading the database (clear site data, a newer build) left this tab's connection closed. Every later save failed until a reload. | No `versionchange` / `close` handling; a closed connection was never reopened. | `store.ts` closes on `versionchange` and reopens on the next call. | fixed, `--storage` two tabs |
+| S-10 | store | review | `delete` reported success even when it failed. A failed write gave no reason (a full quota looked like any failure). Other tabs never saw new saves. Two tabs saving in the same millisecond could take the same id. | Not handled. | `lastError` (`quota` / `unavailable` / `failed`); `delete` reports the result; a BroadcastChannel refreshes the other tabs' lists; ids carry a random part. | fixed, tests, `--storage` |
+| S-11 | menus | review | Load Game was disabled without saves, which made importing impossible for a new player. | The original's rule (no saves, no list). | Load Game stays enabled (its list has the import rows); Continue still needs a save. | port change |
+| S-12 | weapons | route-6b checkpoint | A thrown object in flight or burning (a Molotov Clem threw, the player's TNT / flares) vanished on a load. | `weapons.thrown` was not saved. The original's BouncingObjects are level objects and are saved with the level. | Provider `weapons.thrown` (level scope, after the actors): template or the player's throwable, position, velocity, fuse, rest, bounces, thrower. | fixed, matrix route-6b |
+| S-13 | props | route-2 base | A crate the player had taken hold of lost that on a load. Only a held Pushable may fall (`pushableMayFall`), so a crate left over an edge would stay up. | `handled` was not in the props save. | Saved as `handled` in the props state. | fixed, matrix route-2 |
+| S-14 | actors (CartWheeler) | 3b dismember | A CartWheeler body that started on the ceiling (p180) came back flagged as a crawler. | Its constructor hangs it as a crawler, and the dead keep no special-move state in a save. | `cartwheeler.ts deadUpdate`: a body off the ceiling is no crawler. | fixed, matrix gore-3b |
+| S-15 | save (system) | gore-3b gibs | A save could be made during a modal movie (3b's flashback after a kill) or with a monitor feed on screen. Its load gave the player back his control, with no movie. | The veto's `busy` (the original's Interact / View Monitor / Document View states, rules.ts) was never filled. | `system.ts`: busy = a modal movie (`CutscenePlayer.modal`) or `interact.viewingMonitor`. A checkpoint waits for it as well. | fixed |
+| S-16 | actors (specials) | gore-1c / drops-2 gibs | A placed creature gibbed before a save came back in the restored level's special-move list. It was removed from the level, but its move kept being saved and updated. | The specials system dropped the moves of dead and removed actors only. A removed actor from a save's `removed` list was never dead in the restored level. | `specials/index.ts`: moves of actors no longer in the manager are dropped and not saved. | fixed |
+
+### Storage robustness (`--storage`)
+
+| Check | Result |
+|---|---|
+| IndexedDB / localStorage / memory: write, read back (same JSON), list, delete | ok, ok, ok (29 KB saves) |
+| Quota: localStorage filled to the last KB (10.5 MB), then a save | refused, `lastError` "quota", writes again after cleanup |
+| Quota: IndexedDB `QuotaExceededError` (simulated on the object store: the profile's quota is too big to fill) | refused; Save Game gives null with reason "quota"; writes again after |
+| Corrupt entries: not JSON (localStorage), not a save (raw IndexedDB record) | listed as damaged, `get` null, deletable |
+| Garbage provider data in a valid save | loads; 4 providers log their errors and keep the fresh state; the level runs |
+| Versions: an old record missing later fields / version 0 / a newer version / no version | migrated with defaults / migrated / refused, listed as damaged / refused |
+| Many saves: 60 real saves of 29 KB in IndexedDB | put 137 ms, list 37 ms, get 16 ms, delete 17 ms; newest first |
+| Delete through the manager; a missing id | ok; ok |
+| Blocked storage (a realm whose storage getters throw, as with blocked site data) | memory store, saves work for the session; settings and profile modules load and save without throwing |
+| Two tabs (a second realm with its own module instances) | each sees and reads the other's saves; BroadcastChannel notice received; the other tab deletes the database: this tab's next write reopens it |
+
+### Menu flow and files (`--menus`)
+
+New Game through the front end, then:
+- the Load and Save lists have their file rows and the X key on save rows;
+- a `.json` export of every save, imported back, skips both saves; an edited copy comes in
+  under a new id; a JSON file that is not an export counts as not a save file;
+- the original game's files, built in the page with the app's own writers (a level 1b `.rsg` in
+  a hex-time folder with a thumbnail, an `Unspeakable.cfg`, an `.rsg` of an unknown level, a
+  broken `.rsg`): one save imported (title, level, thumbnail and time from the folder), the cfg
+  applied (sfx 0.3, subtitles, the Prelude unlock, 4 Archive pages), one unknown level, one
+  unreadable;
+- `Unspeakable.cfg` export over the imported file (its bindings kept) and from the defaults (the
+  RFL's 110 default bindings);
+- loading the imported save: level 1b at its start, a new game's inventory and reputation (the
+  shotgun and the reputation of 77 given before are gone);
+- after a page reload (`?skipintro`), Continue loads the newest save from IndexedDB.
+
+All ok.
+
+### Revisits (`--revisit`)
+
+3a is changed (two Object Cloner copies woken, one cut, one killed and cut) and left for 3b
+through its Level Transition 18dc. A save is made in 3b; its `levels` holds 3a and 3b. The player
+goes back through 3b's own Level Transition to 3a.
+
+3a as found differs from 3a as left in 108 fingerprint keys, all the arrival's own doing. The
+26 kit pickups linked to 3a's Player object are removed on an arrival through a transition
+(they are only there for a level started on its own), and the Detector the player arrives in
+fires. The same trip made again from the stored 3b save, after a page reload, finds 3a exactly
+as the first trip did: hard 0.
+
+### Results
+
+After the fixes (last runs: every level, the difficulty, Enhanced and special-state sessions, the routes; `ok` = no difference beyond the rules above, `n/a` = nothing to set up there, `forced` = a vetoed state captured anyway):
+
+| Session | Level start | Configurations: same session / after a page reload | Save size |
+|---|---|---|---|
+| 0 | 0 | base ok / ok; checkpoint ok / ok; fight ok / ok; dismember ok / ok | 13 KB |
+| 1a | 1a | base ok / ok; checkpoint ok / ok; creature ok / ok; lowHealth ok / ok; human ok / ok | 41 KB |
+| 1b | 1b | base ok / ok; checkpoint ok / ok; fullInventory ok / ok; npcDrop n/a | 18 KB |
+| 1c | 1c | base ok / ok; checkpoint ok / ok; flashlight ok / ok; gibs ok / ok | 11 KB |
+| 2 | 2 | base ok / ok; checkpoint ok / ok; repLow ok / ok; shotgun ok / ok | 35 KB |
+| 3a | 3a | base ok / ok; checkpoint ok / ok; ladder ok / ok (forced: 2); repHigh ok / ok | 27 KB |
+| 3b | 3b | base ok / ok; checkpoint ok / ok; fight ok / ok; dismember **1** / **1** (S-14, before its fix; ok in gore-3b) | 30 KB |
+| 4a | 4a | base ok / ok; checkpoint ok / ok; creature ok / ok; lowHealth ok / ok; human ok / ok | 15 KB |
+| 4b | 4b | base ok / ok; checkpoint ok / ok; fullInventory ok / ok; npcDrop n/a | 17 KB |
+| 5a | 5a | base ok / ok; checkpoint ok / ok; flashlight ok / ok; gibs ok / ok | 8 KB |
+| 5b | 5b | base ok / ok; checkpoint ok / ok; repLow ok / ok; shotgun ok / ok | 18 KB |
+| 6a | 6a | base ok / ok; checkpoint ok / ok; ladder n/a; repHigh ok / ok | 21 KB |
+| 6b | 6b | base ok / ok; checkpoint ok / ok; fight ok / ok; dismember ok / ok | 13 KB |
+| 8a | 8a | base ok / ok; checkpoint ok / ok; creature ok / ok; lowHealth ok / ok; human ok / ok | 17 KB |
+| 8b | 8b | base ok / ok; checkpoint ok / ok; fullInventory ok / ok; npcDrop n/a | 17 KB |
+| 9 | 9 | base ok / ok; checkpoint ok / ok; flashlight ok / ok; gibs ok / ok | 14 KB |
+| 10 | 10 | base ok / ok; checkpoint ok / ok; repLow ok / ok; shotgun ok / ok | 22 KB |
+| 1b-easy | 1b, difficulty 0 | base ok / ok; fight ok / ok; ignorePlayer ok / ok | 17 KB |
+| 3a-impossible | 3a, difficulty 3 | base ok / ok; fight ok / ok | 24 KB |
+| 1a-enhanced | 1a, gfx=enhanced | fight ok / ok; dismember ok / ok; gibs ok / ok | 37 KB |
+| specials-4b | 4b | base ok / ok; crane ok / ok (forced: 1); craneAfter ok / ok; checkpoint ok / ok | 18 KB |
+| specials-3a | 3a | base ok / ok; mounted ok / ok (forced: 1); checkpoint ok / ok | 28 KB |
+| specials-2 | 2 | base ok / ok; ride ok / ok (forced: 2); checkpoint ok / ok | 36 KB |
+| route-1c | route to 1c.companion | base ok / ok; fight ok / ok; checkpoint ok / ok | 18 KB |
+| route-6b | route to 6b.clem | base ok / ok; fight ok / ok; checkpoint ok / ok | 32 KB |
+| route-9 | route to 9.escort1 | base ok / ok; fight ok / ok; checkpoint ok / ok | 34 KB |
+| route-1a | route to 1a.cartwheeler | base ok / ok; fight ok / ok; lowHealth ok / ok; checkpoint ok / ok | 53 KB |
+| route-2 | route to 2.dallas | base ok / ok; creature ok / ok; human ok / ok; checkpoint ok / ok | 61 KB |
+| gore-3b | 3b | fight ok / ok; dismember ok / ok; gibs ok / ok | 27 KB |
+| gore-1c | 1c | fight ok / ok; gibs ok / ok; npcDrop ok / ok | 9 KB |
+| drops-2 | 2 | npcDrop ok / ok; gibs ok / ok | 32 KB |
+| drops-10 | 10 | npcDrop ok / ok; fight ok / ok; dismember n/a | 19 KB |
+| held-2 | 2 | rideCheckpoint ok / ok; base ok / ok; thrown ok / ok | 33 KB |
+
+228 of 230 comparisons ok. The two left are 3b's `dismember` from the run before S-14's fix; the
+same state passes in `gore-3b`. `--storage`, `--menus` and `--revisit`: all ok. The save sizes,
+without the thumbnail a Save Game adds, go from 8 KB (5a) to 61 KB (route-2, with 1c and 2
+visited).
+
+First pass, with S-1 to S-3 already fixed from the first 1a runs (95 of 133 ok). The counts are
+differences:
+
+| Session | Configurations: same session / after a page reload (count of differences) |
+|---|---|
+| 0 | base **9** / **9**; checkpoint **9** / **9**; fight **9** / **9**; dismember **9** / **9** |
+| 1a | base **2** / **2**; checkpoint ok / ok; creature ok / ok; lowHealth ok / ok; human ok / ok |
+| 1b | base **3** / **3**; checkpoint ok / ok; fullInventory **1** / **1**; npcDrop n/a |
+| 1c | base ok / ok; checkpoint ok / ok; flashlight ok / ok; gibs **1** / **1** |
+| 2 | base **12** / **12**; checkpoint ok / ok; repLow ok / ok; shotgun **4** / **4** |
+| 3a | base **101** / **101**; checkpoint ok / ok; ladder **2** / **2**; repHigh **1** / **1** |
+| 3b | base **34** / **34**; checkpoint **0** / ok; fight ok / ok; dismember **2** / **2** |
+| 4a | base ok / ok; checkpoint ok / ok; creature ok / ok; lowHealth ok / ok; human ok / ok |
+| 4b | base **6** / **6**; checkpoint ok / ok; fullInventory ok / ok; npcDrop n/a |
+| 5a | base ok / ok; checkpoint ok / ok; flashlight ok / ok; gibs ok / ok |
+| 5b | base ok / ok; checkpoint ok / ok; repLow **1** / **1**; shotgun **3** / **3** |
+| 6a | base ok / ok; checkpoint ok / ok; ladder n/a; repHigh ok / ok |
+| 6b | base ok / ok; checkpoint ok / ok; fight ok / ok; dismember **1** / **1** |
+| 8a | base **19** / **19**; checkpoint ok / ok; creature ok / ok; lowHealth ok / ok; human ok / ok |
+| 8b | base ok / ok; checkpoint ok / ok; fullInventory ok / ok; npcDrop n/a |
+| 9 | base **1** / **1**; checkpoint ok / ok; flashlight error; gibs ok / ok |
+| 10 | base ok / ok; checkpoint ok / ok; repLow ok / ok; shotgun ok / ok |
+
+What they were:
+- **Bugs:** base in 1b, 2, 3a, 3b, 4b, 8a and 9 (S-5, the glow precompile); 2 shotgun (S-4);
+  1c, 3b and 6b combo counts (S-8); 3b dismember (S-14).
+- **Harness, since fixed:**
+  - 0: deferred director chains counted (now checked against the late capture);
+  - 1a base: a Timer firing within the frames before the comparison (now compared with the
+    live level a second on);
+  - 1b fullInventory: a weapon switch under way;
+  - 3a ladder / repHigh: the ladder left on;
+  - 5b: walked into a cinematic before the capture (now skipped);
+  - 9 flashlight: walked into a Level Transition (now held);
+  - 3b checkpoint: a scripted scene took the player after walking.
+
+### Not covered / open
+
+- **Quick save / load**: there is none. The original has only the pause menu's Save Game and
+  Load Game, and the in-memory checkpoint (saves.md §3–§4).
+- **Enhanced gore decals, blood pools and particles** are effects, not save state. A load
+  starts without them, but the bodies' cuts and bleeding are restored. The original keeps the
+  blood skin component (saves.md §3.3), which the port keeps as the reputation skin's `blood`.
+- **Known gaps of the restore** (saves.md §6):
+  - the AI's momentary state;
+  - the voice of a line under way, which is not played again;
+  - bodies of `services.actors.spawn` creatures.
+
+  The forced captures add what no save the game makes can hold: a cinematic in progress (5b:
+  Killjoy 1409's pose from clip root motion), the ladder, mounted-gun and hold scripts, and a
+  modal movie.
+- **Two tabs playing at once** share the autosave slot: the last checkpoint taken in either tab
+  wins.

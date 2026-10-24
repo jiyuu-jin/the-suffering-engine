@@ -58,6 +58,7 @@ import {
   type VideoRef,
 } from './model';
 import { CALIBRATE_SCREEN, CONTROLLER_SCREEN, controllerItems, decorateController } from './screens/controller';
+import { RENDER_SCALES } from '../render-scale';
 
 const INTERFACE = 'COMMON/Interface/Interface';
 const SYSTEM = 'COMMON/System/System';
@@ -357,15 +358,16 @@ function fromFrontEnd(fe: FrontEnd, readNode: (r: RefKey) => GuiNode | undefined
       } else if (row.kind === 'choice') {
         const values = known && 'values' in known ? known.values : row.choices.map((_, i) => i);
         if (row.id === 'resolution' && row.choices[0]) {
-          // One value text filled at runtime: the render size at each resolution scale.
+          // One value text filled at runtime: the render size at each resolution scale (Auto: the
+          // internal size in use). Engine choice: the render scale (src/app/render-scale.ts).
           const vp = placed(row.choices[0], titleFont);
           rows.push({
             type: 'choice',
             label: lab,
-            setting: 'x.resolution',
+            setting: 'x.renderScale',
             place,
             format: 'resolution',
-            choices: RESOLUTION_SCALES.map((v) => ({ label: { text: `${Math.round(v * 100)}%` }, value: v, place: vp })),
+            choices: RESOLUTION_SCALES.map((v) => ({ label: { text: v ? `${Math.round(v * 100)}%` : 'Auto' }, value: v, place: vp })),
             ...help,
           });
           continue;
@@ -474,6 +476,24 @@ function fromFrontEnd(fe: FrontEnd, readNode: (r: RefKey) => GuiNode | undefined
             { label: { text: 'Off' }, value: false, place: ref.choices[0] ? shift(placed(ref.choices[0], titleFont)) : undefined },
             { label: { text: 'On' }, value: true, place: ref.choices[1] ? shift(placed(ref.choices[1], titleFont)) : undefined },
           ],
+        });
+        // Port option (not in the original: its 25 cheats have none; src/game/port-options.ts),
+        // 8 % below Always Run, its help line under Accept / Cancel while focused.
+        const dy2 = dy + (8 * 480) / 100;
+        const shift2 = <T extends { rect: { y: number } }>(q: T): T => ({ ...q, rect: { ...q.rect, y: q.rect.y + dy2 } });
+        rows.push({
+          type: 'choice',
+          label: { text: IGNORE_PLAYER_LABEL },
+          setting: IGNORE_PLAYER_SETTING,
+          place: shift2(p),
+          choices: [
+            { label: { text: 'Off' }, value: false, place: ref.choices[0] ? shift2(placed(ref.choices[0], titleFont)) : undefined },
+            { label: { text: 'On' }, value: true, place: ref.choices[1] ? shift2(placed(ref.choices[1], titleFont)) : undefined },
+          ],
+          help: {
+            label: { text: IGNORE_PLAYER_HELP },
+            place: { ...p, font: defaultFont, scale: 0.8, hAlign: 'center', vAlign: 'top', margins: undefined, rect: { x: 48, y: (92 * 480) / 100, w: 544, h: 36 } },
+          },
         });
       }
     }
@@ -712,6 +732,12 @@ function dimOf(l: GuiLayout): number | undefined {
  * Option rows by row id: the Settings key and range they edit. Rows not listed are stored as
  * `x.<id>` with their choice index as the value (graphics.ts / the HUD read those).
  */
+/** Gameplay pages' port option row "Enemies Ignore Player" (src/game/port-options.ts). */
+export const IGNORE_PLAYER_SETTING = 'x.ignorePlayer';
+export const IGNORE_PLAYER_LABEL = 'Enemies Ignore Player';
+export const IGNORE_PLAYER_HELP =
+  'Port option, not in the original game: enemies never target, grab or hear you. Stray shots, blasts, gas and fire still hurt.';
+
 const SETTING_ROWS: Record<string, { setting: string; min: number; max: number; step: number } | { setting: string; values: (number | boolean)[] }> = {
   effectsVolume: { setting: 'sfx', min: 0, max: 1, step: 0.1 },
   dialogVolume: { setting: 'voice', min: 0, max: 1, step: 0.1 },
@@ -724,8 +750,8 @@ const SETTING_ROWS: Record<string, { setting: string; min: number; max: number; 
   gamma: { setting: 'x.gamma', min: 0.5, max: 1.5, step: 0.05 },
 };
 
-/** Graphics "Resolution" values: render scale of the window size (engine choice). */
-export const RESOLUTION_SCALES = [0.5, 0.67, 0.75, 1];
+/** Graphics "Resolution" values: render scale of the native size, 0 = Auto (render-scale.ts). */
+export const RESOLUTION_SCALES = RENDER_SCALES;
 /** Engine "Frame Rate Limit" values (0 = off). */
 export const FRAME_CAPS = [0, 30, 60];
 

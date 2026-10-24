@@ -308,14 +308,29 @@ export type FightTarget = { player: true; actor?: undefined; pos: THREE.Vector3L
  */
 export function fightTarget(
   a: { alive: boolean; inCombat: boolean; currentTarget?: Readonly<{ player?: boolean; actor?: Actor; prop?: number }> },
-  env: { playerAlive: boolean; player: { position: THREE.Vector3Like } },
+  env: { playerAlive: boolean; player: { position: THREE.Vector3Like }; ignorePlayer?: boolean },
 ): FightTarget | undefined {
   if (!a.alive || !a.inCombat) return undefined;
   const t = a.currentTarget;
   if (!t) return undefined;
-  if (t.player) return env.playerAlive ? { player: true, pos: env.player.position } : undefined;
+  // Port option "Enemies ignore the player": no special works on him (a pick not yet dropped).
+  if (t.player) return env.playerAlive && !env.ignorePlayer ? { player: true, pos: env.player.position } : undefined;
   const o = t.actor;
   return o && o.alive && !o.hidden ? { player: false, actor: o, pos: o.position } : undefined;
+}
+
+/**
+ * Where a special aims with no fight target: the player (the port's fallback while an attack
+ * that lost its target finishes), or with the port option "Enemies ignore the player" a point
+ * 5 m ahead of the body, so nothing is aimed at him.
+ */
+export function noTargetAim(
+  a: { position: THREE.Vector3Like; yaw: number },
+  env: { player: { position: THREE.Vector3Like }; ignorePlayer?: boolean },
+): THREE.Vector3Like {
+  if (!env.ignorePlayer) return env.player.position;
+  const p = a.position;
+  return { x: p.x - Math.sin(a.yaw) * 5, y: p.y, z: p.z - Math.cos(a.yaw) * 5 };
 }
 
 /** Melee blow of a character: its Melee Weapon damage (p68..p69 mean) x an Attack's p6 multiplier. */

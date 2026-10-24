@@ -135,9 +135,14 @@ export class SaveRegistry {
     return done;
   }
 
-  /** New Game: reset() every provider of a scope that has one. */
-  reset(scope: SaveScope): void {
+  /**
+   * New Game: reset() every provider of a scope that has one. `except`: the states of a save
+   * being loaded; providers it has an entry for are left to their load() (a save without a
+   * provider's key, such as an imported original save, gets that provider's initial state).
+   */
+  reset(scope: SaveScope, except?: Record<string, unknown>): void {
     for (const e of this.sorted(scope)) {
+      if (except && e.key in except) continue;
       try {
         e.provider.reset?.();
       } catch (err) {

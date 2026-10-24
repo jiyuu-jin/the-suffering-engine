@@ -72,25 +72,43 @@ export function readMeleeWeapons(pkgs: PackageSet, values: readonly PropValue[])
 export interface HitSphereLike {
   c: Vec3;
   r: number;
+  /** The bone the sphere follows (the struck sphere's bone goes with the blow: Part Caps). */
+  bone?: number;
 }
 
 /**
  * Sweep of a weapon shape that moved from (prevA, prevB) to (curA, curB) this frame against hit
- * spheres: the swept quad (or the sphere's path) is sampled in `steps` slices. Returns the contact
- * point on the weapon, or null.
+ * spheres: the swept quad (or the sphere's path) is sampled in `steps` slices. Returns the struck
+ * sphere and the contact point on the weapon, or null.
+ *
+ * Which sphere is struck [verified, Suffering.rfl 0x100c9de0 -> 0x100c9680]: the swept quad is
+ * two triangles over its four corners (0x1000e300), and the victim's sphere
+ * tree is walked by node index (0 .. model +0xc2, node = tree +0xbc + 24 x i, 0x100bcbc0),
+ * leaves only (first child 0); the first leaf whose posed sphere meets either triangle is the
+ * one the blow records (+0x20: the Part Cap's channel, dismember.ts). So `spheres` must come in
+ * node index order (fx/gas-system.ts modelHitSpheres). The port had taken the deepest overlap
+ * and then the sphere nearest the blade's point, which picks the head over the chest for a
+ * blade passing both at shoulder height.
  */
-export function sweepSpheres(prevA: Vec3, prevB: Vec3, curA: Vec3, curB: Vec3, r: number, spheres: readonly HitSphereLike[], steps = 6): Vec3 | null {
-  let best: { d: number; p: Vec3 } | null = null;
-  for (let i = 0; i <= steps; i++) {
-    const k = i / steps;
-    const a = lerp3(prevA, curA, k), b = lerp3(prevB, curB, k);
-    for (const s of spheres) {
+export function sweepHit(prevA: Vec3, prevB: Vec3, curA: Vec3, curB: Vec3, r: number, spheres: readonly HitSphereLike[], steps = 6): { i: number; p: Vec3 } | null {
+  for (let j = 0; j < spheres.length; j++) {
+    const s = spheres[j];
+    let best: { d: number; p: Vec3 } | null = null;
+    for (let i = 0; i <= steps; i++) {
+      const k = i / steps;
+      const a = lerp3(prevA, curA, k), b = lerp3(prevB, curB, k);
       const h = segmentDistance(a, b, s.c, s.c);
       const over = h.d - (r + s.r);
       if (over <= 0 && (!best || over < best.d)) best = { d: over, p: lerp3(a, b, h.s) };
     }
+    if (best) return { i: j, p: best.p };
   }
-  return best ? best.p : null;
+  return null;
+}
+
+/** sweepHit's contact point on the weapon, or null. */
+export function sweepSpheres(prevA: Vec3, prevB: Vec3, curA: Vec3, curB: Vec3, r: number, spheres: readonly HitSphereLike[], steps = 6): Vec3 | null {
+  return sweepHit(prevA, prevB, curA, curB, r, spheres, steps)?.p ?? null;
 }
 
 /** Damage of a blow (0x100ca920): p68, x the Attack's p6 on the attack's own target. */

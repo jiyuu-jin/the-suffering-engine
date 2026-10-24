@@ -371,3 +371,36 @@ test('retail 3a: a cloned creature falling into the west-yard pit is the sender 
   world.update(0.05);
   assert.ok(got.includes(`1b7d:1:${copy.toString(16)}`), got.slice(0, 12).join(' '));
 });
+
+test('placement: a body placed just under a walkable surface stands on it, as its mover ground does (3a guard 1e93)', () => {
+  // docs/game-logic.md §14.9: a plane above the foot sphere's centre within its radius is a ground
+  // contact and the highest one is the ground. A floor box (top 0) under a slab (0.32 .. 0.36): a
+  // body placed with its feet at 0.25, 0.11 m under the slab's top, stands on the slab; the gap
+  // rule alone took the box 0.25 m under its feet and set it into the slab.
+  const quad = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number) => {
+    const p = [[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]];
+    const q = [[3, 2, 6, 7], [0, 4, 5, 1], [0, 3, 7, 4], [1, 5, 6, 2], [0, 1, 2, 3], [4, 7, 6, 5]];
+    const idx: number[] = [];
+    for (const [a, b, c, d] of q) idx.push(a, b, c, a, c, d);
+    return { positions: new Float32Array(p.flat()), indices: new Uint32Array(idx) } as never;
+  };
+  // The people's Collider 10:149: foot r 0.45 at the origin, spheres at 0.865 and 1.703.
+  const node = (first: number, next: number, y: number, r: number) => ({ first, next, center: [0, y, 0] as [number, number, number], radius: r });
+  const people = npcMotorConfig(moverVolume([node(1, 0, 0.85, 1.3), node(0, 2, 0, 0.45), node(0, 3, 0.865, 0.45), node(0, 0, 1.703, 0.45)], 1, 0.4, 45)!);
+  const placed = (parts: never[], y: number, dead = false) => {
+    const a = slayer();
+    (a.kind as { anchored: boolean }).anchored = false;
+    Object.assign(a.motor.cfg, people);
+    Object.assign(a.motor.position, { x: 0, y, z: 0 });
+    if (dead) a.state = 'dead';
+    a.settle(new CollisionWorld({ parts }), false);
+    a.place();
+    return a.motor.position.y;
+  };
+  const floor = quad(-20, -1, -20, 20, 0, 20);
+  assert.ok(Math.abs(placed([floor, quad(-5, 0.32, -5, 5, 0.36, 5)], 0.25) - 0.36) < 1e-3, 'onto the slab 0.11 m above the feet');
+  // A surface beyond the foot radius above the feet (a bunk 0.6 m up over a body on the floor) is not.
+  assert.ok(Math.abs(placed([floor, quad(-5, 0.55, -5, 5, 0.6, 5)], 0)) < 1e-3, 'stays on the floor under the bunk');
+  // Placement noise above the floor is still snapped down.
+  assert.ok(Math.abs(placed([floor], 0.3)) < 1e-3, 'down onto the floor');
+});

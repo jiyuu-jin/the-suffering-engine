@@ -318,6 +318,17 @@ export class FrontEnd {
       e.preventDefault();
       return;
     }
+    if (e.code === 'KeyX' && this.mode === 'menu' && !e.repeat) {
+      // Save lists: X exports the focused save to a file (save-files.ts).
+      const top = this.stack[this.stack.length - 1];
+      const it = top?.screen.items[top.sel];
+      if (it?.type === 'button' && it.exportAction) {
+        e.preventDefault();
+        this.sound('select');
+        this.host.action(it.exportAction);
+      }
+      return;
+    }
     if (e.code === 'Delete' && this.mode === 'menu' && !e.repeat) {
       // Save lists: Delete removes the focused save (the flow asks for confirmation).
       const top = this.stack[this.stack.length - 1];
@@ -1039,7 +1050,7 @@ export class FrontEnd {
       const name = spec.name;
       const color = name?.colors[state] ?? (focused ? '#000' : COLOR.item);
 
-      if (!row || row.isNew) {
+      if (!row || row.isNew || row.tool) {
         if (name) this.placedText({ ...name, rect: { x: rr.x + 10, y: rr.y, w: rr.w - 20, h: rr.h } }, this.label(item.label), color);
         else this.text('ui', this.label(item.label), rr.x + 10, rr.y + 10, { color });
       } else {
@@ -1082,6 +1093,9 @@ export class FrontEnd {
     if (scroll > 0 && up) this.drawImage({ ...up, rect: { x: L.x + L.w - 22, y: L.y + 4 - bob, w: 16, h: 16 } });
     if (scroll + visible < items.length && down) this.drawImage({ ...down, rect: { x: L.x + L.w - 22, y: L.y + L.h - 20 + bob, w: 16, h: 16 } });
     for (const h of spec.hints) this.drawHint(h.place, this.label(h.label));
+    // Engine addition: the export key of a save row (the data's hints name Delete only).
+    const cur = items[top.sel];
+    if (cur?.type === 'button' && cur.exportAction) this.text('ui', 'X: export to a file', L.x + 4, L.y + L.h + 4, { color: COLOR.dim, scale: 0.7 });
   }
 
   // ---- automatic layouts (developer tools, provisional fallback) ----
@@ -1223,6 +1237,8 @@ export class FrontEnd {
 
   /** Render size at a resolution scale (Graphics "Resolution" value text). */
   private resolutionText(scale: number): string {
+    // 0: Auto (src/app/render-scale.ts: a pixel budget, then dynamic resolution).
+    if (!(scale > 0)) return 'Auto';
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const vp = document.getElementById('viewport');
     const w = Math.round((vp?.clientWidth || window.innerWidth) * dpr * scale);

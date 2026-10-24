@@ -15,6 +15,9 @@ import { moverVolume, npcMotorConfig } from '../src/game/actors/mover';
 import { decorationUids } from '../src/game/world/blockers';
 import { BlackOne, Fight } from '../src/game/actors/specials/black-one';
 import type { BlackOneStage } from '../src/game/actors/specials/params';
+import { groundAlong, NavGraph, STRAIGHT_WALK_DROP } from '../src/game/actors/nav';
+import { WORLD_SCALE } from '../src/formats/level';
+import type { Entity } from '../src/formats/entities';
 import { nodeFS, readSrsc, skip } from './helpers';
 
 const node = (first: number, next: number, y: number, r: number): ModelSphereNode => ({ first, next, center: [0, y, 0], radius: r });
@@ -172,4 +175,39 @@ test('retail 10: Object Grouper members are dynamic objects (the pipe-yard water
   const packages = await loadPackages(nodeFS(), dirname(L10), readLevelHeader(lvl).dependencies, () => {});
   const dyn = dynamicObjectUids(lvl, packages);
   assert.ok(dyn.has(0x11aa) && dyn.has(0x11ab), 'the grouped water surfaces');
+});
+
+test('straight walks keep to the ground (groundAlong): 9\'s guard no longer walks the line over the inlet\'s rim', () => {
+  // The clifftop at 0 for x < 0, the shore 28 m down beyond it, a steep rim quad (normal.y 0.2)
+  // from x 0 to 2 down 9.8 m.
+  const rim = { positions: new Float32Array([0, 0, -20, 2, -9.8, -20, 2, -9.8, 20, 0, 0, 20]), indices: new Uint32Array([0, 2, 1, 0, 3, 2]) } as unknown as MeshPart;
+  const col = new CollisionWorld({ parts: [quad(-20, -20, 0, 20, 0, LAND), rim, quad(2, -20, 20, 20, -28, LAND)] });
+  assert.equal(groundAlong(col, -5, 0, 0, -1, 0, 0), true, 'on the clifftop');
+  assert.equal(groundAlong(col, -5, 0, 0, 5, 0, 0), false, 'over the edge');
+  assert.equal(groundAlong(col, -5, 0, -5, 0.6, 0, 5), false, 'onto the rim (too steep to stand on)');
+  // Along the edge 0.3 m in: the line has ground, the body's width does not.
+  assert.equal(groundAlong(col, -0.3, 0, -8, -0.3, 0, 8), true);
+  assert.equal(groundAlong(col, -0.3, 0, -8, -0.3, 0, 8, 0.44), false);
+  // Down a 1 m step: ground (STRAIGHT_WALK_DROP 1.5); a 2 m one is not.
+  const step = (h: number) => new CollisionWorld({ parts: [quad(-20, -20, 0, 20, 0, LAND), quad(0, -20, 20, 20, -h, LAND)] });
+  assert.equal(groundAlong(step(1), -3, 0, 0, 3, -1, 0), true);
+  assert.equal(groundAlong(step(2.5), -3, 0, 0, 3, 0, 0), false);
+  assert.equal(STRAIGHT_WALK_DROP, 1.5);
+  // The start node a walker goes to first is one with ground on the way (NavGraph.nearest): not
+  // the nearer one across a 3 m gap.
+  const gap = new CollisionWorld({ parts: [quad(-20, -20, 0, 20, 0, LAND), quad(3, -20, 20, 20, 0, LAND), quad(0, -20, 3, 20, -28, LAND)] });
+  const n = (uid: number, x: number, y: number, z: number) => ({ uid, className: 'Move Node Object', position: [x * WORLD_SCALE, y * WORLD_SCALE, z * WORLD_SCALE], links: [], values: [], props: {}, scale: [2, 2, 2] }) as unknown as Entity;
+  const nav = new NavGraph([n(1, 3.5, 0, 0), n(2, -6, 0, 0)]);
+  assert.equal(nav.nodes[nav.nearest(-1, 0, 0, gap, 6, 0.4)].uid, 2);
+  assert.equal(nav.nodes[nav.nearest(-1, 0, 0, gap)].uid, 1, 'a goal lookup (no body) still takes the nearest in sight');
+});
+
+test('a path\'s goal lies on the node whose area holds it (8b: walkway nodes under the doorway\'s floor)', () => {
+  // A floor at 1 over the whole room; node A 1 m under it, 0.4 m from the goal; node B 3 m off, on it.
+  const col = new CollisionWorld({ parts: [quad(-20, -20, 20, 20, 1, LAND)] });
+  const n = (uid: number, x: number, y: number, z: number) => ({ uid, className: 'Move Node Object', position: [x * WORLD_SCALE, y * WORLD_SCALE, z * WORLD_SCALE], links: [], values: [], props: {}, scale: [1.5, 1.5, 1.5] }) as unknown as Entity;
+  const nav = new NavGraph([n(0xa, 0, 0, 0.4), n(0xb, -3, 1, 0)]);
+  assert.equal(nav.nodes[nav.nearest(0, 0.95, 0, col)].uid, 0xb, 'no sight line reaches A');
+  assert.equal(nav.nodes[nav.nearest(0, 0.95, 0, col, 6, 0, 'floor', undefined, true)].uid, 0xa, 'the goal is in A\'s area');
+  assert.equal(nav.nodes[nav.nearest(0, 3.5, 0, col, 6, 0, 'floor', undefined, true)].uid, 0xb, 'not 3.5 m over it');
 });

@@ -120,6 +120,8 @@ let lastLevelPath: string | undefined;
 let itemNames: ((r: ResRef) => string | undefined) | undefined;
 
 const inventory: InventoryService = createInventory(inventoryItems, (r) => itemNames?.(r));
+/** The same items without the systems' hooks on `add` (the weapons' pickup rules): save loads. */
+const rawInventory: InventoryService = createInventory(inventoryItems, (r) => itemNames?.(r));
 
 interface CombatLike {
   readonly player: { readonly health: number; readonly maxHealth: number };
@@ -480,7 +482,7 @@ export async function createWorldSystem(ctx: GameContext): Promise<GameSystem> {
   const unregisterSave = [
     registerSave(ctx.services, 'drops', dropsProvider, { scope: 'level', priority: -1 }),
     registerSave(ctx.services, 'world', worldSaveProvider(world), { scope: 'level', priority: 0 }),
-    registerSave(ctx.services, 'inventory', inventorySaveProvider(inventory, () => inventoryItems.clear(), byNameOnce(pkgs)), { scope: 'game', priority: 5 }),
+    registerSave(ctx.services, 'inventory', inventorySaveProvider(inventory, () => inventoryItems.clear(), byNameOnce(pkgs), (i) => rawInventory.add(i.name, i.count, i.template, i.className)), { scope: 'game', priority: 5 }),
   ];
 
   // --- Props, effects, lights, interactions -------------------------------------------

@@ -213,6 +213,18 @@ export class InsanityModel {
     if (this.form === 'human' && this.params.creature) this.begin('morphIn');
   }
 
+  /**
+   * A loaded save in creature form: transformed at once (the morph-in runs its first frame for
+   * the form's start-up: body, blur and tint) instead of the morph's full length.
+   */
+  restoreCreature() {
+    if (!this.params.creature || this.form === 'creature') return;
+    this.putAwayLeft = 0;
+    if (this.form !== 'morphIn') this.begin('morphIn');
+    this.morphLeft = 0;
+    this.setForm('creature');
+  }
+
   /** Change back (Toggle object "off", cutscenes, death). `empty` also clears the meter. */
   revert(empty = false, instant = false) {
     if (empty) this.setMeter(0);

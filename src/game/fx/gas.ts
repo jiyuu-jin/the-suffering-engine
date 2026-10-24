@@ -96,6 +96,8 @@ export function volumeOf(e: Entity): GasBox | undefined {
 export interface HitSphere {
   c: Vec3;
   r: number;
+  /** The bone it follows (posedSpheres). */
+  bone?: number;
 }
 
 /** Sphere tree node (formats/skeleton.ts SkeletonSphere): first child, next sibling. */

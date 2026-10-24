@@ -175,6 +175,12 @@ export interface LevelExtras {
    */
   collisionOf?: (o: LevelObject) => ObjectCollision | null;
   /**
+   * COLLISION_LAYER bits of the floor-layer triangles in LevelData.collision that are not drawn
+   * but hold movers up (LAYER_CELL; floor layers are the original's Landscape). Default: the
+   * physics default for a part.
+   */
+  layerCollision?: number;
+  /**
    * Visibility zone of each object / floor layer by uid (formats/visgraph.ts buildLevelZoning).
    * Geometry is bucketed per zone so the renderer can hide zones the camera cannot see.
    */
@@ -367,13 +373,57 @@ export interface FloorLayer {
   ldu: ResRef;
   /** Per-vertex raw heights: engine y = y + 2 * (height - 32768). */
   heights?: Uint16Array;
-  /** Per-cell flags (0x30 / 0xc0 bits = hole; low bits unknown). */
+  /** Per-cell flags (LAYER_CELL: the diagonal, hidden and hole triangles). */
   cellFlags?: Uint8Array;
 }
 
 /** Engine-unit height of layer vertex (i, j). */
 export function layerVertexY(L: FloorLayer, i: number, j: number): number {
   return L.heights ? L.y + 2 * (L.heights[j * (L.w + 1) + i] - 32768) : L.y;
+}
+
+/**
+ * Floor-layer cell flags (the low byte of the engine's per-cell word, copied from the first u16
+ * of the 22-byte cell record by the loader, SUFFERING.EXE 0x4a0500) [verified unless marked]:
+ * - `flip` (0x1): the cell's diagonal. Without it the cell splits along (1, 0)-(0, 1) and its
+ *   triangle 0 is fx + fz <= 1; with it along (0, 0)-(1, 1) and triangle 0 is fx <= fz
+ *   (0x49db80, fx / fz the point's place in the cell along x / z).
+ * - `hole` (0x40 << t): triangle t is a hole. The Landscape height lookups skip it (the ray
+ *   0x4a6c03, the characters' Landscape probe Suffering.rfl 0x100c01cd).
+ * - `hidden` (0x10 << t): triangle t is not drawn [strong: the loader sets 0x30 on a cell whose
+ *   texture ref does not resolve (0x4a05df); every cell of 5b's material-less layers carries it].
+ *   A hidden triangle that is not a hole still holds movers up: 5b's lobby, landing, upper floor
+ *   and attic stand on such layers, while the room models drawn over them have collision trees
+ *   without nodes (docs/game-logic.md §14.10).
+ */
+export const LAYER_CELL = { flip: 0x1, hidden: 0x10, hole: 0x40 } as const;
+
+/**
+ * The two triangles of a cell as corner offsets (di, dj), in the engine's order (triangle 0 then
+ * 1, see LAYER_CELL.flip), wound counter-clockwise seen from +y (`down`: from -y).
+ */
+export function layerCellTriangles(flags: number, down = false): [number, number][][] {
+  const a: [number, number] = [0, 0], b: [number, number] = [1, 0], c: [number, number] = [0, 1], d: [number, number] = [1, 1];
+  const tris = flags & LAYER_CELL.flip ? [[a, c, d], [a, d, b]] : [[a, c, b], [b, c, d]];
+  return down ? tris.map((t) => [t[0], t[2], t[1]]) : tris;
+}
+
+/** Triangle (0 or 1) of a cell under the point (fx, fz) in [0, 1] (0x49db80). */
+export function layerCellTriangle(flags: number, fx: number, fz: number): 0 | 1 {
+  return flags & LAYER_CELL.flip ? (fx <= fz ? 0 : 1) : 1 - fx >= fz ? 0 : 1;
+}
+
+/** Does triangle t of a cell hold movers up (not a hole)? */
+export function layerTriangleSolid(flags: number, t: 0 | 1): boolean {
+  return !(flags & (LAYER_CELL.hole << t));
+}
+
+/** Up-facing layers are wound counter-clockwise seen from +y; ceilings (normals down) reversed. */
+function layerFacesDown(L: FloorLayer): boolean {
+  let ny = 0;
+  if (L.normals) for (let k = 1; k < L.normals.length; k += 4) ny += L.normals[k];
+  else ny = 1;
+  return ny < 0;
 }
 
 /**
@@ -450,8 +500,8 @@ export function parseFloorLayers(lvl: SrscFile): FloorLayer[] {
   }
   // Trailer: u32 1, then per layer u32 size + zlib stream:
   //   (w+1)*(h+1) x { u16 flags (0x100: ?), u16 edge bits, u16 height }   (height: engine y =
-  //   layer.y + 2 * (height - 32768)), then w*h x 22-byte cell records (byte 0: 0x30/0xc0 = hole,
-  //   low bits unknown; then per-cell texture refs).
+  //   layer.y + 2 * (height - 32768)), then w*h x 22-byte cell records (u16 flags, LAYER_CELL:
+  //   the diagonal, hidden and hole triangles; then the cell's texture ref).
   if (p + 4 <= v.byteLength && v.getUint32(p, true) === 1) {
     p += 4;
     const bytes = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
@@ -524,7 +574,8 @@ class CollisionBucket {
   constructor(
     readonly textureKey: string | undefined,
     readonly material: SurfaceMaterial | undefined,
-    readonly layers: number,
+    /** Undefined: the physics default for a part (`solid`). */
+    readonly layers: number | undefined,
     readonly sightPass: boolean,
   ) {}
   tri(P: Float32Array, a: number, b: number, c: number) {
@@ -534,7 +585,8 @@ class CollisionBucket {
     const positions = Float32Array.from(this.pos);
     const indices = new Uint32Array(positions.length / 3);
     for (let i = 0; i < indices.length; i++) indices[i] = i;
-    const part: MeshPart = { positions, indices, textureKey: this.textureKey, material: this.material, layers: this.layers };
+    const part: MeshPart = { positions, indices, textureKey: this.textureKey, material: this.material };
+    if (this.layers !== undefined) part.layers = this.layers;
     if (this.sightPass) part.sightPass = true;
     return part;
   }
@@ -623,6 +675,42 @@ export function toOutputSpace(p: [number, number, number]): [number, number, num
   return [p[0] / WORLD_SCALE, p[1] / WORLD_SCALE, p[2] / WORLD_SCALE];
 }
 
+/**
+ * Placed objects whose .ldu ref is a stale copy of another instance's: the record is shared by
+ * several instances, names the model of one of them, and this one's template names a different
+ * model. Such an object uses its template's model, unlit by the record.
+ *
+ * The engine's .ldu record loader (SUFFERING.EXE 0x487610) reads the record's model ref and
+ * drops it (only the colours are kept, as the object's type-9 resource): an instance's model is
+ * not the record's [verified]. The port still takes the record's model elsewhere (about 150
+ * instances whose record names another model than their template; not traced which one the
+ * engine draws). The shared records are the clear case: 5b's Breakables 31ed / 31ee (template
+ * model 7:251) carry the refs of the gallery's Static Objects fde / 1155 (28:373 / 28:387, 20 m
+ * pieces) and stood as boxes across the upper corridor.
+ */
+export function staleLduRefs(
+  objects: readonly LevelObject[],
+  levelPkg: number | undefined,
+  recordModel: (id: number) => ResRef | undefined,
+  templateModel: (o: LevelObject) => ResRef | undefined,
+): Set<number> {
+  const out = new Set<number>();
+  if (levelPkg === undefined) return out;
+  const byRef = new Map<number, LevelObject[]>();
+  for (const o of objects) if (o.ref.pkg === levelPkg && recordModel(o.ref.id)) byRef.set(o.ref.id, [...(byRef.get(o.ref.id) ?? []), o]);
+  const same = (a: ResRef | undefined, b: ResRef | undefined) => !!a && !!b && a.pkg === b.pkg && a.id === b.id;
+  for (const [id, group] of byRef) {
+    if (group.length < 2) continue;
+    const m = recordModel(id)!;
+    if (!group.some((o) => same(templateModel(o), m))) continue;
+    for (const o of group) {
+      const t = templateModel(o);
+      if (t && !same(t, m)) out.add(o.uid);
+    }
+  }
+  return out;
+}
+
 function inferLevelPackage(objects: LevelObject[], ldu: Map<number, LduInfo>): number | undefined {
   const score = new Map<number, number>();
   for (const o of objects) {
@@ -640,6 +728,7 @@ export function parseLevel(lvl: SrscFile, name: string, extras: LevelExtras = {}
     extras.packages instanceof Map ? extras.packages : new Map((extras.packages ?? []).map((p) => [p.id, p]));
   const ldu = readLdu(extras.ldu);
   const levelPkg = extras.levelPackageId ?? inferLevelPackage(objects, ldu);
+  const staleLdu = staleLduRefs(objects, levelPkg, (id) => ldu.get(id)?.model, (o) => templateModelRef(pkgs, o.template));
   const includeUnlit = extras.includeUnlit ?? true;
 
   // Default colour for instances without baked lighting.
@@ -683,6 +772,8 @@ export function parseLevel(lvl: SrscFile, name: string, extras: LevelExtras = {}
   // Collision geometry (LevelExtras.collisionOf): placed objects' collision models by surface,
   // layers and sight flag, and the floor layers' buckets as drawn.
   const collisionBuckets = new Map<string, CollisionBucket>();
+  /** Floor-layer triangles that are not drawn but hold movers up (hiddenLayerCollision). */
+  let hiddenFloor: CollisionBucket | undefined;
   const collisionBucket = (key: string | undefined, material: SurfaceMaterial | undefined, layers: number, sightPass: boolean) => {
     const k = `${key ?? ''}|${material?.key ?? ''}|${layers}|${sightPass ? 1 : 0}`;
     let c = collisionBuckets.get(k);
@@ -729,7 +820,7 @@ export function parseLevel(lvl: SrscFile, name: string, extras: LevelExtras = {}
     if (extras.excludeUids?.has(o.uid)) continue;
     let modelRef: ResRef | undefined;
     let colors: Uint8Array | undefined;
-    const lit = levelPkg !== undefined && o.ref.pkg === levelPkg ? ldu.get(o.ref.id) : undefined;
+    const lit = levelPkg !== undefined && o.ref.pkg === levelPkg && !staleLdu.has(o.uid) ? ldu.get(o.ref.id) : undefined;
     if (lit) {
       colors = lit.colors;
       modelRef = lit.model.pkg ? lit.model : templateModelRef(pkgs, o.template);
@@ -862,7 +953,37 @@ export function parseLevel(lvl: SrscFile, name: string, extras: LevelExtras = {}
   }
 
   function emitLayer(L: FloorLayer) {
-    if (!L.material || !L.blocks.length) return;
+    const drawn = !!L.material && L.blocks.length > 0;
+    if (drawn) drawLayer(L);
+    if (extras.collisionOf) hiddenLayerCollision(L, drawn);
+  }
+
+  /**
+   * The triangles of a floor layer that are not drawn but are not holes either (LAYER_CELL):
+   * collision only. Drawn cells collide as drawn (the `landscape` buckets). Without cell flags
+   * nothing is known of the undrawn cells, and they stay out.
+   */
+  function hiddenLayerCollision(L: FloorLayer, drawn: boolean) {
+    const F = L.cellFlags;
+    if (!F) return;
+    const W = L.w, down = layerFacesDown(L);
+    let bk: CollisionBucket | undefined;
+    for (let j = 0; j < L.h; j++) {
+      for (let i = 0; i < W; i++) {
+        const f = F[j * W + i];
+        if (drawn && !(f & 0xf0)) continue;
+        const tris = layerCellTriangles(f, down);
+        for (const t of [0, 1] as const) {
+          if (!layerTriangleSolid(f, t)) continue;
+          bk ??= hiddenFloor ??= new CollisionBucket(undefined, undefined, extras.layerCollision, false);
+          for (const [di, dj] of tris[t]) bk.pos.push(L.x + i + di, layerVertexY(L, i + di, j + dj) / WORLD_SCALE, L.z + j + dj);
+        }
+      }
+    }
+  }
+
+  function drawLayer(L: FloorLayer) {
+    if (!L.material) return;
     const mat = readMaterial(pkgs, L.material);
     const texKey = mat?.layers[0]?.texture;
     const tex = texKey ? { pkg: +texKey.split(':')[0], id: +texKey.split(':')[1] } : undefined;
@@ -876,7 +997,8 @@ export function parseLevel(lvl: SrscFile, name: string, extras: LevelExtras = {}
     const W = L.w, H = L.h, VW = W + 1;
     // Which cells are drawn: any block weight grid with bit 0x10 at the cell's min corner.
     const cell = new Uint8Array(W * H);
-    // Cell flags 0x30 / 0xc0 = hole (matches the blend-weight presence bits exactly).
+    // Cells with hidden (0x30) or hole (0xc0) triangles are not drawn (they match the blend-weight
+    // presence bits exactly); the hidden ones still collide (hiddenLayerCollision).
     if (L.cellFlags) for (let k = 0; k < W * H; k++) cell[k] = L.cellFlags[k] & 0xf0 ? 0 : 1;
     else for (const b of L.blocks) {
       for (let j = b.z0; j < b.z1 && j < H; j++) {
@@ -896,11 +1018,7 @@ export function parseLevel(lvl: SrscFile, name: string, extras: LevelExtras = {}
     }
     const atlasKey = tex && atlas ? refKey(tex) : undefined;
     const atlasMat = tex && atlas ? mat : undefined;
-    let ny = 0;
-    if (L.normals) for (let k = 1; k < L.normals.length; k += 4) ny += L.normals[k];
-    else ny = 1;
-    // Up-facing layers: CCW seen from +y in the output space; ceilings (normals down) reversed.
-    const down = ny < 0;
+    const down = layerFacesDown(L);
 
     /** Write layer vertex (i, j) into bucket slot w. */
     const vertex = (bk: Bucket, w: number, i: number, j: number) => {
@@ -959,10 +1077,9 @@ export function parseLevel(lvl: SrscFile, name: string, extras: LevelExtras = {}
       for (let j = z0; j < z1; j++) {
         for (let i = x0; i < x1; i++) {
           if (!take(i, j)) continue;
-          const a = base + (j - z0) * gw + (i - x0), b = a + 1, c = a + gw, d = c + 1;
-          // Output z = L.z + j: (a, c, b) is CCW seen from +y.
-          const tris = down ? [a, b, c, b, d, c] : [a, c, b, b, c, d];
-          for (const t of tris) bk.idx[bk.ni++] = t;
+          // Output z = L.z + j: corner (di, dj) is vertex base + (j - z0 + dj) * gw + (i - x0 + di).
+          const a = base + (j - z0) * gw + (i - x0);
+          for (const tri of layerCellTriangles(L.cellFlags?.[j * W + i] ?? 0, down)) for (const [di, dj] of tri) bk.idx[bk.ni++] = a + dj * gw + di;
         }
       }
       bk.nv += gw * gh;
@@ -1020,6 +1137,7 @@ export function parseLevel(lvl: SrscFile, name: string, extras: LevelExtras = {}
     ? [
         ...[...landscape].flatMap((b) => (built.has(b) ? [built.get(b)!] : [])),
         ...[...collisionBuckets.values()].filter((c) => c.pos.length).map((c) => c.build()),
+        ...(hiddenFloor?.pos.length ? [hiddenFloor.build()] : []),
       ]
     : undefined;
 

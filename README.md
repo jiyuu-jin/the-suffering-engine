@@ -58,6 +58,27 @@ Without that step the game runs without cutscenes and sound.
     turns it off).
 
   Apart from that optional CC0 detail texture, Enhanced uses no third-party assets.
+- **Render scale**: the Graphics page's Resolution row sets the internal resolution: Auto (the
+  default) or a fixed 50 / 67 / 75 / 85 / 100 % of the native size (`?scale=` overrides it for
+  one page load). Auto keeps the internal pixels within a budget per graphics mode and Enhanced
+  tier and adds dynamic resolution, which steps down only when the GPU is the bottleneck. Frames
+  queued on the GPU are limited to keep input lag low, and Enhanced sharpens a reduced frame
+  (contrast-adaptive sharpening after FSR 1's published RCAS formula). See
+  [docs/perf.md](docs/perf.md).
+
+## Saves and port options
+
+- Saves live in the browser (IndexedDB, else localStorage, else memory for the session, which
+  the game says once). The Load Game and Save Game lists can export saves to `.json` files and
+  import them again. They can also import the original game's files from your install: an
+  `.rsg` save comes in as a save of the start of its level (only its header can be read), and
+  `Unspeakable.cfg` brings in the options, Archive pages and the Prelude unlock. The port's
+  options can be exported as an `Unspeakable.cfg`. Files are read in the page; nothing is
+  uploaded. See [docs/re/saves.md](docs/re/saves.md) §8 and §9.
+- **Enemies ignore the player** is a port option, not in the original game, on both Gameplay
+  pages (or `?ignorePlayer=1`): creatures never target, grab or hear the player, while stray
+  shots, blasts, gas and fire still hurt. The HUD shows a marker while it is on. See
+  [docs/game-logic.md](docs/game-logic.md) §15.17.
 
 ## Getting started
 
@@ -100,7 +121,7 @@ player picks their install folder in the browser.
 | `src/app/` | The browser app: entry point, renderer and lighting, physics, audio, video, input and gamepads, the game-file access layer (`gamefs.ts`), menus (`menu/`) |
 | `src/game/` | The game systems: `actors/` (characters, AI, combat, special creatures), `world/` (placed objects, logic objects, doors, props), `weapons/`, `insanity/`, `sequence/` (STOMP scenes), `campaign/`, `save/`, `hud/`, `fx/`, `levels/`, `visibility/` |
 | `tests/` | `node:test` suites; `tests/helpers.ts` finds the install and skips data tests without it |
-| `tools/` | CLIs (format dump, entity and class census, media baking, Enhanced texture cache, image metrics, coverage report) and headless-browser harnesses (smoke test, playthrough, campaign, level QA, gamepad end-to-end) |
+| `tools/` | CLIs (format dump, entity and class census, media baking, Enhanced texture cache, image metrics, coverage report) and headless-browser harnesses (smoke test, playthrough, campaign, level QA, save matrix, gamepad end-to-end) |
 | `tools/re/` | The generator for `src/formats/message-maps.ts` (reads the user's own binaries) |
 | `docs/` | Architecture and reference documentation |
 | `index.html` | The app page |
@@ -116,6 +137,8 @@ player picks their install folder in the browser.
 - [docs/playthrough.md](docs/playthrough.md): the chapter playthrough harness and its findings,
   from the bonus 0 Prelude level (unlocked by finishing the game) through all three endings
 - [docs/enhanced.md](docs/enhanced.md): the optional Enhanced graphics mode
+- [docs/perf.md](docs/perf.md): frame rate work: render scale and dynamic resolution, CPU per
+  frame
 - [docs/coverage.md](docs/coverage.md), [docs/coverage-chapter.md](docs/coverage-chapter.md):
   which object classes the engine handles
 - Reverse-engineering notes: [animation](docs/re/animation.md), [audio](docs/re/audio.md),

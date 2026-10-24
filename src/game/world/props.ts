@@ -198,6 +198,8 @@ export interface PropsSaveState {
   inv?: Record<string, number>;
   /** Phones whose receiver (p30) was broken off. */
   receivers?: number[];
+  /** Pushables the player has taken hold of once (they may fall from then on: pushableMayFall). */
+  handled?: number[];
 }
 
 /** A Pushable falls only once the player has moved it (updatePush) [no think: verified; fall: inferred]. */
@@ -1061,6 +1063,7 @@ export class Props implements DamageablePropSet {
       const e = p.rec.d.root.matrix.elements;
       const b = p.rec.d.base.elements;
       if (Math.hypot(e[12] - b[12], e[13] - b[13], e[14] - b[14]) > 0.01) s.pushed[p.rec.uid] = [e[12], e[13], e[14]];
+      if (p.handled) (s.handled ??= []).push(p.rec.uid);
     }
     for (const m of this.mechs.values()) {
       const sl = m.slide;
@@ -1083,6 +1086,12 @@ export class Props implements DamageablePropSet {
     for (const [k, h] of Object.entries(s.health ?? {})) {
       const r = this.recs.get(Number(k));
       if (r) r.health = h;
+    }
+    // (Held once: it may fall from then on. The save matrix found it lost on a restore, route 2.)
+    const handled = new Set(s.handled ?? []);
+    for (const p of this.pushes.values()) {
+      if (handled.has(p.rec.uid)) p.handled = true;
+      else delete p.handled;
     }
     for (const [k, p] of Object.entries(s.pushed ?? {})) {
       const x = this.pushes.get(Number(k));

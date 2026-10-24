@@ -47,6 +47,11 @@ const MAX_DECALS = 96;
 function blendState(mat: THREE.Material, blend: number) {
   mat.transparent = true;
   mat.depthWrite = false;
+  // One draw with culling off instead of three.js's back-face + front-face pair (docs/perf.md):
+  // a decal's triangles lie on the surfaces it was projected on and are depth-tested against
+  // them, so a back- and a front-facing triangle of one decal only meet on a visible pixel where
+  // one surface was painted twice (the same texel twice: the order does not matter).
+  mat.forceSinglePass = true;
   switch (blend) {
     case 2:
       mat.blending = THREE.AdditiveBlending;

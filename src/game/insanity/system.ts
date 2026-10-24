@@ -209,6 +209,8 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
     p.setVirtualInput(null);
   };
 
+  /** A save's creature form being put back (insanity provider): no flash, no morph wait. */
+  let restoringForm = false;
   const onForm = (form: Form, prev: Form) => {
     log(`form ${prev} -> ${form} (meter ${model?.s.meter.toFixed(1)})`);
     const human = params!.human;
@@ -218,10 +220,11 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
       view.player.setVirtualInput({ forward: 0, strafe: 0 });
       if (body) {
         showModel(body.root);
-        body.startMorphIn(human.morph?.duration ?? 1);
+        // (A loaded save in creature form: the morph clip only runs to its end pose.)
+        body.startMorphIn(restoringForm ? 0.1 : (human.morph?.duration ?? 1));
       }
       // Transformation flash (p267) and the creature-form blur / tint (p265 / p266).
-      const flash = templateFader(pkgs, human.flash);
+      const flash = restoringForm ? undefined : templateFader(pkgs, human.flash);
       if (flash && classes) classes.spawnFader(flash);
       const bp = templateBlur(pkgs, human.blur);
       if (bp) {
@@ -481,16 +484,38 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
         ctx.services,
         'insanity',
         {
-          save: () => ({ ...model.s }),
-          load: (d: InsanityPersist) => Object.assign(model.s, defaultPersist(), d),
+          // `form`: the creature form is part of the save. The original allows saving while
+          // transformed (its can-save predicate refuses Morph, state 19, not Transformed, 20:
+          // docs/re/saves.md §5) and a load rebuilds the Player in that state; mid-morph saves
+          // (checkpoints) keep the form the morph goes to.
+          // `combo`: the kill-combo window and count (Player +0x45c / +0x464), so a kill right
+          // after a load still counts as the combo's next one.
+          save: () => ({ ...model.s, form: model.form === 'morphIn' || model.form === 'creature' ? 'creature' : 'human', combo: [Math.round(model.comboTimer * 1000) / 1000, model.comboCount] }),
+          load: (d: InsanityPersist & { form?: string; combo?: number[] }, info) => {
+            const { form, combo, ...persist } = d ?? {};
+            Object.assign(model.s, defaultPersist(), persist);
+            // A loaded save only (a level transition starts the next level as it always did).
+            if (info.reason !== 'load') return;
+            if (Array.isArray(combo)) [model.comboTimer, model.comboCount] = [Number(combo[0]) || 0, Number(combo[1]) || 0];
+            if (form === 'creature') {
+              restoringForm = true;
+              try {
+                model.restoreCreature();
+              } finally {
+                restoringForm = false;
+              }
+            }
+            else if (model.form !== 'human') model.revert(false, true);
+          },
           reset: () => Object.assign(model.s, defaultPersist()),
         },
         { scope: 'game', priority: 25 },
       )
     : () => {};
-  // No manual saving in the middle of a transformation (the creature form is not saved).
+  // No manual saving while the weapon is being put away for the morph (the morph itself is
+  // refused by the save system's original rule, rules.ts: Morph state 19).
   const save = ctx.services.save as { addVeto?(fn: () => string | null): () => void } | undefined;
-  const offVeto = model && typeof save?.addVeto === 'function' ? save.addVeto(() => (model.transformed ? 'transformed' : null)) : () => {};
+  const offVeto = model && typeof save?.addVeto === 'function' ? save.addVeto(() => (model.putAwayLeft > 0 ? 'morphing' : null)) : () => {};
 
   // --- Service. --------------------------------------------------------------------------
   const service: InsanityService = {

@@ -165,7 +165,8 @@ class Horace implements SpecialMove {
             this.stats.triggered++;
           }
         }
-        if (this.d2 <= 0) this.startVolley(env);
+        // (Port option "Enemies ignore the player": no volley at him.)
+        if (this.d2 <= 0 && !env.ignorePlayer) this.startVolley(env);
         break;
       case 'volley':
         this.t += dt;
@@ -224,7 +225,7 @@ class Horace implements SpecialMove {
     const aim = new THREE.Vector3(p.x, p.y + 1.2, p.z);
     const d = from.distanceTo(aim);
     const clear = clearLine(env.world, from.x, from.y, from.z, aim.x, aim.y, aim.z);
-    const hit = clear && env.playerAlive && Math.random() < Math.max(0.3, 0.9 - d * 0.02);
+    const hit = clear && env.playerAlive && !env.ignorePlayer && Math.random() < Math.max(0.3, 0.9 - d * 0.02);
     const end = hit ? aim : aim.clone().add(new THREE.Vector3((Math.random() - 0.5) * 1.5, (Math.random() - 0.3), (Math.random() - 0.5) * 1.5));
     env.shotFx?.(from, end, hit, r && r.speed < 60 ? r.speed : undefined);
     this.rt.kindEffect('electric', end, 0.6);

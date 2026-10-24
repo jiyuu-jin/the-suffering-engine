@@ -58,6 +58,7 @@ import { PlayerCombat, resolveWeaponSounds } from './combat';
 import { createCombatHud } from './hud';
 import { lipSyncService } from './lipsync';
 import { ambientBlow, Director, type DirectorSave, type SpawnerSave } from './director';
+import { portOptions } from '../port-options';
 import { ActorFx } from './fx';
 import { clearLine, ladderEdgeOpen, lockPassDoors } from './nav';
 import { fleeGroups, type FleeSpot } from './flee';
@@ -281,7 +282,7 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
     behaviors: manager.behaviors,
     damagePlayer: (amount, from, hit) => playerBlow(amount, from, hit),
     damageActor: (t, amount, from, hit) => {
-      manager.damage(t, amount, from.position, from, hit && { point: hit.point, type: hit.type });
+      manager.damage(t, amount, from.position, from, hit && { point: hit.point, type: hit.type, bone: hit.bone });
     },
     propTarget: (uid) => worldSvc()?.propTarget?.(uid),
     // A KillEnemies object target (a fence Breakable) hit by a character: through services.damage
@@ -522,7 +523,7 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
   manager.on('spawn', (a) => !a.template && setupParts(a));
   manager.on('death', (a) => parts.died(a));
   manager.partHit = (a, amount, from, by, hit) =>
-    void parts.hit(a, { amount, type: hit?.type, point: hit?.point, from, byPlayer: by === undefined || by === 'player', attackerClass: by instanceof Object && 'kind' in by ? classOf(by as Actor) : undefined });
+    void parts.hit(a, { amount, type: hit?.type, point: hit?.point, bone: hit?.bone, from, byPlayer: by === undefined || by === 'player', attackerClass: by instanceof Object && 'kind' in by ? classOf(by as Actor) : undefined });
   manager.cuttable = (a) => parts.cuttable(a);
   manager.capLimb = (a) => void parts.capLimb(a);
   env.resurrected = (a) => void parts.regrow(a);
@@ -850,6 +851,8 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
       env.world = view.collision ?? env.world;
       // Nobody attacks during cutscenes or while flying (noclip).
       env.playerAlive = combat.alive && view.walking && !w?.inCutscene;
+      // Port option "Enemies ignore the player" (menu Gameplay page; src/game/port-options.ts).
+      env.ignorePlayer = portOptions.ignorePlayer;
       hud.setVisible(view.walking);
       if (env.world) {
         director.update(dt, env);
@@ -864,7 +867,7 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
         manager.drawDistance = view.culler?.fogDistance ?? Infinity;
         manager.update(dt, env, view.camera);
       }
-      if (view.walking && combat.alive) manager.pushPlayer(view.player.motor);
+      if (view.walking && combat.alive) manager.pushPlayer(view.player.motor, !!view.player.motionOverride);
       body?.tick(dt);
       combat.update(dt);
       fx.update(dt);

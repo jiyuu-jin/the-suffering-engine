@@ -30,6 +30,8 @@ import { World, type WorldHooks } from '../src/game/world/logic';
 import { resistanceForceMultiplier, resistanceMultiplier } from '../src/game/fx/gas';
 import { readHitTables } from '../src/game/actors/hit-react';
 import { readTemplate } from '../src/game/world/fx';
+import { NavGraph, NO_NAV_TYPE, locatesOn } from '../src/game/actors/nav';
+import { toOutputSpace } from '../src/formats/level';
 import { nodeFS, readSrsc, skip } from './helpers';
 
 const cutOut = () => {
@@ -257,4 +259,33 @@ test('8b: Relay 2413 (one random link) skips the jets already blocked: the copie
   }
   assert.equal(got.length, 20, 'every pick lands on a live jet');
   assert.ok(got.every((u) => u === 0x2418), 'the stove, the only one left');
+});
+
+test('8b Jimmy\'s last walk: his goal 1ea5 is placed on the walkway\'s node 207f, not Hermes\' room (NPC Exclusion Types locate it)', { skip }, async () => {
+  const { by } = await level8b();
+  const ents = [...by.values()];
+  // 10:682 (Hermes' rooms) is type 0, Jimmy's 10:674 type 5 (manager.ts navTypeOf).
+  const nav = new NavGraph(ents, (r) => (r.pkg === 10 && r.id === 682 ? 0 : r.pkg === 10 && r.id === 674 ? 5 : undefined));
+  const n = (u: number) => nav.byUid.get(u)!;
+  const jimmy = by.get(0x1738)!;
+  assert.deepEqual(jimmy.values[45], { pkg: 10, id: 674 });
+  // WaypointBehavior 189f -> Waypoint 1ea5.
+  assert.equal(by.get(0x189f)!.values[2], 0x1ea5);
+  for (const u of [0x254a, 0x1ef5, 0x2544]) assert.deepEqual([nav.nodes[n(u)].types, nav.nodes[n(u)].only], [1, true], u.toString(16));
+  const [gx, gy, gz] = toOutputSpace(by.get(0x1ea5)!.position);
+  // Without a type the nearest node is the room's 254a; for Jimmy (and a walker-less lookup,
+  // type 31) the room's nodes are not candidates and the goal lands on 207f.
+  assert.equal(nav.nodes[nav.nearest(gx, gy, gz, null)].uid, 0x254a);
+  assert.equal(nav.nodes[nav.nearest(gx, gy, gz, null, 6, 0, 'floor', 5)].uid, 0x207f);
+  assert.equal(nav.nodes[nav.nearest(gx, gy, gz, null, 6, 0, 'floor', NO_NAV_TYPE)].uid, 0x207f);
+  assert.equal(nav.nodes[nav.nearest(gx, gy, gz, null, 6, 0, 'floor', 0)].uid, 0x254a, 'Hermes himself is placed in his room');
+  // From the ladder's foot (18a1, Edge Passage 18a4 over Ladder d05) up to the walkway and along
+  // it to 207f: a way for his type; into the room none.
+  assert.deepEqual([by.get(0x18a4)!.values[1], by.get(0x18a4)!.values[2], by.get(0x18a4)!.values[3]], [0xd05, 0x18a3, 0x18a1]);
+  const p = nav.path(n(0x18a1), n(0x207f), undefined, { navType: 5 });
+  assert.ok(p && p.some((i) => nav.nodes[i].uid === 0x18a3), 'up the ladder edge');
+  assert.equal(nav.path(n(0x18a1), n(0x254a), undefined, { navType: 5 }), null);
+  assert.equal(locatesOn(nav.nodes[n(0x207f)], 5), true);
+  assert.equal(locatesOn(nav.nodes[n(0x254a)], 5), false);
+  assert.equal(locatesOn(nav.nodes[n(0x254a)], undefined), true);
 });

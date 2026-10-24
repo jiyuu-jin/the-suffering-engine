@@ -14,7 +14,10 @@ Code:
   write, the `.rsg` header and the start of its body.
 - `src/game/save/rules.ts`: the original's rules for when the player can save and when a
   checkpoint is taken.
-- Tests: `tests/re-saves-audio-player.test.ts`. They use synthetic data only.
+- `src/game/save/transfer.ts`, `src/app/menu/save-files.ts`, `src/app/menu/original-profile.ts`:
+  import and export on the player's disk (§8).
+- Tests: `tests/re-saves-audio-player.test.ts` and `tests/save-files.test.ts`. They use
+  synthetic data only (one checks the user's own `Suffering.rfl` when it is there).
 
 ## 1. Layers
 
@@ -314,8 +317,10 @@ There is **no enemy-proximity rule**, and saving while transformed (state 20) is
 ## 6. What the port does now
 
 - `src/game/save/system.ts` now uses `originalSaveVeto()`. It blocks saving while the player
-  is dead, under cinematic control, morphing, airborne (not on the ground) or on scripted
-  locomotion (ladders, mounted guns: `PlayerController.motionOverride`). It dropped the
+  is dead, under cinematic control, morphing, airborne (not on the ground), on scripted
+  locomotion (ladders, mounted guns: `PlayerController.motionOverride`) or busy. Busy means a
+  Security Monitor's feed is showing (View Monitor, state 23) or a modal Movie Player movie is
+  playing (3b's flashbacks: the port's sign of the original's script control, [inferred]). It dropped the
   previous rule that blocked saving while hostile creatures within 30 m were fighting.
 - Autosave objects go through `autosaveAction()`: alive, health ≥ 5, the object's p1 or the
   Checkpoints option. "Prompt" saves like "On" because the port has no prompt box, and the
@@ -323,19 +328,32 @@ There is **no enemy-proximity rule**, and saving while transformed (state 20) is
 - Port additions kept on purpose:
   - checkpoints at level start and after transitions;
   - the persistent `autosave` slot;
-  - the automatic revert 4 s after death.
+  - the automatic revert 4 s after death;
+  - a requested checkpoint waits while the player is on scripted locomotion (ladder, clamber,
+    use animation, mounted gun or crane controls, a creature holding him). The controller's
+    script is not saved, so a restore there would leave him standing in mid-air. The original
+    rebuilds the Player in that state. Manual saves are refused there anyway (§5).
+- Saving while transformed is allowed, as in the original (§5). The creature form is saved
+  with the insanity state, and a load in creature form transforms at once. A mid-morph
+  checkpoint keeps the form the morph goes to. The kill-combo window is saved too.
 - **Revert / death restore** (§4.1). The port does not rebuild from a stream. It restarts the
   level's systems on the level data it already has loaded (`main.ts restartLevel`), then
   hands every save provider its part of the checkpoint. So the restore is only as exact as
   the providers are complete. What they cover:
   - world entities: destroyed, enabled, visible and class state, plus the dispatcher (§3.3
     pass 1 and pass 2);
-  - props, lights and drops;
+  - props (with the Pushables the player has held), lights and drops;
+  - thrown objects in flight or burning (`weapons.thrown`: the player's throwables and NPC throws);
   - actors: placement, health, dormancy, hostility, the behaviour and how far it got, plus
     special moves' own state (`actors.specials`);
   - the director's Behavior Changers, chains, EdgeTogglers, Aim Controllers, Speech Players
     and Action Dialogs;
-  - Object Cloners, insanity, weapons, inventory, health, music and the player transform.
+  - Object Cloners, insanity (with the creature form), weapons (with the flashlight on / off),
+    inventory, health, music and the player transform.
+
+  A save without a game-scope provider's entry (an imported original save, §8.2) gets that
+  provider's new-game state. The inventory is restored as saved, not through the systems'
+  pickup rules (before the fix, every load and transition added a gun pickup's ammo).
 
   The player controller outlives the systems. Every level start therefore releases what the
   old systems handed it (`releasePlayerControl`): scripted locomotion, a held clip's motion
@@ -344,16 +362,18 @@ There is **no enemy-proximity rule**, and saving while transformed (state 20) is
 - Known gaps: the AI's momentary state (target, path, attack under way) starts from idle; a
   line of speech or dialogue under way is not played again (its end messages still come);
   bodies of `services.actors.spawn` creatures are not kept (dead Object Cloner copies are); Electric Arc Effects running on a target end.
-- Check: `node tools/playthrough.mjs --deaths ch1` (docs/playthrough.md). It compares the
-  restored level with a fingerprint taken in the frame the checkpoint was captured.
+- Checks:
+  - `node tools/playthrough.mjs --deaths ch1` (docs/playthrough.md) compares the restored level
+    with a fingerprint taken in the frame the checkpoint was captured.
+  - `node tools/save-matrix.mjs` (docs/playthrough.md "Save matrix") does the same for every
+    level and many states (creature form, fights, cuts, low health, a full inventory,
+    difficulties, reputations, vetoed states), in the same session and after a page reload,
+    and also checks the save providers' own round trip and revisits.
 
 ### Proposed follow-ups (not done)
 
-- A "Load original settings" action on the Options page. It would read `Unspeakable.cfg` and
-  apply `originalSettingsToPort()`: volumes, sensitivities, invert, subtitles, help text,
-  checkpoints, Environment FX, the Archives pages and the prelude unlock (`profile.ts`).
-- A save list that shows original `.rsg` headers (name, chapter, thumbnail). Loading them
-  would need the per-class readers from §3.3.
+- Loading the original's `.rsg` saves with their state. It needs the per-class readers from
+  §3.3 (every class's save routine). §8 imports their header only.
 
 ## 7. Open
 
@@ -363,3 +383,122 @@ There is **no enemy-proximity rule**, and saving while transformed (state 20) is
 - The decay of the +0x448 damage value.
 - The thumbnail's texture-format codes.
 - The meaning of the body's prefix values 3–5.
+
+## 8. Saves on the player's disk (port)
+
+Saves live in the browser (§9). The Load Game and Save Game lists also have file rows, in the
+port's own wording because the game's LoadSave GUI has no file items. The code is
+`src/app/menu/save-files.ts` (pickers and downloads), `src/game/save/transfer.ts` (pure) and
+`src/app/menu/original-profile.ts`.
+
+Pickers:
+- Where the browser has the File System Access API (Chromium), the port uses
+  `showOpenFilePicker`, `showDirectoryPicker` and `showSaveFilePicker`.
+- Elsewhere it uses `<input type=file>` (with `webkitdirectory` for a folder) and a download
+  link.
+- Files are read inside the page. Nothing is uploaded.
+
+The rows:
+
+| List | Row | What it does |
+|---|---|---|
+| Load | X key on a save | Exports that save to a `.json` file. |
+| Load | Import saves from a file… | Reads `.json` exports back. |
+| Load | Import from the original game (folder)… | Reads the game folder, its `Saves` folder or one save's folder, three levels deep, for `*.rsg` and `Unspeakable.cfg`. |
+| Load | Import original files (.rsg, Unspeakable.cfg)… | Reads the same files picked one by one. |
+| Load, Save | Export all saves to a file… | Writes every usable save to one `.json` bundle. |
+| Save | Export settings as Unspeakable.cfg… | Writes the port's options in the original's profile format. |
+
+Load Game stays enabled without saves, because its list is where saves come in. Continue is
+still disabled until a save exists.
+
+### 8.1 The port's own saves (.json)
+
+A bundle is `{ format: "the-suffering-web/saves", version: 1, exportedAt, saves: SaveData[] }`.
+A file holding one SaveData, or an array of them, is accepted too.
+
+On import:
+- Every entry goes through `migrateSave()`, the store's own validation. What it refuses
+  (damaged, or from a newer version) is counted and skipped.
+- A save already in the store with the same content is skipped.
+- A save whose id is taken by a different save gets a new id.
+- The autosave slot comes in as a manual save. The checkpoint slot is never overwritten.
+
+### 8.2 The original game's saves (.rsg) [header: verified; mapping: port]
+
+`readOriginalFiles()` reads each `.rsg` header (§3.2) and the start of its world chunk (§3.3,
+items 1–5). The rest of the world chunk cannot be read. Its records have no lengths and every
+class writes its own layout, so reading past the first object needs every class's reader.
+
+What carries over:
+
+| Original | Port save |
+|---|---|
+| Header level path | `levelPath`, matched against the game data from its `LEVELS` folder on. A level the data does not have is not imported, and the toast counts it. |
+| Header save name (the chapter's title, UTF-16) | `title` |
+| Folder name: hex of `time(NULL) + 1` (§3.1) | `createdAt`. The file's own time is used when the name is not a plausible time. |
+| Header thumbnail | `thumbnail`, a 160×120 JPEG. The engine's format codes are not mapped (§7). The layout is guessed from the pitch: 4 bytes a pixel read as B, G, R, A (Direct3D A8R8G8B8 / X8R8G8B8), 2 bytes as R5G6B5 [inferred]. |
+| Slot number, chapter object id, object count | Kept in `imported` for reference. They are not used. |
+
+What does not carry over: everything in the world chunk past its prefix. That covers the
+player (health, inventory, weapons and ammo, insanity, reputation, position), every object's
+state and the stored transition saves (the visited levels, §3.3 item 12). Difficulty is not in
+the header either; the import uses the difficulty of the port's last New Game.
+
+So an imported save is a save of the start of its level. The level loads fresh at its Player
+Spawn Point, with a new game's game-scope state: providers the save has no entry for are
+reset (`SaveRegistry.reset(scope, except)`), whatever the session played before.
+
+There is no `.rsg` export. The original refuses anything but a version 2 header followed by a
+complete world chunk (§3.2), and the port cannot write the per-class records.
+
+### 8.3 The original profile (Unspeakable.cfg) [layout: verified; mapping: port]
+
+Import (`applyOriginalProfile()`, through `originalSettingsToPort()`) takes:
+- the three volumes, the turn and pitch sensitivities, and invert pitch;
+- subtitles, help text, Checkpoints, Environment FX and controller vibration;
+- the Archive pages: bit *i* of set *s* is page *i* of the menu data's Archive Set *s*;
+- the "game finished" flag, which gives the Prelude unlock.
+
+A file without the 0x600D trailer is skipped, because the game itself would use its defaults.
+
+The imported file is kept (localStorage `suffering.original-profile.v1`). That holds its key
+bindings, speaker setup and the fields the port has no use for (+0x04..+0x0c, flags 0x40 and
+0x80).
+
+Export (`portSettingsToOriginal()`) writes the port's options over that kept file. Archive pages
+and the "finished" flag are the union of both. The "read successfully" flag 0x200 is cleared,
+because the reader sets it, not the file.
+
+Without an imported file, the export starts from the defaults (`0x10007400`) and the RFL's
+default key table:
+- The table is at `0x10167520`, read from the user's own `Suffering.rfl` through its section
+  table (`formats/pe.ts`).
+- It has 20-byte records up to action `0xFFFFFFFF` [verified: `0x10006c8b` walks it so]. The
+  retail table has 110 records, the first one Pause on Esc.
+- The routine that builds the live defaults (`0x10006c80`) also adds controller entries of its
+  own, so a profile written from the table alone may lack the pad bindings [inferred]. Importing
+  the player's own file first avoids this.
+
+## 9. Browser storage (port)
+
+`src/game/save/store.ts`:
+- **Backends.** IndexedDB (`suffering-saves` / `saves`, key `id`), else localStorage
+  (`suffering.save.<id>`), else memory. `?storage=localStorage` or `?storage=memory` forces
+  one.
+- **Memory only.** When only memory works (a private window, blocked site data), the game says
+  so once: saves last until the tab closes. Export them to a file before closing it.
+- **Failed writes.** A failed write reports why (`lastError`: `quota`, `unavailable`, `failed`).
+  A full quota fails that one save, and the store keeps working.
+- **Damaged entries.** An entry that is not JSON, not a save, or from a newer version is listed
+  as damaged and can be deleted. `delete` reports whether it worked.
+- **Persistence.** The first manual save asks the browser to keep the site's storage
+  (`navigator.storage.persist`).
+- **Several tabs.** Another tab deleting or upgrading the database closes this tab's connection
+  (`versionchange`), and the next call opens it again. Every write and delete is announced on a
+  BroadcastChannel (`suffering-saves`), so the other tabs' save lists refresh. Ids carry a random
+  part, so two tabs saving in the same millisecond do not collide. The autosave slot is shared:
+  the last checkpoint taken in any tab wins.
+
+Checks: `node tools/save-matrix.mjs --storage` and `tests/save-files.test.ts` (docs/playthrough.md
+"Save matrix").

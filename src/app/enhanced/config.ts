@@ -56,6 +56,8 @@ export interface TierFeatures {
   aoSamples: number;
   aoScale: number;
   bloom: boolean;
+  /** Bloom's internal resolution (× the drawing buffer: the render scale's internal size). */
+  bloomScale: number;
   /** Anti-aliasing of the post stack. */
   aa: 'fxaa' | 'traa';
   /** Screen-space reflections on wet floors. */
@@ -79,6 +81,7 @@ export const TIER_FEATURES: Record<QualityTier, TierFeatures> = {
     aoSamples: 0,
     aoScale: 0.5,
     bloom: true,
+    bloomScale: 0.35,
     aa: 'fxaa',
     ssr: false,
     dof: false,
@@ -97,6 +100,7 @@ export const TIER_FEATURES: Record<QualityTier, TierFeatures> = {
     aoSamples: 8,
     aoScale: 0.5,
     bloom: true,
+    bloomScale: 0.5,
     aa: 'fxaa',
     ssr: false,
     dof: false,
@@ -115,6 +119,7 @@ export const TIER_FEATURES: Record<QualityTier, TierFeatures> = {
     aoSamples: 12,
     aoScale: 0.5,
     bloom: true,
+    bloomScale: 0.5,
     aa: 'traa',
     ssr: false,
     dof: false,
@@ -133,6 +138,7 @@ export const TIER_FEATURES: Record<QualityTier, TierFeatures> = {
     aoSamples: 16,
     aoScale: 1,
     bloom: true,
+    bloomScale: 0.5,
     aa: 'traa',
     ssr: true,
     dof: true,

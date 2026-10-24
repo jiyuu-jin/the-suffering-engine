@@ -435,6 +435,8 @@ export class Effects {
     this.updateDrops(dt);
     this.arcs.update(dt);
     // Fires: scale ramps, camera facing, damage, the nearest two burning ones get a light.
+    // (The player's posed hit spheres are taken once for all fires this update: docs/perf.md.)
+    this.spheres = undefined;
     const cam = this.env.camera.position;
     const player = this.env.player();
     const lit: FireObj[] = [];
@@ -486,11 +488,34 @@ export class Effects {
    * a tree-less model's contact by its bounding box: inferred]. Without them: `contains`.
    */
   private fireTouchesPlayer(f: FireObj, feet: THREE.Vector3): boolean {
-    const box = f.bounds ? f.worldBox() : null;
-    const spheres = box ? this.env.playerSpheres?.() : undefined;
-    if (!box || !spheres?.length) return f.contains(feet);
-    return spheres.some((h) => sphereTouchesBox(box, h.c, h.r));
+    if (!f.bounds) return f.contains(feet);
+    const sp = this.playerSpheres();
+    if (!sp) return f.contains(feet);
+    // Sphere / box contact needs the box within reach of the spheres' bound (exact reject:
+    // every box point lies within reach() of the fire's origin).
+    const M = f.d.root.matrix.elements;
+    const dx = sp.x - M[12], dy = sp.y - M[13], dz = sp.z - M[14];
+    const reach = f.reach() + sp.r;
+    if (dx * dx + dy * dy + dz * dz > reach * reach * 1.0001 + 1e-6) return false;
+    const box = f.worldBox()!;
+    return sp.list.some((h) => sphereTouchesBox(box, h.c, h.r));
   }
+
+  /** The player's posed hit spheres this update and a sphere holding them all (null: none). */
+  private playerSpheres() {
+    if (this.spheres !== undefined) return this.spheres;
+    const list = this.env.playerSpheres?.();
+    if (!list?.length) return (this.spheres = null);
+    let x = 0, y = 0, z = 0;
+    for (const h of list) (x += h.c[0]), (y += h.c[1]), (z += h.c[2]);
+    x /= list.length;
+    y /= list.length;
+    z /= list.length;
+    let r = 0;
+    for (const h of list) r = Math.max(r, Math.hypot(h.c[0] - x, h.c[1] - y, h.c[2] - z) + h.r);
+    return (this.spheres = { list, x, y, z, r });
+  }
+  private spheres: { list: readonly { c: readonly number[]; r: number }[]; x: number; y: number; z: number; r: number } | null | undefined;
 
   dispose() {
     for (const t of this.timed) t.done();
@@ -562,6 +587,28 @@ export class FireObj {
     }
     return { c: [centre.x, centre.y, centre.z], ax: ax as GasBox['ax'], h: h as GasBox['h'] };
   }
+
+  /**
+   * How far from the model matrix's origin the drawn bounding box reaches at most: the box's
+   * farthest corner (model units) times the matrix's Frobenius norm, which bounds its stretch.
+   */
+  reach(): number {
+    const b = this.bounds;
+    if (!b) return 0;
+    if (this.cornerReach < 0) {
+      let m = 0;
+      for (let i = 0; i < 8; i++) {
+        let x = b.corner[0], y = b.corner[1], z = b.corner[2];
+        for (let k = 0; k < 3; k++) if (i & (1 << k)) (x += b.edges[k][0]), (y += b.edges[k][1]), (z += b.edges[k][2]);
+        m = Math.max(m, Math.hypot(x, y, z));
+      }
+      this.cornerReach = m;
+    }
+    const e = this.d.root.matrix.elements;
+    const f = e[0] * e[0] + e[1] * e[1] + e[2] * e[2] + e[4] * e[4] + e[5] * e[5] + e[6] * e[6] + e[8] * e[8] + e[9] * e[9] + e[10] * e[10];
+    return this.cornerReach * Math.sqrt(f);
+  }
+  private cornerReach = -1;
 
   /** Player feet inside the burning footprint (half the scaled model unit, 2 units high). */
   contains(p: THREE.Vector3) {

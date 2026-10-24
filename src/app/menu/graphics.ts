@@ -2,7 +2,10 @@
 // to the renderer:
 //   vsync          0 Yes / 1 No: stored only. Browsers always present in sync with the
 //                  display (requestAnimationFrame); the engine's frame cap row limits the rate.
-//   resolution     render scale of the window size (RESOLUTION_SCALES), via the pixel ratio.
+//   renderScale    the Resolution row (engine choice, RESOLUTION_SCALES): 0 Auto (a pixel budget
+//                  per mode / tier, then dynamic resolution) or a fixed scale of the native size
+//                  (src/app/render-scale.ts). `?scale=` overrides it for the page. (The row's
+//                  earlier key `resolution`, default 100 %, is no longer read.)
 //   pixelShaders   0 Yes / 1 No: post effects on/off (LevelRenderer.postEffects, the insanity
 //                  screen effects).
 //   gamma          0.5..1.5: a gamma ramp (SVG feComponentTransfer) on the game view and the
@@ -23,10 +26,11 @@ import type { Settings } from './settings';
 import { engineLights } from '../engine-light';
 import { ShadowMode } from '../../formats/render-data';
 import { TIER_SETTINGS, type TierSetting } from '../enhanced/config';
+import { parseScale, type ScaleSetting } from '../render-scale';
 
 export const GRAPHICS_DEFAULTS: Record<string, number> = {
   vsync: 0,
-  resolution: 1,
+  renderScale: 0,
   pixelShaders: 0,
   gamma: 1,
   shadows: 0,
@@ -39,6 +43,8 @@ export const GRAPHICS_DEFAULTS: Record<string, number> = {
 /** The parts of LevelRenderer the options touch (see renderer.ts graphics hooks). */
 export interface GraphicsView {
   readonly renderer: { setPixelRatio(r: number): void };
+  /** Render scale (src/app/render-scale.ts); without it the scale is applied as a pixel ratio. */
+  setRenderScale?(s: ScaleSetting): void;
   postEffects: boolean;
   frameCap: number;
   textureFilter: 'off' | 'bilinear' | 'trilinear';
@@ -66,11 +72,14 @@ export function applyGraphics(s: Settings, view: GraphicsView | undefined): void
   // 0x5c6d00: 3 all characters, 1 player only, 0 off.
   engineLights.shadowMode = [ShadowMode.All, ShadowMode.PlayerOnly, ShadowMode.Off][graphicsValue(s, 'shadows')] ?? ShadowMode.Off;
   if (!view) return;
-  const scale = graphicsValue(s, 'resolution');
-  const ratio = Math.min(window.devicePixelRatio || 1, 2) * Math.max(0.25, Math.min(1, scale));
-  if (Math.abs(ratio - currentRatio) > 1e-3) {
-    currentRatio = ratio;
-    view.renderer.setPixelRatio(ratio);
+  const scale = parseScale(graphicsValue(s, 'renderScale')) ?? 'auto';
+  if (view.setRenderScale) view.setRenderScale(scale);
+  else {
+    const ratio = Math.min(window.devicePixelRatio || 1, 2) * (scale === 'auto' ? 1 : scale);
+    if (Math.abs(ratio - currentRatio) > 1e-3) {
+      currentRatio = ratio;
+      view.renderer.setPixelRatio(ratio);
+    }
   }
   view.postEffects = graphicsValue(s, 'pixelShaders') === 0;
   view.frameCap = graphicsValue(s, 'frameCap');

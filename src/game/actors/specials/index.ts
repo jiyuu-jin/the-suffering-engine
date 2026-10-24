@@ -113,7 +113,9 @@ export function installSpecials(ctx: GameContext, manager: ActorManager, entitie
         for (const t of rt.tickers) t(dt, env);
       }
       ranged.update(dt);
-      for (const [a, m] of moves) if (!a.alive && !manager.actors.includes(a)) {
+      // (Alive or dead: a placed character removed by a save's `removed` list, a body gibbed
+      // before it, is never dead in the restored level, and its move must go too.)
+      for (const [a, m] of moves) if (!manager.actors.includes(a)) {
         m.dispose?.();
         moves.delete(a);
         rt.moves.delete(a);
@@ -127,7 +129,8 @@ export function installSpecials(ctx: GameContext, manager: ActorManager, entitie
     save() {
       const out: SpecialsSaveState = [];
       for (const [a, m] of rt.moves) {
-        if (a.uid === undefined || !a.alive || !m.save) continue;
+        // (Removed actors are not the level's any more: save matrix, 1c / 2 gibs.)
+        if (a.uid === undefined || !a.alive || !m.save || manager.get(a.uid) !== a) continue;
         const st = m.save();
         if (st !== undefined) out.push([a.uid, st]);
       }

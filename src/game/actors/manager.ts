@@ -36,6 +36,8 @@ export interface ActorHitInfo {
   point?: THREE.Vector3Like;
   /** Engine damage type (world/damage.ts DAMAGE_TYPE: 1 bullet, 3 explosion, 5 fire, 10 melee). */
   type?: number;
+  /** The struck hit sphere's bone (record +0x20), when the blow knows it: Part Caps (dismember.ts). */
+  bone?: number;
   /** Special Hit Reaction template the damage carries (picks a p71 hit reaction; hit-react.ts). */
   special?: ResRef;
   /** Damage over time: the per-frame amount the hit reaction is picked by (hit-react.ts). */
@@ -892,7 +894,12 @@ export class ActorManager {
    * level: a single waist-high ray let a shove pass a sill or a low wall, and the motor's next
    * depenetration could then take him out on the far side (5b's theatre fight).
    */
-  pushPlayer(motor: Pick<CharacterMotor, 'position' | 'shove' | 'cfg'>) {
+  pushPlayer(motor: Pick<CharacterMotor, 'position' | 'shove' | 'cfg'>, held = false) {
+    // Not while something else puts the player's feet (`held`: player.motionOverride, a
+    // creature's hold, a ladder, a clamber, a locked clip). The Mainliner's ride keeps its rider
+    // 0.45 m off his feet every frame; pushed out of it, the pair went 0.3 m a frame across the
+    // level, into a heap (1b's sewer) and off its floor (4b's ravine head).
+    if (held) return;
     const pos = motor.position, radius = motor.cfg.radius;
     let px = 0, pz = 0;
     for (const a of this.actors) {

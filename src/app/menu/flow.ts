@@ -25,7 +25,9 @@
 // Saves (src/game/save, `saves`): Continue loads the newest save; Load Game / Save Game open
 // the LoadSave lists (rows built here from the save store); Revert and the player's death
 // restore the last checkpoint (in place when it is in the current level). Save Game is
-// disabled while saves.canSave() gives a reason; Continue / Load while no save exists.
+// disabled while saves.canSave() gives a reason; Continue while no save exists (Load Game stays
+// open: its list has the file rows, ./save-files.ts: .json export / import, the original game's
+// .rsg saves and Unspeakable.cfg).
 //
 // `skipIntro` (URL ?skipintro) goes straight to the main menu: no gate, no
 // movies, no copyright screen. Audio then starts on the first click/key.
@@ -41,6 +43,7 @@ import { PROVISIONAL_MODEL, confirmScreen, type Label, type MenuAction, type Men
 import { saves } from '../../game/save/manager';
 import type { SaveData, SaveSummary } from '../../game/save/types';
 import { applySettings, loadSettings, saveSettings, type Settings } from './settings';
+import { ignorePlayerOverride } from '../../game/port-options';
 import type { FrontEndVideos } from './videos';
 import { GRAPHICS_DEFAULTS, applyGraphics, resetGraphics, type GraphicsView } from './graphics';
 import { profile } from './profile';
@@ -55,6 +58,9 @@ import { uiBridge } from '../../game/hud/ui-bridge';
 import { padButtonName, pads } from '../gamepad';
 import { CutscenePlayer } from '../cutscene';
 import { CALIBRATE_SCREEN, CalibrationScreen, PAD_SETTING_DEFAULTS } from './screens/controller';
+import { pickJson, pickOriginal, readOriginalFiles, saveToDisk, type PickedFile } from './save-files';
+import { applyOriginalProfile, buildOriginalProfile } from './original-profile';
+import { bundleFileName, makeBundle, parseBundle } from '../../game/save/transfer';
 
 export interface MenuFlowHost {
   fs: GameFS;
@@ -127,6 +133,9 @@ export class MenuFlow {
       saveSettings(this.settings);
     });
     this.installPads();
+    // `?ignorePlayer=1` / `=0` (testing): the port option for this page load, over the saved value.
+    const ignore = ignorePlayerOverride();
+    if (ignore !== undefined) this.settings.extra.ignorePlayer = ignore;
     applySettings(this.settings, { audio: host.audio, look: host.look });
     applyGraphics(this.settings, host.view);
     this.frontend = new FrontEnd(model, host.audio, this.settings, {
@@ -415,6 +424,19 @@ export class MenuFlow {
       case 'deleteSave':
         await this.deleteSave(a.id, !!a.confirmed);
         break;
+      case 'exportSave':
+      case 'exportSaves':
+        await this.exportSaves(a.kind === 'exportSave' ? a.id : undefined);
+        break;
+      case 'importSaves':
+        await this.importSaves();
+        break;
+      case 'importOriginal':
+        await this.importOriginal(a.from);
+        break;
+      case 'exportOriginalSettings':
+        await this.exportOriginalSettings();
+        break;
       case 'graphicsDefaults':
         // Applied live; the page's Accept keeps it, Cancel restores the snapshot.
         resetGraphics(this.settings);
@@ -581,7 +603,9 @@ export class MenuFlow {
     for (const sc of Object.values(this.model.screens)) {
       for (const it of sc.items) {
         if (it.type !== 'button' || !it.disabledWhen) continue;
-        it.disabled = it.disabledWhen === 'noSaves' ? none : cannot;
+        // Load Game stays open without saves (port: its list has the import rows, the way to
+        // bring saves in); Continue needs one.
+        it.disabled = it.disabledWhen === 'noSaves' ? none && it.action.kind !== 'openSaves' : cannot;
       }
     }
   }
@@ -611,8 +635,20 @@ export class MenuFlow {
         action: spec.mode === 'load' ? { kind: 'loadSave', id: s.id } : { kind: 'saveTo', id: s.id },
         save: { id: s.id, title: s.title || s.levelName, detail, date, thumbnail: s.thumbnail, damaged: s.damaged },
         deleteAction: { kind: 'deleteSave', id: s.id },
+        exportAction: s.damaged ? undefined : { kind: 'exportSave', id: s.id },
       });
     }
+    // File rows (engine wording: the game's LoadSave GUI has no file items): import / export
+    // on the player's disk, and the original game's saves and profile (save-files.ts).
+    const tool = (text: string, action: MenuAction, disabled = false): MenuItem => ({ type: 'button', label: { text }, action, disabled, save: { id: '', title: text, detail: '', date: '', tool: true } });
+    const any = this.saveList.some((x) => !x.damaged);
+    if (spec.mode === 'load') {
+      rows.push(tool('Import saves from a file…', { kind: 'importSaves' }));
+      rows.push(tool('Import from the original game (folder)…', { kind: 'importOriginal', from: 'folder' }));
+      rows.push(tool('Import original files (.rsg, Unspeakable.cfg)…', { kind: 'importOriginal', from: 'files' }));
+    }
+    rows.push(tool('Export all saves to a file…', { kind: 'exportSaves' }, !any));
+    if (spec.mode === 'save') rows.push(tool('Export settings as Unspeakable.cfg…', { kind: 'exportOriginalSettings' }));
     return rows;
   }
 
@@ -685,6 +721,92 @@ export class MenuFlow {
     if (saves.checkpoint?.id === id) saves.checkpoint = null;
     this.frontend.popScreen();
     await this.refreshSaves();
+  }
+
+  // -------------------------------------------------------------------------
+  // Save files on the player's disk (save-files.ts; what an original save carries over:
+  // src/game/save/transfer.ts, docs/re/saves.md §8)
+
+  /** One save (`id`) or every save to a .json bundle. */
+  private async exportSaves(id?: string): Promise<void> {
+    const list = id ? [await saves.get(id)].filter((d): d is SaveData => !!d) : await saves.exportAll();
+    if (!list.length) return this.host.toast('No saves to export', 2500);
+    const ok = await saveToDisk(bundleFileName(list), new Blob([JSON.stringify(makeBundle(list))], { type: 'application/json' }), { description: 'Saved games', mime: 'application/json', ext: '.json' });
+    if (ok) this.host.toast(`Exported ${list.length} save${list.length === 1 ? '' : 's'}`, 2500);
+  }
+
+  /** .json export files back into the list (same saves skipped, taken ids renamed). */
+  private async importSaves(): Promise<void> {
+    const files = await pickJson();
+    if (files.length) await this.importSaveFiles(files);
+  }
+
+  /** (The picked files; tools/save-matrix.mjs --menus calls it with synthetic ones.) */
+  async importSaveFiles(files: readonly PickedFile[]): Promise<{ added: number; skipped: number; rejected: number; bad: number }> {
+    let added = 0, skipped = 0, rejected = 0, bad = 0;
+    for (const f of files) {
+      const b = parseBundle(new TextDecoder().decode(await f.bytes()));
+      if (b.error) bad++;
+      rejected += b.rejected;
+      const r = await saves.importSaves(b.saves);
+      added += r.added;
+      skipped += r.skipped;
+      rejected += r.failed;
+    }
+    await this.refreshSaves();
+    const parts = [`Imported ${added} save${added === 1 ? '' : 's'}`, skipped ? `${skipped} already there` : '', rejected ? `${rejected} unusable` : '', bad ? `${bad} file${bad === 1 ? '' : 's'} not a save export` : ''];
+    this.host.toast(parts.filter(Boolean).join(', '), 4000);
+    return { added, skipped, rejected, bad };
+  }
+
+  /** The original game's .rsg saves (as level-start saves) and Unspeakable.cfg (options, unlocks). */
+  private async importOriginal(from: 'folder' | 'files'): Promise<void> {
+    const files = await pickOriginal(from);
+    if (!files.length) return this.host.toast('No .rsg or Unspeakable.cfg found there', 3500);
+    await this.importOriginalFiles(files);
+  }
+
+  /** (The picked files; tools/save-matrix.mjs --menus calls it with synthetic ones.) */
+  async importOriginalFiles(files: readonly PickedFile[]): Promise<{ added: number; skipped: number; settings: boolean; unknown: number; errors: string[] }> {
+    const fs = this.host.fs;
+    // The header's level path is the engine's (backslashes, maybe a drive or the install path
+    // in front): matched from its LEVELS folder on.
+    const resolveLevel = async (p: string) => {
+      const n = normalizePath(p);
+      const i = n.toLowerCase().lastIndexOf('levels/');
+      for (const c of [n, i >= 0 ? n.slice(i) : '']) if (c) {
+        const r = await fs.resolve(c).catch(() => undefined);
+        if (r) return r;
+      }
+      return undefined;
+    };
+    const r = await readOriginalFiles(files, resolveLevel, this.settings.difficulty);
+    const res = r.saves.length ? await saves.importSaves(r.saves) : { added: 0, skipped: 0, failed: 0 };
+    let prof = '';
+    if (r.settings) {
+      const a = applyOriginalProfile(r.settings, this.settings, this.model.archives);
+      applySettings(this.settings, { audio: this.host.audio, look: this.host.look });
+      saveSettings(this.settings);
+      prof = `options${a.pages ? `, ${a.pages} Archive page${a.pages === 1 ? '' : 's'}` : ''}${a.finished ? ', the Prelude unlock' : ''} from Unspeakable.cfg`;
+    }
+    await this.refreshSaves();
+    for (const e of r.errors) console.warn('[saves] original import:', e);
+    const parts = [
+      res.added || !prof ? `Imported ${res.added} original save${res.added === 1 ? '' : 's'} (each starts at its level's start)` : '',
+      res.skipped ? `${res.skipped} already there` : '',
+      prof,
+      r.unknownLevels.length ? `${r.unknownLevels.length} of an unknown level` : '',
+      r.errors.length ? `${r.errors.length} unreadable` : '',
+    ];
+    this.host.toast(parts.filter(Boolean).join('; '), 6000);
+    return { added: res.added, skipped: res.skipped, settings: !!r.settings, unknown: r.unknownLevels.length, errors: r.errors };
+  }
+
+  /** The settings and unlocks as an Unspeakable.cfg for the original game. */
+  private async exportOriginalSettings(): Promise<void> {
+    const r = await buildOriginalProfile(this.settings, this.model.archives, this.host.fs);
+    const ok = await saveToDisk('Unspeakable.cfg', new Blob([r.bytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }), { description: 'The Suffering profile', mime: 'application/octet-stream', ext: '.cfg' });
+    if (ok) this.host.toast(r.base === 'imported' ? 'Exported Unspeakable.cfg (key bindings from the imported one)' : `Exported Unspeakable.cfg (default keys${r.bindings ? '' : ': none found, import your own Unspeakable.cfg first'})`, 4500);
   }
 
   /** Load a save: in place when it is in the running level, else through the loading screen. */

@@ -38,6 +38,8 @@ export interface SaveData {
   levelName: string;
   /** Small JPEG data URL of the game view. */
   thumbnail?: string;
+  /** Imported from a file of the original game (transfer.ts): what it came from. */
+  imported?: { from: 'rsg'; slot: number; chapterId: number; originalPath: string; objects?: number };
   game: ProviderStates;
   levels: Record<string, ProviderStates>;
 }
@@ -73,6 +75,7 @@ export function migrateSave(raw: unknown): SaveData | null {
     title: typeof d.title === 'string' ? d.title : levelStem(d.levelPath),
     levelName: typeof d.levelName === 'string' ? d.levelName : levelStem(d.levelPath),
     thumbnail: typeof d.thumbnail === 'string' && d.thumbnail.startsWith('data:image/') ? d.thumbnail : undefined,
+    imported: isPlain(d.imported) && d.imported.from === 'rsg' ? d.imported : undefined,
     game: isPlain(d.game) ? (d.game as ProviderStates) : {},
     levels: isPlain(d.levels) ? (d.levels as Record<string, ProviderStates>) : {},
   };

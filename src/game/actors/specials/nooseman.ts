@@ -234,7 +234,8 @@ class Nooseman implements SpecialMove {
           const ft = fightTarget(a, env);
           this.victim = ft && !ft.player ? ft.actor : null;
         }
-        if (!this.victim && (!env.playerAlive || this.rt.holder)) break;
+        // (Port option "Enemies ignore the player": no drop on him.)
+        if (!this.victim && (!env.playerAlive || this.rt.holder || env.ignorePlayer)) break;
         if (flat(this.victim ? this.victim.position : env.player.position, a.position) > 40) {
           this.cooldown = 1;
           break;
@@ -301,7 +302,7 @@ class Nooseman implements SpecialMove {
   /** Grab test (state 1, 0x10081430): low bone near the victim's feet. */
   private tryGrab(env: ActorEnv): boolean {
     if (this.victim) return this.tryGrabNpc(this.victim);
-    if (!env.playerAlive || this.rt.holder) return false;
+    if (!env.playerAlive || this.rt.holder || env.ignorePlayer) return false;
     const b = this.bone(this.p.lowBone), p = env.player.position;
     if (Math.abs(b.y - (p.y + this.p.clearance)) > this.p.grabHeight || Math.hypot(b.x - p.x, b.z - p.z) > this.p.grabRadius) return false;
     if (!this.hold.start(() => this.feet())) return false;
@@ -379,6 +380,11 @@ class Nooseman implements SpecialMove {
       this.rt.playerBody?.play(PLAYER_GRAPPLE.death[this.side], { lock: true });
       this.rt.log(this.a, 'strangled the player');
       return;
+    }
+    if (env.ignorePlayer) {
+      this.rt.log(this.a, 'lets go: enemies ignore the player (port option)');
+      this.endHold();
+      return this.retract(1);
     }
     this.meter = Math.min(this.meter + dt, g.meterMax);
     this.holdLeft -= dt;

@@ -456,6 +456,16 @@ export async function createFxSystem(ctx: GameContext): Promise<GameSystem> {
 
   // --- Projected character shadows (engine-light.ts renderShadows; docs/re/renderer.md §4).
   const casters: ShadowCaster[] = [];
+  // (One caster record per character root, rewritten each frame: docs/perf.md.)
+  const casterOf = new WeakMap<THREE.Object3D, ShadowCaster>();
+  const caster = (root: THREE.Object3D, x: number, y: number, z: number, radius: number, player?: boolean) => {
+    let c = casterOf.get(root);
+    if (!c) casterOf.set(root, (c = { root, centre: new THREE.Vector3(), radius: 0, player: undefined }));
+    c.centre.set(x, y, z);
+    c.radius = radius;
+    c.player = player;
+    casters.push(c);
+  };
   engineLights.shadowCasters = () => {
     casters.length = 0;
     for (const a of actors()?.list() ?? []) {
@@ -463,12 +473,12 @@ export async function createFxSystem(ctx: GameContext): Promise<GameSystem> {
       if (!a.alive || a.hidden || !a.ch?.root.visible || a.ch.root.userData.noShadow) continue;
       const h = Math.max(0.5, a.height ?? 1.8);
       const y = (a.bottom ?? a.position.y) + h / 2;
-      casters.push({ root: a.ch.root, centre: new THREE.Vector3(a.position.x, y, a.position.z), radius: Math.max(0.5, h * 0.6) });
+      caster(a.ch.root, a.position.x, y, a.position.z, Math.max(0.5, h * 0.6));
     }
     const body = actors()?.playerBody?.body;
     if (body?.root.visible && view.walking) {
       const p = view.player.position;
-      casters.push({ root: body.root, centre: new THREE.Vector3(p.x, p.y + 0.9, p.z), radius: 1.1, player: true });
+      caster(body.root, p.x, p.y + 0.9, p.z, 1.1, true);
     }
     return casters;
   };

@@ -83,6 +83,8 @@ async function main() {
   void openSaveStore().then((s) => {
     saves.store = s;
     saves.onChange?.();
+    // A private window / blocked site data: the player must know saves will not survive the tab.
+    if (s.kind === 'memory') toast('Browser storage is unavailable here: saves last until this tab is closed (Export saves to a file from the Load Game list)', 8000);
   });
   // Browsers only start audio after a user gesture.
   const unlock = () => void audio.resume();
@@ -536,7 +538,7 @@ function startStats() {
     const info = view.renderer.info.render;
     ui.stats.innerHTML =
       `<span class="backend">${view.backend}</span><br>` +
-      `${fps.toFixed(0)} fps<br>` +
+      `${fps.toFixed(0)} fps · ${view.renderInfo()}<br>` +
       `${info.drawCalls} draws · ${Math.round(info.triangles).toLocaleString()} tris<br>` +
       (view.walking ? walkStatus() : `fly · speed ${view.controls.currentSpeed.toPrecision(3)}`) +
       (view.flashlight.visible ? '' : ' · light off');

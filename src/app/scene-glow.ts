@@ -56,6 +56,13 @@ const noMark = (() => {
   return m;
 })();
 
+/** The parts of three.js's RenderList the mark pass reads (r186). */
+interface RenderListLike {
+  opaque: { object: THREE.Object3D }[];
+  transparent: { object: THREE.Object3D }[];
+  transparentDoublePass?: { object: THREE.Object3D }[];
+}
+
 const targetOpts = { type: THREE.UnsignedByteType, depthBuffer: false, colorSpace: THREE.LinearSRGBColorSpace, magFilter: THREE.LinearFilter, minFilter: THREE.LinearFilter, generateMipmaps: false } as const;
 
 export class SceneGlow {
@@ -252,10 +259,37 @@ export class SceneGlow {
       if (m.isMesh && (all || m.layers.mask !== 0) && glowMarkOf(m.material)) meshes.push(m);
     };
     if (all) this.scene.traverse(visit);
-    else this.scene.traverseVisible(visit);
+    else if (!this.collectDrawn()) this.scene.traverseVisible(visit);
     this.marked = meshes.length;
     return meshes.length;
   }
+
+  /**
+   * The marked meshes of the scene render just made with this camera, read from three's render
+   * list for it (docs/perf.md): exactly the meshes that pass drew (shown, on the camera's layer,
+   * in the frustum), without walking the scene graph again. A marked mesh outside the frustum
+   * drew no mark before either (the mark pass culls it). False when the list is not reachable
+   * (another three.js version): the caller walks the scene.
+   */
+  private collectDrawn(): boolean {
+    const r = this.r as unknown as { _renderLists?: { get(scene: THREE.Object3D, camera: THREE.Camera, lighting: unknown): RenderListLike | undefined }; lighting?: unknown };
+    const list = r._renderLists?.get(this.scene, this.camera, r.lighting);
+    if (!list || !Array.isArray(list.opaque) || !Array.isArray(list.transparent)) return false;
+    const seen = this.stamps, stamp = ++this.stamp;
+    for (const items of [list.opaque, list.transparent, list.transparentDoublePass]) {
+      if (!items) continue;
+      for (let i = 0; i < items.length; i++) {
+        const m = items[i].object as THREE.Mesh;
+        if (!m?.isMesh || seen.get(m) === stamp) continue;
+        seen.set(m, stamp);
+        if (glowMarkOf(m.material)) this.meshes.push(m);
+      }
+    }
+    return true;
+  }
+  /** Per-object stamps of the current walk (no per-frame Set: its storage was garbage each frame). */
+  private readonly stamps = new WeakMap<THREE.Object3D, number>();
+  private stamp = 0;
 
   private swapMarks() {
     for (const m of this.meshes) {
@@ -271,13 +305,53 @@ export class SceneGlow {
     const cam = this.camera, mask = cam.layers.mask, bg = this.scene.background;
     cam.layers.set(GLOW_LAYER);
     this.scene.background = null;
+    // Only the marked meshes' branches of the scene graph are walked by the mark render: the
+    // other children of their ancestors are hidden for it (docs/perf.md). Nothing else is on
+    // the glow layer, so what is drawn is the same; the scene's full walk cost as much as the
+    // main pass's own (3a: about 1 ms a frame).
+    const hidden = this.pruneForMarks();
+    // Small marked meshes (fire cards: 3a has 59 fires of three cards) drawn as one mesh per
+    // mark material (MarkBatches below); added after the pruning, removed after the render.
+    const batched = this.batches.build(this.meshes);
+    if (batched) this.scene.add(this.batches.group);
     try {
       this.r.render(this.scene, cam);
     } finally {
+      if (batched) this.scene.remove(this.batches.group);
+      for (let i = 0; i < hidden.length; i++) hidden[i].visible = true;
+      hidden.length = 0;
       cam.layers.mask = mask;
       this.scene.background = bg;
     }
   }
+  private readonly batches = new MarkBatches();
+
+  /** Hide every shown object that neither is nor holds a marked mesh; returns them. */
+  private pruneForMarks(): THREE.Object3D[] {
+    const keep = this.keep, hidden = this.hidden, kept = this.stamps, stamp = ++this.stamp;
+    keep.length = 0;
+    for (const m of this.meshes) {
+      for (let o: THREE.Object3D | null = m; o && kept.get(o) !== stamp; o = o.parent) {
+        kept.set(o, stamp);
+        keep.push(o);
+      }
+    }
+    for (let k = 0; k < keep.length; k++) {
+      const ch = keep[k].children;
+      for (let i = 0; i < ch.length; i++) {
+        const c = ch[i];
+        // (Lights stay: they are part of the lights node every material's pipeline is keyed by.)
+        if (c.visible && kept.get(c) !== stamp && !(c as THREE.Light).isLight) {
+          c.visible = false;
+          hidden.push(c);
+        }
+      }
+    }
+    keep.length = 0;
+    return hidden;
+  }
+  private readonly keep: THREE.Object3D[] = [];
+  private readonly hidden: THREE.Object3D[] = [];
 
   private restoreMarks() {
     const meshes = this.meshes;
@@ -298,12 +372,11 @@ export class SceneGlow {
       r.setRenderTarget(this.frameRT);
       r.clear();
       if (this.collect(true)) {
-        // Hidden meshes (other zones, the lamps' other material tables) are compiled too.
-        const vis = this.meshes.map((m) => {
-          const v: boolean[] = [];
-          for (let o: THREE.Object3D | null = m; o; o = o.parent) (v.push(o.visible), (o.visible = true));
-          return v;
-        });
+        // Hidden meshes (other zones, the lamps' other material tables) are compiled too. Each
+        // object's own flag is kept once: meshes share parents, and a parent shown for the first
+        // mesh read as shown for the next one, so the restore left it shown (hidden objects with
+        // glow marks were drawn after every level load: 2's Fire models, 3a's toggled statics).
+        const restoreShown = showWithParents(this.meshes);
         this.swapMarks();
         const cam = this.camera, mask = cam.layers.mask;
         cam.layers.set(GLOW_LAYER);
@@ -313,10 +386,7 @@ export class SceneGlow {
         } finally {
           cam.layers.mask = mask;
           this.restoreMarks();
-          this.meshes.forEach((m, i) => {
-            let k = 0;
-            for (let o: THREE.Object3D | null = m; o; o = o.parent) o.visible = vis[i][k++];
-          });
+          restoreShown();
         }
         void p?.catch(() => undefined);
       }
@@ -349,3 +419,207 @@ export class SceneGlow {
     for (const m of [this.clearAlphaMat, ...this.downMat, ...this.blurMat, this.addMat, this.presentMat]) m.dispose();
   }
 }
+
+/**
+ * Show objects and all their parents (a precompile that must see hidden ones); returns the
+ * restore. Each object's flag is kept once, so parents shared by several objects come back as
+ * they were (scene-glow's warm: a shared parent shown for the first mesh read as shown for the
+ * next, and stayed shown).
+ */
+export function showWithParents(objects: Iterable<THREE.Object3D>): () => void {
+  const vis = new Map<THREE.Object3D, boolean>();
+  for (const m of objects) for (let o: THREE.Object3D | null = m; o; o = o.parent) if (!vis.has(o)) (vis.set(o, o.visible), (o.visible = true));
+  return () => {
+    for (const [o, v] of vis) o.visible = v;
+  };
+}
+
+/** Marked meshes up to this many vertices are drawn merged in the mark pass. */
+const SMALL_MARK = 64;
+
+interface MarkBatch {
+  mesh: THREE.Mesh;
+  /** Builds since it last drew (a batch long unused is disposed: its material may be gone). */
+  idle: number;
+  /** Attribute names of the members, in order (the merged geometry has the same layout). */
+  names: string[];
+  vertices: number;
+  indices: number;
+}
+
+/**
+ * The mark pass's small meshes merged per mark material (docs/perf.md). Every mark writes the
+ * same value (alpha 1, colour kept, no depth write), so the order of the marks does not matter
+ * and one draw can hold them all: the members' triangles are copied into a world-space buffer
+ * each frame (positions and normals through their world matrices, a mirroring matrix flipping
+ * the winding as three.js does) and the members themselves are left off the glow layer. The
+ * merged geometry keeps the members' attribute layout, so it draws with their pipeline.
+ */
+class MarkBatches {
+  readonly group = new THREE.Group();
+  private readonly byKey = new Map<string, MarkBatch>();
+  private readonly layouts = new WeakMap<THREE.BufferGeometry, string | null>();
+
+  constructor() {
+    this.group.name = 'glow-mark-batches';
+    this.group.matrixAutoUpdate = false;
+    this.group.matrixWorldAutoUpdate = false;
+  }
+
+  /** Attribute layout key of a geometry that can be merged, or null. */
+  private layout(g: THREE.BufferGeometry): string | null {
+    let k = this.layouts.get(g);
+    if (k !== undefined) return k;
+    k = null;
+    const pos = g.attributes.position as THREE.BufferAttribute | undefined;
+    const plain = Object.values(g.attributes).every((a) => (a as THREE.BufferAttribute).isBufferAttribute && !(a as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute);
+    if (pos && plain && pos.count <= SMALL_MARK && !g.groups.length && !Object.keys(g.morphAttributes).length && g.drawRange.start === 0 && g.drawRange.count === Infinity) {
+      k = Object.keys(g.attributes)
+        .sort()
+        .map((n) => {
+          const a = g.attributes[n] as THREE.BufferAttribute;
+          return `${n}:${a.itemSize}:${a.array.constructor.name}:${a.normalized ? 1 : 0}`;
+        })
+        .join(',');
+    }
+    this.layouts.set(g, k);
+    return k;
+  }
+
+  /**
+   * Take the eligible marked meshes (already on their mark material and the glow layer) into
+   * the batches. Returns whether any batch has something to draw.
+   */
+  build(meshes: readonly THREE.Mesh[]): boolean {
+    for (const b of this.byKey.values()) (b.vertices = 0), (b.indices = 0);
+    let any = false;
+    const bit = 1 << GLOW_LAYER;
+    for (const m of meshes) {
+      if ((m as THREE.SkinnedMesh).isSkinnedMesh || (m as THREE.InstancedMesh).isInstancedMesh || m.morphTargetInfluences?.length || Array.isArray(m.material)) continue;
+      const lay = this.layout(m.geometry);
+      if (!lay) continue;
+      const mat = m.material as THREE.Material;
+      const key = `${mat.uuid}|${lay}`;
+      let b = this.byKey.get(key);
+      if (!b) this.byKey.set(key, (b = this.create(m.geometry, mat)));
+      this.append(b, m);
+      m.layers.mask &= ~bit;
+      any = true;
+    }
+    for (const [key, b] of this.byKey) {
+      const g = b.mesh.geometry;
+      b.mesh.visible = b.indices > 0;
+      if (!b.indices) {
+        if (++b.idle > 600) {
+          this.byKey.delete(key);
+          b.mesh.removeFromParent();
+          g.dispose();
+        }
+        continue;
+      }
+      b.idle = 0;
+      g.setDrawRange(0, b.indices);
+      for (const n of b.names) {
+        const a = g.attributes[n] as THREE.BufferAttribute;
+        a.clearUpdateRanges();
+        a.addUpdateRange(0, b.vertices * a.itemSize);
+        a.needsUpdate = true;
+      }
+      const ix = g.index!;
+      ix.clearUpdateRanges();
+      ix.addUpdateRange(0, b.indices);
+      ix.needsUpdate = true;
+    }
+    return any;
+  }
+
+  private create(src: THREE.BufferGeometry, material: THREE.Material): MarkBatch {
+    const geo = new THREE.BufferGeometry();
+    const names = Object.keys(src.attributes).sort();
+    const mesh = new THREE.Mesh(geo, material);
+    mesh.name = `glow-mark-batch:${material.name}`;
+    mesh.frustumCulled = false;
+    mesh.matrixAutoUpdate = false;
+    mesh.layers.set(GLOW_LAYER);
+    const b: MarkBatch = { mesh, idle: 0, names, vertices: 0, indices: 0 };
+    this.allocate(b, src, 256, 768);
+    this.group.add(mesh);
+    return b;
+  }
+
+  /** (Re)allocate the merged buffers with room for `v` vertices and `i` indices, keeping the content. */
+  private allocate(b: MarkBatch, layoutOf: THREE.BufferGeometry, v: number, i: number) {
+    const old = b.mesh.geometry;
+    const geo = new THREE.BufferGeometry();
+    for (const n of b.names) {
+      const a = (old.attributes[n] ?? layoutOf.attributes[n]) as THREE.BufferAttribute;
+      const Ctor = a.array.constructor as new (n: number) => THREE.TypedArray;
+      const arr = new Ctor(v * a.itemSize);
+      const prev = old.attributes[n] as THREE.BufferAttribute | undefined;
+      if (prev) arr.set((prev.array as THREE.TypedArray).subarray(0, b.vertices * a.itemSize));
+      geo.setAttribute(n, new THREE.BufferAttribute(arr, a.itemSize, a.normalized).setUsage(THREE.DynamicDrawUsage));
+    }
+    const idx = new Uint32Array(i);
+    if (old.index) idx.set((old.index.array as Uint32Array).subarray(0, b.indices));
+    geo.setIndex(new THREE.BufferAttribute(idx, 1).setUsage(THREE.DynamicDrawUsage));
+    b.mesh.geometry = geo;
+    if (old !== geo) old.dispose();
+  }
+
+  private append(b: MarkBatch, m: THREE.Mesh) {
+    const src = m.geometry;
+    const pos = src.attributes.position as THREE.BufferAttribute;
+    const n = pos.count;
+    const idx = src.index;
+    const count = idx ? idx.count : n;
+    let geo = b.mesh.geometry;
+    if (b.vertices + n > (geo.attributes.position as THREE.BufferAttribute).count || b.indices + count > geo.index!.count) {
+      this.allocate(b, src, Math.max(2 * (b.vertices + n), 256), Math.max(2 * (b.indices + count), 768));
+      geo = b.mesh.geometry;
+    }
+    const e = m.matrixWorld.elements;
+    const v0 = b.vertices;
+    for (const name of b.names) {
+      const a = src.attributes[name] as THREE.BufferAttribute;
+      const out = (geo.attributes[name] as THREE.BufferAttribute).array as THREE.TypedArray;
+      const s = a.itemSize, arr = a.array as THREE.TypedArray;
+      if (name === 'position' && s === 3) {
+        for (let k = 0; k < n; k++) {
+          const x = arr[3 * k], y = arr[3 * k + 1], z = arr[3 * k + 2];
+          const o = 3 * (v0 + k);
+          out[o] = e[0] * x + e[4] * y + e[8] * z + e[12];
+          out[o + 1] = e[1] * x + e[5] * y + e[9] * z + e[13];
+          out[o + 2] = e[2] * x + e[6] * y + e[10] * z + e[14];
+        }
+      } else if (name === 'normal' && s === 3 && !a.normalized) {
+        const N = _nm.getNormalMatrix(m.matrixWorld).elements;
+        for (let k = 0; k < n; k++) {
+          const x = arr[3 * k], y = arr[3 * k + 1], z = arr[3 * k + 2];
+          let nx = N[0] * x + N[3] * y + N[6] * z, ny = N[1] * x + N[4] * y + N[7] * z, nz = N[2] * x + N[5] * y + N[8] * z;
+          const l = Math.hypot(nx, ny, nz) || 1;
+          nx /= l;
+          ny /= l;
+          nz /= l;
+          const o = 3 * (v0 + k);
+          out[o] = nx;
+          out[o + 1] = ny;
+          out[o + 2] = nz;
+        }
+      } else out.set(arr.subarray(0, n * s), v0 * s);
+    }
+    const flip = m.matrixWorld.determinant() < 0;
+    const outI = geo.index!.array as Uint32Array;
+    const ia = idx?.array;
+    let w = b.indices;
+    for (let t = 0; t + 2 < count; t += 3) {
+      const a = ia ? ia[t] : t, c1 = ia ? ia[t + 1] : t + 1, c2 = ia ? ia[t + 2] : t + 2;
+      outI[w++] = v0 + a;
+      outI[w++] = v0 + (flip ? c2 : c1);
+      outI[w++] = v0 + (flip ? c1 : c2);
+    }
+    b.vertices += n;
+    b.indices = w;
+  }
+}
+
+const _nm = new THREE.Matrix3();

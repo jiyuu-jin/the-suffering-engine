@@ -12,6 +12,7 @@
 import type * as THREE from 'three/webgpu';
 import type { Actor } from '../actor';
 import type { SpecialRuntime } from './runtime';
+import { portOptions } from '../../port-options';
 
 export class PlayerHold {
   /** Struggle presses since start(). */
@@ -29,7 +30,8 @@ export class PlayerHold {
   start(feet?: () => THREE.Vector3Like | null): boolean {
     const rt = this.rt, p = rt.player;
     if (this.active) return true;
-    if ((rt.holder && rt.holder !== this.holder) || p.motionOverride || !rt.playerAlive) return false;
+    // Port option "Enemies ignore the player": no grab or ride takes him.
+    if ((rt.holder && rt.holder !== this.holder) || p.motionOverride || !rt.playerAlive || portOptions.ignorePlayer) return false;
     rt.holder = this.holder;
     this.active = true;
     this.presses = 0;

@@ -37,9 +37,10 @@ test('Prelude attackers: their own MeleeAttackBehavior (p87 overridden) gives th
   const tpl = { pkg: 10, id: 392 };
   // The template alone has no MeleeAttackBehavior: no weapon attacks.
   const plain = resolveCreatureClips(packages as never, tpl, 10, 5);
-  assert.ok(!plain.attacks.some((a) => a.weaponOnly), 'template: no weapon-armed attack');
+  assert.notEqual(plain.source.attack, 'behavior', 'template: no MeleeAttackBehavior attack');
   const withOwn = resolveCreatureClips(packages as never, tpl, 10, 5, new Map([[CHARACTER_MELEE_SLOT, own]]));
   assert.deepEqual(withOwn.attacks.map((a) => `${a.clip.pkg}:${a.clip.id}`), ['10:1727', '10:351']);
+  assert.equal(withOwn.source.attack, 'behavior');
   assert.ok(withOwn.attacks.every((a) => a.weaponOnly && a.scale === 1));
 });
 

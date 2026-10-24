@@ -66,6 +66,10 @@ import type { EntityPackageSet } from '../../formats/entities';
 import { uiBridge } from './ui-bridge';
 import { pads } from '../../app/gamepad';
 import { drawPadGlyph, padGlyphWidth } from '../../app/glyphs';
+import { portOptions } from '../port-options';
+
+/** HUD marker while the port option "Enemies ignore the player" is on. */
+export const PORT_TAG_IGNORE_PLAYER = 'ENEMIES IGNORE PLAYER (port option)';
 
 const CSS = `
 .hud-canvas { position:absolute !important; left:0; top:0; width:100% !important; height:100% !important; pointer-events:none; z-index:6; }
@@ -220,13 +224,19 @@ export async function createHudSystem(ctx: GameContext): Promise<GameSystem> {
     }
   };
 
+  // (Hidden: the canvas is cleared once, not every frame; a full-window clear at the display's
+  // pixel ratio is a canvas commit per frame for nothing, docs/perf.md.)
+  let blank = false;
   const draw = (m: HudModel) => {
     resize();
     const W = canvas.width;
     const H = canvas.height;
-    g.setTransform(1, 0, 0, 1, 0, 0);
-    g.clearRect(0, 0, W, H);
     const visible = hudBus.combatVisible && view.walking && !m.inCutscene && !container.classList.contains('stomp-cine');
+    if (visible || !blank) {
+      g.setTransform(1, 0, 0, 1, 0, 0);
+      g.clearRect(0, 0, W, H);
+    }
+    blank = !visible;
     canvas.style.visibility = visible ? 'visible' : 'hidden';
     if (!visible) return icons?.hide();
     const t = hudBus.clock;
@@ -324,6 +334,7 @@ export async function createHudSystem(ctx: GameContext): Promise<GameSystem> {
       drawHelp(t);
     }
     drawPrompt(dead);
+    drawPortTag();
 
     if (dead) {
       const since = t - deadAt;
@@ -352,6 +363,22 @@ export async function createHudSystem(ctx: GameContext): Promise<GameSystem> {
         g.fillRect(0, 0, W, H);
       }
     }
+  };
+
+  /** Port option marker (src/game/port-options.ts): screenshots and recordings show it is on. */
+  const drawPortTag = () => {
+    if (!portOptions.ignorePlayer) return;
+    g.save();
+    g.font = '600 9px system-ui, sans-serif';
+    g.textAlign = 'center';
+    g.textBaseline = 'top';
+    g.fillStyle = 'rgba(0,0,0,0.45)';
+    const text = PORT_TAG_IGNORE_PLAYER;
+    const w = g.measureText(text).width + 10;
+    g.fillRect(VW / 2 - w / 2, 3, w, 13);
+    g.fillStyle = 'rgba(255,196,110,0.92)';
+    g.fillText(text, VW / 2, 5);
+    g.restore();
   };
 
   /** Notice in a Simple Text HUD template (Archives Trigger "page unlocked" text). */

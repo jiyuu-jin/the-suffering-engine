@@ -917,22 +917,56 @@ class EngineLightRig {
     }
     set.dirs = dirs;
     const budget = Math.max(0, Math.min(SHADER_POINT_LIGHTS, SHADER_LIGHTS - others));
-    const rank = this.rank;
-    rank.length = 0;
     const n = u.points.value as number;
+    // (Allocation-free, docs/perf.md: one light set per drawn dynamic object and frame. The
+    // lights' cull radii are this frame's, computed once; the best `budget` lights are kept by
+    // insertion, after any of equal influence: the order of the stable sort it replaced.)
+    const rgb = this.rgb3, cullR = this.lightCullRadii(n);
+    const topSlot = this.topSlot, topK = this.topK;
+    let kept = 0;
     for (let i = 0; i < n; i++) {
       const a = pointA[i], b = pointB[i];
-      const rgb = [b.x, b.y, b.z];
+      rgb[0] = b.x;
+      rgb[1] = b.y;
+      rgb[2] = b.z;
       const d2 = (a.x - c.x) ** 2 + (a.y - c.y) ** 2 + (a.z - c.z) ** 2;
       // The object is given the light while its bounds touch the light's sphere (0x4c8ea0).
-      const influence = pointLightInfluence(a.w, rgb, d2, pointLightCullRadius(a.w, rgb) + sp.radius);
-      if (influence > 0) rank.push({ slot: i, influence });
+      const influence = pointLightInfluence(a.w, rgb, d2, cullR[i] + sp.radius);
+      if (!(influence > 0) || budget === 0) continue;
+      let at = kept;
+      while (at > 0 && topK[at - 1] < influence) at--;
+      if (at >= budget) continue;
+      for (let j = Math.min(kept, budget - 1); j > at; j--) (topK[j] = topK[j - 1]), (topSlot[j] = topSlot[j - 1]);
+      topK[at] = influence;
+      topSlot[at] = i;
+      if (kept < budget) kept++;
     }
-    rank.sort((x, y) => y.influence - x.influence);
-    const pick = (k: number) => (k < budget && k < rank.length ? rank[k].slot : -1);
+    const pick = (k: number) => (k < kept ? topSlot[k] : -1);
     set.points.set(pick(0), pick(1), pick(2), pick(3));
     set.point5 = pick(4);
     return set;
+  }
+  private readonly rgb3 = [0, 0, 0];
+  private readonly topSlot = new Int32Array(8);
+  private readonly topK = new Float64Array(8);
+  private readonly cullRadii = new Float64Array(64);
+  private cullRadiiVersion = -1;
+  /** Uploads of the point lights (update): the cull radii below are recomputed after each. */
+  private pointsVersion = 0;
+  /** pointLightCullRadius of each uploaded point light, once per upload. */
+  private lightCullRadii(n: number): Float64Array {
+    if (this.cullRadiiVersion !== this.pointsVersion) {
+      this.cullRadiiVersion = this.pointsVersion;
+      const rgb = this.rgb3;
+      for (let i = 0; i < n && i < this.cullRadii.length; i++) {
+        const b = pointB[i];
+        rgb[0] = b.x;
+        rgb[1] = b.y;
+        rgb[2] = b.z;
+        this.cullRadii[i] = pointLightCullRadius(pointA[i].w, rgb);
+      }
+    }
+    return this.cullRadii;
   }
 
   /**
@@ -1129,6 +1163,7 @@ class EngineLightRig {
       if (pass) u.bakedPoints.value = this.stats.bakedPoints = slot;
     }
     u.points.value = n;
+    this.pointsVersion++;
     this.stats.points = n;
     this.stats.candidates = cand.length;
     this.stats.fx = fx;

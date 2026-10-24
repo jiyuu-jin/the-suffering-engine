@@ -16,7 +16,7 @@
 // newGame(), saveManual(), list()/get()/delete() and canSave().
 
 import { SaveRegistry } from './registry';
-import { MemoryStore, type SaveStore } from './store';
+import { MemoryStore, storeChannel, type SaveStore } from './store';
 import { levelKey, levelStem, SAVE_VERSION, type ProviderStates, type SaveData, type SaveKind, type SaveSummary } from './types';
 
 export const AUTOSAVE_ID = 'autosave';
@@ -71,6 +71,9 @@ export class SaveManager {
   /** Called after the store changed (menus refresh their lists). */
   onChange?: () => void;
 
+  /** Other tabs of the game (store.ts storeChannel): their writes refresh this tab's lists. */
+  private channel = storeChannel(() => this.onChange?.());
+  private askedPersistence = false;
   private bound: BoundLevel | null = null;
   private pending: { reason: string; frames: number } | null = null;
   private transitioning = false;
@@ -182,6 +185,9 @@ export class SaveManager {
         levels: Object.fromEntries(Object.entries(d.levels).map(([k, v]) => [levelKey(k), structuredCloneJson(v)])),
       };
       const info = { reason: 'load' as const, levelPath: b.path, version: d.version };
+      // Game-scope state the save has no entry for starts as in a new game (it would otherwise
+      // be whatever the session played before: weapons and insanity outlive a level).
+      b.registry.reset('game', d.game);
       b.registry.apply(d.game, 'game', info);
       b.registry.apply(this.session.levels[key], 'level', info);
       // Death / Revert go back to what was loaded.
@@ -248,7 +254,7 @@ export class SaveManager {
     const thumb = await this.thumbnail();
     data.thumbnail = thumb;
     if (this.persist && mode !== 0) {
-      await this.store.put({ ...data, id: AUTOSAVE_ID, kind: 'auto' });
+      if (await this.store.put({ ...data, id: AUTOSAVE_ID, kind: 'auto' })) this.channel.notify();
       this.onChange?.();
     }
   }
@@ -291,12 +297,63 @@ export class SaveManager {
 
   /** Save Game: a new slot, or overwrite `id`. Resolves the stored save, or null on failure. */
   async saveManual(id?: string): Promise<SaveData | null> {
-    const data = this.capture('manual', id ?? `save-${Date.now().toString(36)}-${(this.seq++).toString(36)}`);
+    // (The random part: two tabs saving in the same millisecond get different ids.)
+    const data = this.capture('manual', id ?? `save-${Date.now().toString(36)}-${(this.seq++).toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`);
     if (!data) return null;
     data.thumbnail = await this.thumbnail();
     const ok = await this.store.put(data);
+    if (ok) {
+      this.channel.notify();
+      this.requestPersistence();
+    }
     this.onChange?.();
     return ok ? data : null;
+  }
+
+  /** Why the store's last write failed ('quota': the browser's storage for the site is full). */
+  get lastError(): string | undefined {
+    return this.store.lastError;
+  }
+
+  /**
+   * Ask the browser to keep the site's storage under storage pressure (navigator.storage.persist),
+   * once, after the player's first manual save: an evicted database loses every save.
+   */
+  private requestPersistence(): void {
+    if (this.askedPersistence || this.store.kind !== 'indexeddb') return;
+    this.askedPersistence = true;
+    try {
+      void navigator.storage?.persisted?.().then((p) => (p ? true : navigator.storage.persist?.())).catch(() => undefined);
+    } catch {
+      /* not offered */
+    }
+  }
+
+  /** Every usable save, in full (export). */
+  async exportAll(): Promise<SaveData[]> {
+    const out: SaveData[] = [];
+    for (const s of await this.list()) {
+      if (s.damaged) continue;
+      const d = await this.get(s.id);
+      if (d) out.push(d);
+    }
+    return out;
+  }
+
+  /**
+   * Store imported saves (transfer.ts planImport: same content skipped, taken ids renamed).
+   * Resolves the counts.
+   */
+  async importSaves(list: readonly SaveData[]): Promise<{ added: number; skipped: number; failed: number }> {
+    const { planImport } = await import('./transfer');
+    const existing = new Map<string, SaveData | null>();
+    for (const s of await this.list()) existing.set(s.id, s.damaged ? null : await this.get(s.id));
+    const plan = planImport(list, existing);
+    let added = 0, failed = 0;
+    for (const s of plan.put) (await this.store.put(s).catch(() => false)) ? added++ : failed++;
+    if (added) this.channel.notify();
+    this.onChange?.();
+    return { added, skipped: plan.skipped, failed };
   }
 
   list(): Promise<SaveSummary[]> {
@@ -309,6 +366,7 @@ export class SaveManager {
 
   async delete(id: string): Promise<boolean> {
     const ok = await this.store.delete(id).catch(() => false);
+    if (ok) this.channel.notify();
     this.onChange?.();
     return ok;
   }

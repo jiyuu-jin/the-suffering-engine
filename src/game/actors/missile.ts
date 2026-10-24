@@ -47,14 +47,14 @@ export interface MissileFlight {
 /** A body the missile can touch: its hit spheres (output space). */
 export interface MissileBody<T> {
   body: T;
-  spheres: readonly { c: readonly number[]; r: number }[];
+  spheres: readonly { c: readonly number[]; r: number; bone?: number }[];
 }
 
 export interface WorldSweep {
   frontSegmentCast(ax: number, ay: number, az: number, bx: number, by: number, bz: number, radius?: number): { point: [number, number, number] | number[]; normal: [number, number, number] | number[] } | null;
 }
 
-export type MissileContact<T> = { kind: 'world'; point: Vec3; normal: Vec3 } | { kind: 'body'; body: T; point: Vec3 } | { kind: 'expired'; point: Vec3 };
+export type MissileContact<T> = { kind: 'world'; point: Vec3; normal: Vec3 } | { kind: 'body'; body: T; point: Vec3; bone?: number } | { kind: 'expired'; point: Vec3 };
 
 /**
  * First parameter t in [0, 1] at which the segment a -> a + d comes within `r` of centre c
@@ -96,7 +96,8 @@ export function missileStep<T>(m: MissileFlight, dt: number, world: WorldSweep |
       const t = segmentSphere(m.p, d, s.c, s.r + m.radius);
       if (t !== undefined && t < best) {
         best = t;
-        hit = { kind: 'body', body: b.body, point: { x: m.p.x + d.x * t, y: m.p.y + d.y * t, z: m.p.z + d.z * t } };
+        // The sphere touched first is the struck one (its bone goes with the blow: Part Caps) [port].
+        hit = { kind: 'body', body: b.body, point: { x: m.p.x + d.x * t, y: m.p.y + d.y * t, z: m.p.z + d.z * t }, bone: s.bone };
       }
     }
   }
