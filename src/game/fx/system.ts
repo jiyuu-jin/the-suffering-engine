@@ -88,7 +88,14 @@ import { FALL_DAMAGE_TYPE, fallDamage } from '../../app/player-rules';
 import type { PackageSet } from '../../formats/model';
 import { hardpointBone } from '../weapons/hardpoints';
 import { Attachments } from './attachments';
-import { BodyParts, type BodyPartCarrier } from './body-parts';
+import { BodyParts, type BodyPartCarrier, type FaderSave } from './body-parts';
+import { registerSave } from '../save/providers';
+
+/** Saved state of the Characters' fades and body parts (fx.bodyParts provider). */
+interface BodyPartsSave {
+  faders?: FaderSave[];
+  parts?: { uid: number; bones: number[] }[];
+}
 import { SpawnedBillboards } from './billboards';
 import { DESTROY_REBIRTH_FX, Rebirth } from './rebirth';
 import { LEGACY_LIGHTING, engineColor } from '../../app/engine-light';
@@ -302,6 +309,26 @@ export async function createFxSystem(ctx: GameContext): Promise<GameSystem> {
     const c = bodyCarrier(w.uid, w.cls, w.e.values);
     return !!c && bodyParts.message(c, msg);
   });
+  // Saved games: the carriers' faders and body-part bones (both are Character components the
+  // original saves: +0x562, +0x31c). After the actors (priority 10): the bones must resolve.
+  const offBodySave = registerSave(
+    ctx.services,
+    'fx.bodyParts',
+    {
+      save: (): BodyPartsSave => ({
+        faders: bodyParts.save(),
+        parts: [...bodyCarriers()].map((c) => ({ uid: c.uid, bones: attachments.partBones(c.uid) })).filter((p) => p.bones.length),
+      }),
+      load: (d: BodyPartsSave | undefined) => {
+        bodyParts.load(d?.faders);
+        for (const c of bodyCarriers()) {
+          attachments.remove(c.uid);
+          for (const b of d?.parts?.find((p) => p.uid === c.uid)?.bones ?? []) attachments.spawnParts(c.uid, c.values, b);
+        }
+      },
+    },
+    { scope: 'level', priority: 12 },
+  );
   const bodyCarriers = function* (): Generator<BodyPartCarrier> {
     for (const a of actors()?.list() ?? []) {
       const e = a.entity;
@@ -696,6 +723,7 @@ export async function createFxSystem(ctx: GameContext): Promise<GameSystem> {
       }
       offRebirth();
       offAttachedLights();
+      offBodySave();
       attachments.dispose();
       bodyParts.dispose();
       rebirth.dispose();

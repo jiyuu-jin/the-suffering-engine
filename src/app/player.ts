@@ -137,6 +137,18 @@ export class PlayerController {
    */
   bodyYawLock: number | null = null;
   /**
+   * Root motion for the next update (world metres): the feet move by it through the motor, with
+   * that step's own move, so walls stop it and the ground probe follows (the original adds a
+   * clip's extracted root to the same pending move as the gait: weapons/melee-lunge.ts). Spent
+   * (zeroed) by every update.
+   */
+  readonly rootMove = { x: 0, z: 0 };
+  /**
+   * While true the movement input is ignored and the feet move only by `rootMove` and the fall
+   * (Player states that end Move and keep it from starting: the third-person strike, state 4).
+   */
+  holdMove = false;
+  /**
    * Extra eye offset in the body's frame (x right, y up, z back), added by eyePosition(): use
    * animations move the first-person eye to the original's rigid eye (Player p106..p108).
    */
@@ -244,6 +256,7 @@ export class PlayerController {
     this.motor.teleport(feet.x, feet.y, feet.z);
     this.fallTracker.reset();
     this.fpJump = false;
+    this.rootMove.x = this.rootMove.z = 0;
     this.yaw = this.bodyYaw = yaw;
     this.pitch = pitch;
     this.stepSmooth = 0;
@@ -382,6 +395,9 @@ export class PlayerController {
       crouch = !!this.virtual.crouch;
     }
     if (!this.canRun) run = false;
+    if (this.holdMove) fwd = strafe = 0;
+    const rmx = this.rootMove.x, rmz = this.rootMove.z;
+    this.rootMove.x = this.rootMove.z = 0;
     if (this.motionOverride) {
       const keep = this.motionOverride(dt, { forward: fwd, strafe, jump: this.jumpQueued, crouch });
       this.jumpQueued = false;
@@ -420,7 +436,7 @@ export class PlayerController {
     let jumped = false;
     for (let i = 0; i < steps; i++) {
       const vy0 = this.motor.velocity.y;
-      this.motor.step(h, { wishX: wx, wishZ: wz, run, crouch, jump: this.jumpQueued });
+      this.motor.step(h, { wishX: wx, wishZ: wz, run, crouch, jump: this.jumpQueued, moveX: rmx / steps, moveZ: rmz / steps });
       if (this.jumpQueued && this.motor.velocity.y > vy0 + 1) (jumped = true), (this.fpJump = this.mode === 'fp');
       this.jumpQueued = false;
       // Hide step pops: offset the camera by the snap and decay it.

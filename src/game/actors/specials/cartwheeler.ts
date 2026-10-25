@@ -76,6 +76,8 @@ const DROP_RANGE = 7;
 /** Ceiling probe: rays up from this far under the origin, this long. */
 const PROBE_UNDER = 1.0;
 const PROBE_LEN = 1.8;
+/** Port: blocked this close (m) to a transition edge's crossing point, the crawler lets go there. */
+const LET_GO_SHORT = 2;
 /** Port: a ceiling step the crawler takes (m); more is a wall. */
 const CEIL_STEP = 0.6;
 /** Port: the player's body radius (m) for reach tests. */
@@ -965,47 +967,67 @@ export class CartWheeler implements SpecialMove {
     return true;
   }
 
+  /**
+   * The crawler path from the ceiling node under the body to the node nearest `tp` (nav.ts,
+   * transition edges at their horizontal length): its ceiling stretch up to its first way down
+   * (`route`, `routeDown`), or none. Replanned every 0.6..0.9 s.
+   */
+  private planCeilingRoute(env: ActorEnv, tp: THREE.Vector3Like) {
+    const a = this.a, nav = env.nav;
+    if (this.routeTimer > 0) return;
+    this.routeTimer = 0.6 + Math.random() * 0.3;
+    this.route = [];
+    this.routeDown = -1;
+    if (!nav?.hasCeiling) return;
+    const from = nav.nearest(a.position.x, a.position.y, a.position.z, env.world, 6, 0, 'ceiling');
+    const to = nav.nearest(tp.x, tp.y, tp.z, env.world);
+    const blocked = env.navBlocked ? (i: number, j: number) => env.navBlocked!(i, j, a) : undefined;
+    const path = from >= 0 && to >= 0 && flat(nav.nodes[from], a.position) < 12 ? nav.path(from, to, blocked, { crawler: true }) : null;
+    if (!path) return;
+    const r = ceilingStretch(path, (i, j) => nav.edgeType(i, j));
+    if (!r) return;
+    this.route = r.route;
+    this.routeDown = r.down;
+    // Already on the leg to the second node: do not crawl back to the first.
+    if (this.route.length > 1) {
+      const n0 = nav.nodes[this.route[0]], n1 = nav.nodes[this.route[1]];
+      if (flat(n1, a.position) < flat(n1, n0)) this.route.shift();
+    }
+  }
+
+  /**
+   * FollowPath on the ceiling (0x1010ed20 / 0x10110db0) [verified]: each leg goes to its node, a
+   * transition edge's leg to the edge's crossing point; there the CeilingFloorTransition
+   * (direction down on a ceiling) runs, and FollowPath goes on with the next edge once it ends.
+   * False when there is no planned route.
+   */
+  private followCeilingRoute(dt: number, env: ActorEnv, why: string, fast = true): boolean {
+    const a = this.a, nav = env.nav;
+    if (!nav || !this.route.length) return false;
+    // Drop reached nodes; the last ceiling node leads to the transition point.
+    while (this.route.length > 1 && flat(nav.nodes[this.route[0]], a.position) < Math.max(0.6, Math.min(nav.nodes[this.route[0]].radius, 1.2))) this.route.shift();
+    const last = this.route.length === 1;
+    const goal = last ? nav.transitionPoint(this.route[0], this.routeDown) : nav.nodes[this.route[0]];
+    const d = Math.hypot(goal.x - a.position.x, goal.z - a.position.z);
+    if (last && d < 0.5) {
+      this.route = [];
+      this.startDown(env, why);
+      return true;
+    }
+    // Port: the ceiling probe finds nothing over a hole in the roof (3b's 2c24 hangs in one,
+    // 0.7 m from its crossing point): blocked short of the crossing, it lets go where it is.
+    if (!this.crawl(dt, env, goal.x - a.position.x, goal.z - a.position.z, fast) && last && d < LET_GO_SHORT) {
+      this.route = [];
+      this.startDown(env, `${why} (${d.toFixed(1)} m short of the crossing)`);
+    }
+    return true;
+  }
+
   /** Crawl over the ceiling: along the ceiling nodes to the transition down, else toward the target. */
   private crawlToward(dt: number, env: ActorEnv, tp: THREE.Vector3Like) {
-    const a = this.a, nav = env.nav;
-    if (this.routeTimer <= 0) {
-      this.routeTimer = 0.6 + Math.random() * 0.3;
-      this.route = [];
-      this.routeDown = -1;
-      if (nav?.hasCeiling) {
-        const from = nav.nearest(a.position.x, a.position.y, a.position.z, env.world, 6, 0, 'ceiling');
-        const to = nav.nearest(tp.x, tp.y, tp.z, env.world);
-        const blocked = env.navBlocked ? (i: number, j: number) => env.navBlocked!(i, j, a) : undefined;
-        const path = from >= 0 && to >= 0 && flat(nav.nodes[from], a.position) < 12 ? nav.path(from, to, blocked, { crawler: true }) : null;
-        if (path) {
-          // The ceiling stretch, up to its first way down.
-          let k = 0;
-          while (k + 1 < path.length && nav.edgeType(path[k], path[k + 1]) === EDGE.ceiling) k++;
-          if (k + 1 < path.length && nav.edgeType(path[k], path[k + 1]) === EDGE.down) {
-            this.route = path.slice(0, k + 1);
-            this.routeDown = path[k + 1];
-            // Already on the leg to the second node: do not crawl back to the first.
-            if (this.route.length > 1) {
-              const n0 = nav.nodes[this.route[0]], n1 = nav.nodes[this.route[1]];
-              if (flat(n1, a.position) < flat(n1, n0)) this.route.shift();
-            }
-          }
-        }
-      }
-    }
-    if (nav && this.route.length) {
-      // Drop reached nodes; the last ceiling node leads to the transition point.
-      while (this.route.length > 1 && flat(nav.nodes[this.route[0]], a.position) < Math.max(0.6, Math.min(nav.nodes[this.route[0]].radius, 1.2))) this.route.shift();
-      const last = this.route.length === 1;
-      const goal = last ? nav.transitionPoint(this.route[0], this.routeDown) : nav.nodes[this.route[0]];
-      if (last && Math.hypot(goal.x - a.position.x, goal.z - a.position.z) < 0.5) {
-        this.route = [];
-        this.startDown(env, 'path leads down');
-        return;
-      }
-      this.crawl(dt, env, goal.x - a.position.x, goal.z - a.position.z, true);
-      return;
-    }
+    const a = this.a;
+    this.planCeilingRoute(env, tp);
+    if (this.followCeilingRoute(dt, env, 'path leads down')) return;
     // No ceiling route: close in over the target and let go within reach (port).
     const d = flat(a.position, tp);
     if (d < DROP_RANGE && a.targetInSight) {
@@ -1061,7 +1083,25 @@ export class CartWheeler implements SpecialMove {
     const uid = this.wp || b.first;
     const wp = env.entity(uid);
     if (!wp || wp.className !== 'Waypoint') return this.keep();
-    const x = wp.position[0] / 2048, z = wp.position[2] / 2048;
+    const x = wp.position[0] / 2048, y = wp.position[1] / 2048, z = wp.position[2] / 2048;
+    const run = num(wp.values[1], 0) === 1;
+    // A Waypoint on the floor below (1b's 6501: woken in the shaft over the ledges, Waypoint
+    // 89eb on the floor 7.6 m under it): the WaypointBehavior's MoveTo is a FollowPath over the
+    // crawler's graph, down its transition edge (89e9 -> 8321) and on along the floor [verified:
+    // FollowPath 0x1010ed20 / 0x10110db0; the start node: inferred]. The floor AI walks the rest
+    // of the Waypoint chain after the landing. Before, the body crawled straight at the
+    // Waypoint along a ceiling that is not there (the shaft) and hung in it for good.
+    if (waypointBelow(a.position.y, y)) {
+      this.planCeilingRoute(env, { x, y, z });
+      if (this.followCeilingRoute(dt, env, 'path to the waypoint leads down', run)) {
+        a.state = 'move';
+        return this.keep();
+      }
+      // No crawler path (port): straight on, letting go where the ceiling ends.
+      a.state = 'move';
+      if (!this.crawl(dt, env, x - a.position.x, z - a.position.z, run)) this.startDown(env, 'waypoint below, blocked on the ceiling');
+      return this.keep();
+    }
     if (Math.hypot(x - a.position.x, z - a.position.z) < 0.6) {
       const msg = num(wp.values[0], 0);
       const next = wp.links.find((u) => env.entity(u)?.className === 'Waypoint');
@@ -1075,7 +1115,7 @@ export class CartWheeler implements SpecialMove {
       return this.keep();
     }
     a.state = 'move';
-    this.crawl(dt, env, x - a.position.x, z - a.position.z, num(wp.values[1], 0) === 1);
+    this.crawl(dt, env, x - a.position.x, z - a.position.z, run);
     return this.keep();
   }
 
@@ -1181,6 +1221,31 @@ function transitionOf(v: readonly unknown[]) {
   const r = (x: unknown) => (x && typeof x === 'object' ? { pkg: (x as ClipRef).pkg, id: (x as ClipRef).id } : undefined);
   const n = (x: unknown, d: number) => (typeof x === 'number' && Number.isFinite(x) ? x : d);
   return { letGo: r(v[2]), fall: r(v[3]), land: r(v[4]), launch: r(v[5]), rise: r(v[6]), grab: r(v[7]), upSpeed: n(v[8], 15), gravity: n(v[9], 1), downSpeed: n(v[10], 0), hold: n(v[11], 0) };
+}
+
+/**
+ * The ceiling stretch of a crawler path up to its first way down (FollowPath walks it edge by
+ * edge and inserts the CeilingFloorTransition at the first type 3 edge, 0x10110db0 [verified]):
+ * the ceiling nodes to crawl (`route`) and the floor node past the transition (`down`); null when
+ * the path does not go down after its ceiling edges.
+ */
+export function ceilingStretch(path: readonly number[], edgeType: (a: number, b: number) => number): { route: number[]; down: number } | null {
+  let k = 0;
+  while (k + 1 < path.length && edgeType(path[k], path[k + 1]) === EDGE.ceiling) k++;
+  if (k + 1 >= path.length || edgeType(path[k], path[k + 1]) !== EDGE.down) return null;
+  return { route: path.slice(0, k + 1), down: path[k + 1] };
+}
+
+/** Port: a Waypoint this far (m) under a ceiling walker's origin is on the floor below it. */
+export const WAYPOINT_BELOW = 1.5;
+/**
+ * Is a ceiling walker's Waypoint on the floor below rather than on its ceiling? [inferred; data:
+ * the retail ceiling starters' Waypoints sit 0..0.8 m under their origin when they hang on the
+ * ceiling (1a 841c, 1b 8389.., 2 101c / 1021 / 31d1, 3b 2b81 / 2e6f) and 2.1..11.6 m under it
+ * when they are on the floor (1b 89eb, 3b 2c0b, 2c29 ..)].
+ */
+export function waypointBelow(originY: number, waypointY: number): boolean {
+  return originY - waypointY > WAYPOINT_BELOW;
 }
 
 export { COND, wrapAngle };

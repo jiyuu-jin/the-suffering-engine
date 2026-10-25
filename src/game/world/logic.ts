@@ -234,6 +234,22 @@ const ref = (v: unknown): ResRef | null => (v && typeof v === 'object' && !Array
 const refs = (v: unknown): ResRef[] => (Array.isArray(v) ? (v.filter((x) => x && typeof x === 'object') as ResRef[]) : []);
 const str = (v: unknown) => (typeof v === 'string' ? v : '');
 
+/**
+ * Whether a sequence taking this object over shows it (docs/game-logic.md §7 "Control keys").
+ * The control key sends the object 0x1001 (SUFFERING.EXE 0x450da0); a Character's catch-all
+ * (0x100e1e20) offers it to the behaviour stack, which does not take a first 0x1001 (the
+ * sequence behaviour on top takes a second one: 0x100e9dc0), then to the Character message
+ * handler (vt +0x118, 0x100e3ab0; Burrower, Fester, Inferna, Killjoy and Rat override it and pass
+ * 0x1001 on to it), whose 0x1001 case pushes the sequence behaviour and ends in SetVisible(1)
+ * (0x100e19e0 -> vt +0x128) [verified]. The hand-back (0x1002) hides nothing.
+ * So a hidden character (instance flag 0x1 clear) appears when a scene takes it: 1b's Hermes
+ * 7eb4 rising from the valves in "Camera" #247, Killjoy there and in 1c / 5b, 2's Hargrave.
+ * The Player has his own handler (the presenter's puppet) and other classes are no Characters.
+ */
+export function stompTakeShows(w: { cls: string; destroyed?: boolean; e: { family?: string } }): boolean {
+  return w.e.family === 'Character' && w.cls !== 'Player' && !w.destroyed;
+}
+
 /** Item-family classes that can be picked up. */
 export const PICKUP_CLASSES = new Set(['Ammo Box', 'Health Bonus Item', 'Item', 'Key', 'Map Pack', 'Flashlight', 'Family Picture', 'Map Item', 'Quest Item Pickup']);
 
@@ -851,7 +867,17 @@ export class World {
       const w = this.ents.get(uid);
       if (w && w.cls !== 'Player' && w.cls !== 'Camera') this.destroy(w);
     },
+    control: (uid, release) => {
+      const w = this.ents.get(uid);
+      if (!w) return;
+      if (release) return void this.stompHeld.delete(uid);
+      if (this.stompHeld.has(uid)) return;
+      this.stompHeld.add(uid);
+      if (stompTakeShows(w)) this.setVisible(uid, true);
+    },
   };
+  /** Characters a sequence holds (taken, not handed back): a second take is not a new one. */
+  private readonly stompHeld = new Set<number>();
 
   private playStomp(w: WorldEntity) {
     if (this.stomps.has(w.uid)) return;

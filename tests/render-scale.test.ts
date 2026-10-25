@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DynamicResolution, FramePacer, PIXEL_BUDGET, RENDER_SCALES, RenderScaler, SCALE_MIN, budgetScale, floorScale, parseScale } from '../src/app/render-scale';
+import { DynamicResolution, FramePacer, PACE_LATE_SHARE, PIXEL_BUDGET, RENDER_SCALES, RenderScaler, SCALE_MIN, budgetScale, floorScale, parseScale } from '../src/app/render-scale';
 import { rcasPixel, sharpenFor } from '../src/app/enhanced/sharpen';
 import { GRAPHICS_DEFAULTS } from '../src/app/menu/graphics';
 import { RESOLUTION_SCALES } from '../src/app/menu/gui-adapter';
@@ -127,6 +127,32 @@ test('frame pacing: a 120 Hz display that misses frames is paced to 60, a 60 Hz 
   for (let i = 0; i < 300; i++) ((t += 16.67), q.sample(16.67, i % 2 === 0, 33.3, 20, t));
   assert.equal(q.hz, 60);
   assert.equal(q.cap, 0);
+});
+
+test('frame pacing: occasional in-flight skips at 120 Hz (an uneven 108 fps) are paced to 60; rare hitches are not', () => {
+  // Every 10th display frame skipped by the frames-in-flight limit: 1 drawn frame in 9 comes
+  // 16.7 ms after the previous one (11 %). Under the old 20 % threshold this judder never paced.
+  const run = (skipEvery: number, seconds: number) => {
+    const p = new FramePacer();
+    let t = 0, last = 0;
+    for (let i = 0; i < seconds * 120; i++) {
+      t += 1000 / 120;
+      const drawn = i % skipEvery !== skipEvery - 1;
+      // Paced: only every other display frame is drawn.
+      const gate = p.cap > 0 && t - last < 1000 / p.cap - 2;
+      if (drawn && !gate) {
+        p.sample(1000 / 120, true, t - last, 6, t);
+        last = t;
+      } else p.sample(1000 / 120, false, 0, 0, t);
+    }
+    return p;
+  };
+  const uneven = run(10, 4);
+  assert.equal(uneven.hz, 120);
+  assert.equal(uneven.cap, 60);
+  assert.ok(PACE_LATE_SHARE < 1 / 9);
+  // Two hitches a second (GC, a resize): 120 Hz stays.
+  assert.equal(run(60, 4).cap, 0);
 });
 
 test('render scaler: Auto starts at the budget cap; a fixed setting is exact; ratios applied', () => {

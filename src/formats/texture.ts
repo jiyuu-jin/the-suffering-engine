@@ -272,6 +272,20 @@ export function bleedTransparentTexels(rgba: Uint8Array, width: number, height: 
 }
 
 /**
+ * A punch-through texture as a pass that does not cut it samples it: alpha-0 texels black. The
+ * engine creates every alpha-mode-1 texture as D3DFMT_DXT1 (SUFFERING.EXE 0x4485d0: compressed,
+ * no alpha bits 17..19 -> 'DXT1'), whose transparent texels decode to RGBA 0. Only a cut-out
+ * pass (mode 8) keeps the bled colours of decodeTexture, so its edges filter without dark
+ * fringes [port]; an opaque pass (mode 0: no alpha test, no blend) shows those texels black, as
+ * the original does (docs/re/renderer.md "Alpha test, blend and coverage"). Returns a copy.
+ */
+export function punchThroughBlack(rgba: Uint8Array): Uint8Array {
+  const out = rgba.slice();
+  for (let i = 0; i < out.length; i += 4) if (out[i + 3] === 0) out[i] = out[i + 1] = out[i + 2] = 0;
+  return out;
+}
+
+/**
  * Mip chain (level 0 included) whose alpha keeps the fraction of texels at or above
  * `threshold` equal to the top level's (Castaño, "Computing alpha mipmaps"). RGB is
  * alpha-weighted so transparent texels do not darken the visible ones.
@@ -383,6 +397,7 @@ export function decodeTexture(file: SrscFile, entry: SrscEntry, opts: DecodeOpti
     height,
     rgba,
     hasAlpha: h.alphaMode !== 0 && anyAlpha(rgba),
+    ...(h.format === TextureFormat.DXT1 && h.alphaMode === 1 ? { punchThrough: true } : {}),
   };
 }
 

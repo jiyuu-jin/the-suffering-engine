@@ -456,7 +456,21 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
     reputation: model?.s.reputation ?? 0,
     playerTeam: PLAYER_TEAM,
     spheres: (a: unknown) => (actors() as { hitSpheres?(x: unknown): { c: [number, number, number]; r: number }[] } | undefined)?.hitSpheres?.(a) ?? [],
+    priority: (a: unknown) => templatePriority((a as { kind?: { template?: ResRef } }).kind?.template),
   });
+  // Auto-target priority: the character template's p128 (the melee auto-face pick, melee-face.ts).
+  const priorities = new Map<string, number>();
+  const templatePriority = (r: ResRef | undefined): number => {
+    if (!r) return 10;
+    const k = keyOf(r);
+    let v = priorities.get(k);
+    if (v === undefined) {
+      const n = pkgs ? templateValues(pkgs, r)?.values[128] : undefined;
+      v = typeof n === 'number' && Number.isFinite(n) ? n : 10;
+      priorities.set(k, v);
+    }
+    return v;
+  };
   const unsubFrame = view.player.onUpdate((f) => {
     if (!body || !model || model.form === 'human') return;
     const hits = body.update(f, view.player, meleeWorld(), model.form === 'creature');

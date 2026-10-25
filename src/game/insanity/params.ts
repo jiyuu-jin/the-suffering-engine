@@ -78,6 +78,10 @@ export interface FormParams {
   locomotion?: Locomotion;
   /** Attack templates: combo (weapon props p86), alternate (p89), jump (p90). */
   attacks?: { combo: AttackParams[]; alt: AttackParams[]; jump: AttackParams[] };
+  /** p143's Player Weapon Properties p10: the melee auto-face pick's range (m; weapons/melee-face.ts). */
+  meleeRange?: number;
+  /** p143's Player Weapon Properties p85: the strike's forward root-motion scale with no target (weapons/melee-lunge.ts). */
+  lungeScale?: number;
   /**
    * Damage range of the form's melee hits: the p231 Melee Weapons' p68 / p69 (the creature's
    * invisible arm weapons 4:155 / 4:832, armed by the Attack clips' Arm markers). Falls back
@@ -245,6 +249,8 @@ export function readForm(pkgs: EntityPackageSet, template: ResRef): FormParams |
     flash: ref(v[267]) ?? undefined,
     locomotion: readLocomotion(pkgs, ref(v[143])),
     attacks: readAttacks(pkgs, ref(v[143])),
+    meleeRange: num(templateValues(pkgs, ref(v[143]))?.values[10], 0),
+    lungeScale: num(templateValues(pkgs, ref(v[143]))?.values[85], 1),
     hitDamage: formWeaponDamage(pkgs, v[231])?.range ?? pair(54, 55, 1, 8),
     hitDamageType: formWeaponDamage(pkgs, v[231])?.type,
     armWeapons: refs(v[231]).flatMap((r, i) => {

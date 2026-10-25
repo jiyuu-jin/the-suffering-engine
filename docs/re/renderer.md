@@ -298,8 +298,8 @@ Port:
   placed objects the world builds itself (`world/dynamic.ts`, `LevelData.loadLighting`): the
   object's ambient, the directional base lights of its region and the 5 strongest point lights
   at its bounding sphere, in the groups that hold it; only static ones (switchable lights reach
-  it per frame) [port, §1.9]; for an object shown at start only the lights created before it,
-  for one hidden at start every static light on at load (§1.9); the sum is
+  it per frame) [port, §1.9]; every static light on at load, whether the object is shown at
+  start or not (its first draw comes after every light exists, §1.9); the sum is
   stored clamped, not halved, and the object is then drawn as precomputed (2 × colour +
   switchable lights per frame, no rim). See §1.9.
 - Spawned models (broken remains, debris, effect models) and the Instance Rendered Object
@@ -371,8 +371,12 @@ every surface at half brightness, which the port had hidden by squaring p8 (§1.
 Port: `engineStages` (`engine-light.ts`, render-data.ts `WORLD_STAGE_GAIN`) doubles and
 saturates each pass's gamma colour in `engineLitColor` (characters, held weapons, props),
 `shadePass` (every layer of a surface material, lit or tinted) and the floor splats. Particle
-sprites (`world/fx.ts`) are left as they were: whether their vertex colours are halved like the
-material tints was not traced [open].
+billboards are doubled too [strong]: their vertex colour is the particle's colour word unhalved
+(the billboard build 0x4ad888 copies particle +0x30 to the four vertices; the particle update
+0x4ac4e0..0x4ac5f3 rewrites only its alpha byte, or copies the lit colour of a p46 = 3 system),
+and the quad is drawn at once (0x496c60 sets the stage-0 texture, 0x4969f0 draws) from the
+particle system's render, inside the world loop. Port: the Particle Fountain pools
+(`world/fx.ts`, `particlePassColor`); game-logic.md §14.2.
 
 Measured on the 1a opening ("Goose", t 120.7 / 126.7 / 141.7 s, picture area between the bars),
 against the three PC captures (`cine.mjs` in the scratch tools: headless, 1280×720):
@@ -482,47 +486,61 @@ What the code does [verified, SUFFERING.EXE]:
 So such an object shows 2 × (ambient + the lights of its first draw, in its groups), clamped per
 channel, plus its switchable lights per frame.
 
-**What the data says, and the open question [inferred].** By that code, an object shown at
-start is first drawn with every light of the level present. The 1a cell doors disagree:
-- Door 0x587a is a Switch with no .ldu record (ref 0:0), like every start-visible pickup. It is
-  shown at start and lies under "cell 6", together with the lamps 0x7fe6 / 0x8016.
-- Rendering it with every light that is on at load (port, headless, the 126.7 s frame of
-  "Goose") gives bars of p95 255, 255, 197 and p50 136, 106, 73.
-- The PC capture shows p95 180, 143, 86 and p50 62, 45, 19, with warm, nearly black shadow sides
-  (p10 27, 18, 4) and no neutral ambient lift.
-- The lights created before it (none) give p95 99, 79, 48: half the capture in every channel,
-  which is the global point-light shortfall described below.
+**Objects shown at start see every light too [verified code; port rule since the user report
+of docs/playthrough.md row 69].** By that code an object is first drawn with every light of the
+level present, shown at start or not: nothing draws the world while the level loads (0x48c160
+only draws the loading screen, the WM_PAINT render 0x437c6f is off while a frame runs
+(0x5dc0d0), RedrawWindow 0x437f60 is called once when the window is created), and the lights
+register in their own init, at creation. The port nevertheless kept, from 12639a0 to this fix,
+only the lights stored before a start-visible object (its level index), because of one
+comparison with a PC capture of the 1a cell door 0x587a at 126.7 s of "Goose":
+- the capture: bars p95 180, 143, 86, p50 62, 45, 19, shadow sides p10 27, 18, 4;
+- every light, as the port baked it then (static and switchable, so the cell lamps counted
+  three times: twice in the colours, once per frame): p95 255, 255, 197;
+- the lights created before it (none): p95 99, 79, 48, half the capture in every channel.
 
-So in the original the doors' colours hold no lamp and no ambient.
+The comparison that lost was not the code's rule as the port now applies it: since 4d9e521 no
+switchable lamp goes into the colours, and "ambient and static lights in the colours, lamps per
+frame" was never compared with the capture. The capture's blue shadow floor (4) is no evidence
+against the ambient either: its darkest blues are crushed to 0..3 everywhere (§1.8). Applied to
+every start-visible object, the creation-order rule drew 100 of 1a's 121 Switches (every door and
+locker: the root Ambient Light is index 3206) and most pickups with black colours, lit only by
+their switchable lamps: pitch black in a dark room, and, where a level's ambient is stored in the
+middle, one door of a pair lit and its twin black (1b doors 0x653a / 0x81df, lockers 0x7b58 /
+0x8210). The 0x4c0480 pack was checked again: each channel clamped to 0..1 (constants 1.0 at
+0x58c988, 0.0 at 0x58c2ac) and multiplied by 255 (0x58f4b8), no halving.
 
-What the data does not explain:
-- No code path was found that lights an object before its first draw.
-  - No world render happens during loading. 0x48c160 only draws the loading screen. The
-    WM_PAINT render 0x437c6f is off while a frame runs (0x5dc0d0). RedrawWindow 0x437f60 is
-    called once, when the window is created.
-  - Draws during the opening frames are not it either: the cell doors are outside the camera
-    of "Goose" at 0.3, 3 and 8 s.
-- The lamps are on at start and first switched at 147.6 s (0x5c04).
-- The group rule does not exclude cell 6's own lamps or the root Ambient Light 0x7f89.
-- No model header flag separates the doors from the pickups.
+The port now gives every unbaked placed object (dynamic.ts, level.ts merged models, pickups
+dropped during play) the lights on at load in its groups [port: on at load stands for on at the
+first draw]. Measured (headless, 1280 × 720, flashlight off, luma of the object through a
+magenta mask, against a 10..50 px ring around it), before → after:
 
-The port keeps the creation-order result for objects shown at start (the lights stored before
-the object: none for the doors), and every light that is on at load for objects hidden at start,
-whose first draw comes after the logic shows them. Example: the 1a Shiv 0x5bfb, game-logic.md
-§11.5.
+| Object | Original | Enhanced Medium | ring (Original) |
+|---|---|---|---|
+| 1a lockers 0x6cc4 / 0x6cc6, closed | 0.0 → 25.1 | 4.2 → 22.4 | 21.9 |
+| 1a lockers, open (inside faces) | 0.1 → 27.5 | 4.2 → 24.5 | 20.3 |
+| 1a door 0x734b (dark corridor) | 0.0 → 28.2 | 6.8 → 23.7 | 9.2 |
+| 1a door 0x5616 | 0.0 → 21.0 | 5.4 → 18.3 | 10.0 |
+| 1a cell door 0x587a (lamps), mean / p95 | 32.3 / 112 → 55.8 / 149 | 25.6 → 44.8 | 20.7 |
+| 1b door 0x653a (its twin 0x81df: 9.5) | 0.0 → 9.6 | 3.2 → 8.8 | 6.8 |
+| 3a door 0x16a5 | 0.0 → 36.1 | 8.0 → 29.9 | 10.2 |
+| 3a door 0x3328 (had the ambient by order) | 36.6 → 36.6 | 36.0 → 36.0 | 35.7 |
 
-In both cases the port bakes only lights without flag 2 [port, inferred]. The code would bake a
+Unbaked objects in an ambient-only room now show 2 × the ambient against the halved bake's 1 ×
+around them (§1.6), which is the code's arithmetic. Level geometry, characters and .ldu props
+are unchanged (the 1a cell-row view differs only on the unbaked objects; a repeat with the same
+code changes 0.0 %).
+
+The port bakes only lights without flag 2 [port, inferred]. The code would bake a
 switchable lamp that is on at the first draw, but no capture shows one in such colours. Baked
 lamps also stay lit after the lamp is switched off. This was a bug at 18233af: the fallen cell
 door 0x848d, hidden until the guard scene, got the cell lamps in its colours and stayed bright
 across the room after the scripted lights-out (headless, 1a cell-row walk-out with the 14
 Timer-0x861a housings switched off: grate p95 35, 30, 23 at HEAD, 17, 17, 17 now). The
 switchable lights still light these objects per frame. The Shiv keeps the ambient in its colours
-and gets its cell lamp per frame. On screen it measures about 0.75 of its 18233af brightness,
-not the near-black of the creation-order rule. Placed models merged into the level geometry (`level.ts`) and dynamic objects
-(`world/dynamic.ts loadPassBefore`) both apply the group rule (`static-light.ts sectorGroups`).
-The pass of a start-visible pickup therefore stays as dark as the doors. That is what the doors'
-evidence implies for objects of the same kind, though no pickup was compared with a capture.
+and gets its cell lamp per frame. On screen it measures about 0.75 of its 18233af brightness.
+Placed models merged into the level geometry (`level.ts`) and dynamic objects
+(`world/dynamic.ts loadTimeSet`) both apply the group rule (`static-light.ts sectorGroups`).
 Floor layers (0x4c1900, their own gather 0x4a3780) keep every light, with no group test
 [inferred].
 
@@ -673,7 +691,9 @@ Port: `weapons/data.ts holdsFlashlight` (a Flashlight-class item in the inventor
 `flashlightLampOn` (off without one, on when just received, else the player's choice); the
 weapons system applies them every frame and sets `LevelRenderer.flashlightAvailable`, which
 `toggleFlashlight` checks. The developer viewer, without the weapons system, keeps the free
-lamp.
+lamp. The port's lamp hangs on the view camera; while another camera shows the player (a security
+monitor's feed) the renderer holds it at his eye, aimed along his view (`held-lamp.ts`), since the
+original's lamp is attached to him, not to the view (game-logic.md §14.5).
 
 ## 3. Screen effects
 
@@ -1184,6 +1204,46 @@ views before (HEAD) and after):
 - **Seen from the gas chamber's north side** (422.4, 88.66, 447), Hermes stays hidden in both
   versions. Correct: that face of the tank is the solid, outward-facing panel 9:5350, and the
   tank's glass is on the witness-room side only.
+
+### 5.2 Alpha test, blend and coverage [verified unless marked]
+
+What decides whether a pass is opaque, cut out or blended. All of it is the pass builder
+0x48fab0 (layer: +0 texture, +4 flags, +8 blend mode) and the state appliers it feeds.
+
+- **Mode promotion.** Before anything else, a mode-1 layer whose texture's flag word (+0x1c)
+  has alpha bits 16..19 = 1 becomes mode 8 (0x48fabd..0x48fada). Those bits are the .tdu
+  header's alpha mode: the texture-format chooser 0x4485d0 makes a compressed texture DXT5 when
+  bits 17..19 are set and DXT1 otherwise, and an uncompressed 16-bit one A1R5G5B5 for bit 16
+  alone. So mode 1 on a 1-bit (DXT1 punch-through) texture is the cut-out mode 8. No other mode
+  is promoted, and the Simple builder 0x48f300 copies its word 2 as the mode with no look at
+  the texture, so a mode-0 pass over an alpha texture stays mode 0.
+- **Blending.** ALPHABLENDENABLE (state bit 3) = mode ≠ 0, or the object is translucent
+  (0x48faeb..0x48fb05). The factors are 0x49a990's (§5.1): modes 0 and 3 are ONE, ZERO, and
+  mode 8 is SRCALPHA, INVSRCALPHA like mode 1.
+- **Alpha test.** 0x49a940(ref, func) sets ALPHAREF, ALPHATESTENABLE = (ref ≠ 0) and
+  ALPHAFUNC. Modes 0 and 7 pass ref 0, ALWAYS: the test is off. Mode 8 passes 200 GREATER,
+  every other mode 2 GREATER, a glow-flagged mode-2 pass 32 GREATER. A translucent object draws
+  its mode 0 / 8 passes as mode 1 (2 GREATER). The texture's alpha never enters the decision:
+  **an opaque pass is drawn whole whatever its texture's alpha holds**, which in many
+  materials is a reflection mask (the mode-7 layer of a Layered material) rather than
+  coverage.
+- **Depth.** On for a first pass of mode 0 or 8 (§5.1).
+- **Punch-through texels.** Every 1-bit texture is a D3DFMT_DXT1, whose transparent texels
+  decode to RGBA 0. A pass that does not cut them (mode 0) therefore shows them black; the
+  only retail cases are the PoliceBoat's lettering decal 55:12 (55:11, 55 % transparent) and
+  the static 7:2431 (7:709, two small holes).
+
+**Port [port].** One decision for static and skinned surfaces: `surface-material.ts
+surfaceBaseBlend` (the first textured pass's mode; a part without a decoded material still
+reads its texture's alpha as cut-out coverage) and `surfaceAlphaTest` (mode 0 / 7: none; 1..6:
+`passAlphaRef`; 8: `CUTOUT_ALPHA_TEST` = 0.5 with alpha to coverage and coverage mips, where
+the engine has 200 / 255, so thin bars keep their width). `createSurfaceMaterial` and
+`character.ts characterAlphaTest` both use them, and a skinned submesh whose single pass is
+mode 7 takes the surface material (blended) instead of the lit skin. `toDataTexture` gives a
+punch-through texture its black texels for every pass but a cut-out (`texture.ts
+punchThroughBlack`); cut-out passes keep the colours bled from the neighbours, so their edges
+filter without dark fringes. Census and renders: game-logic.md §11.4 "Torn-off doors",
+follow-up; test `tests/surface-alpha.test.ts`.
 
 ## 6. Visibility leftovers
 

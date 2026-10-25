@@ -449,6 +449,18 @@ const WAYPOINT_RUN = 2;
 const WAYPOINT_REACH = 0.45;
 
 /**
+ * Port steering: should a walker turn on the spot before stepping toward a goal `d` m away with
+ * `err` rad of heading error, moving at `speed` m/s and turning at `rate` rad/s? Yes when the goal
+ * lies within twice its turning radius (speed / rate) and is more than 20 degrees off: steering
+ * on while turning would circle the goal for good once that circle is wider than the arrival
+ * test (3b's 2c24 round Waypoint 2cfe). [inferred: the original's SimpleMoveTo steers with
+ * arrival weights, not decoded.]
+ */
+export function arrivalTurn(d: number, err: number, speed: number, rate: number): boolean {
+  return rate > 0 && d < (2 * speed) / rate && Math.abs(err) > 0.35;
+}
+
+/**
  * Waypoint p4 / p5 [verified, Suffering.rfl WaypointBehavior message handler 0x100f0f70 ->
  * 0x100f10db]: when MoveTo has brought the walker to the Waypoint and p4 is not 0, a "Slerp"
  * child behaviour (ctor 0x10104ad0, init 0x100ed3b0, step 0x100e8840 -> 0x100de0d0) blends the
@@ -3617,8 +3629,11 @@ export class Actor {
       return;
     }
     const err = this.faceTowards(dx, dz, dt, TURN_RATE);
-    // Move along the facing direction once roughly aligned (no moonwalking).
-    const k = Math.max(0, Math.cos(err));
+    // Move along the facing direction once roughly aligned (no moonwalking). A walk's goal inside
+    // the body's turning circle is turned to first (arrivalTurn): 3b's CartWheeler 2c24, down from
+    // the roof, ran rings 0.7 m round its Waypoint 2cfe (run 4.1 m/s at 6 rad/s) and never came
+    // within WAYPOINT_REACH.
+    const k = passive && arrivalTurn(d, err, this.motor.cfg.walkSpeed, TURN_RATE) ? 0 : Math.max(0, Math.cos(err));
     this.wish.set(-Math.sin(this.yaw) * k, -Math.cos(this.yaw) * k);
 
     // Stuck against something while moving directly: route through the graph for a while.

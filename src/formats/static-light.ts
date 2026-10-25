@@ -36,15 +36,14 @@
 // start) stayed bright in the dark. Switchable lights reach these objects per frame (lights.ts,
 // engine-light.ts), so they still follow switching.
 //
-// Which lights that is for an object visible from the start is an open question: the code puts
-// the pass at the first draw, when every light exists, yet the 1a cell doors (shown at start,
-// created before every cell lamp and the root Ambient Light) are drawn in the PC captures with
-// black colours (lamps per frame only, no ambient), and rendering them with every light blows
-// them out (docs/re/renderer.md §1.9). The port keeps the lights created before such an object
-// (`before`: its level object index), which reproduces the doors [inferred from data; no code
-// path found]. An object hidden at start is first drawn after the logic shows it and gets every
-// static light that is on at load (world/dynamic.ts loadPassBefore) [port: the lights on at load
-// stand for those on when it is shown].
+// Every object sees every light that is on at load, in its groups, whether it is shown at start
+// or not: nothing is drawn while the level loads, so its first draw comes after every light has
+// been created and registered [verified code, docs/re/renderer.md §1.9; port: the lights on at
+// load stand for those on at the first draw]. (The port once kept
+// only the lights stored before a start-visible object, its level index, to match a capture of
+// the 1a cell doors; that comparison had baked the switchable lamps into the colours as well.
+// The rule drew every 1a door and locker black, with no ambient, and lit one door of a pair and
+// not the other; it is gone.)
 //
 // Floor layers without .ldu colours take the same path (0x4c1900: a grid of colours from the
 // layer's own gather, all lights, 0x4c1f8a). Their pass expects the root Ambient Light to exist
@@ -83,8 +82,6 @@ export interface StaticPointLight {
    * top of what the load-time pass put into the colours. Static lights: false / absent.
    */
   switchable?: boolean;
-  /** Creation order: the light's index among the level's objects (absent: before everything). */
-  order?: number;
   /**
    * Sector-tree record of the light's group (its nearest named-group ancestor, sectorGroups):
    * the light reaches only objects inside that group (absent: everywhere).
@@ -137,8 +134,6 @@ export interface AmbientRegion {
   rgb: [number, number, number];
   /** p8 (flag 0x400): hides the larger regions (default true, every retail Ambient Light). */
   exclusive?: boolean;
-  /** Creation order (level object index; absent: before everything). */
-  order?: number;
 }
 
 /**
@@ -154,8 +149,6 @@ export interface StaticDirectional {
   max?: [number, number, number];
   /** p8 (flag 0x400): hides the directional lights of larger regions. */
   exclusive: boolean;
-  /** Creation order (level object index; absent: before everything). */
-  order?: number;
 }
 
 /** Default ambient when a level has no unscaled Ambient Light (engine-light rig, lights.ts). */
@@ -184,9 +177,6 @@ export function loadTimeColor(sum: number): number {
   return Math.min(1, Math.max(0, sum));
 }
 
-/** Does a light created at `order` exist when the object at index `before` loads? */
-const exists = (order: number | undefined, before: number | undefined) => before === undefined || order === undefined || order < before;
-
 export class StaticLighting {
   constructor(
     /** Point Lights on at load (static and switchable). */
@@ -194,8 +184,6 @@ export class StaticLighting {
     readonly ambient: [number, number, number],
     readonly regions: AmbientRegion[],
     readonly directionals: StaticDirectional[] = [],
-    /** Creation order of the global Ambient Light (absent: before everything). */
-    readonly ambientOrder?: number,
     /** Groups above a placed object (sectorGroups chain), for the lights' `group`. */
     readonly groupsOf?: (uid: number) => readonly number[],
   ) {}
@@ -213,10 +201,10 @@ export class StaticLighting {
    * `uid` (the object's) only lights whose group holds it (sectorGroups). Switchable lights are
    * left out: they light the object per frame (see the header) [port].
    */
-  lightsFor(cx: number, cy: number, cz: number, r: number, before?: number, uid?: number): StaticPointLight[] {
+  lightsFor(cx: number, cy: number, cz: number, r: number, uid?: number): StaticPointLight[] {
     const hit: { l: StaticPointLight; k: number }[] = [];
     for (const l of this.lights) {
-      if (l.switchable || !exists(l.order, before) || !this.reaches(l.group, uid)) continue;
+      if (l.switchable || !this.reaches(l.group, uid)) continue;
       const d2 = (l.x - cx) ** 2 + (l.y - cy) ** 2 + (l.z - cz) ** 2;
       const reach = l.cull + r;
       if (!(l.cull > 0) || d2 >= reach * reach) continue;
@@ -231,10 +219,9 @@ export class StaticLighting {
    * applicableDirectionals for a non-dynamic object): those whose region holds it, smallest
    * first, up to and including the first exclusive one.
    */
-  directionalsAt(x: number, y: number, z: number, before?: number): StaticDirectional[] {
+  directionalsAt(x: number, y: number, z: number): StaticDirectional[] {
     const hit: (StaticDirectional & { volume: number; rim: false })[] = [];
     for (const d of this.directionals) {
-      if (!exists(d.order, before)) continue;
       if (d.min && d.max && (x < d.min[0] || x > d.max[0] || y < d.min[1] || y > d.max[1] || z < d.min[2] || z > d.max[2])) continue;
       hit.push({ ...d, volume: d.min && d.max ? boxVolume(d.min, d.max) : Infinity, rim: false });
     }
@@ -246,11 +233,10 @@ export class StaticLighting {
    * Light regions holding it, smallest first, summed up to the first exclusive one, which with
    * every retail light exclusive is the smallest; the global ambient (root group) is the largest.
    */
-  ambientAt(x: number, y: number, z: number, before?: number): [number, number, number] {
-    const global: [number, number, number] = exists(this.ambientOrder, before) ? this.ambient : [0, 0, 0];
+  ambientAt(x: number, y: number, z: number): [number, number, number] {
+    const global = this.ambient;
     const hit: { volume: number; exclusive: boolean; rgb: [number, number, number] }[] = [];
     for (const b of this.regions) {
-      if (!exists(b.order, before)) continue;
       if (x < b.min[0] || x > b.max[0] || y < b.min[1] || y > b.max[1] || z < b.min[2] || z > b.max[2]) continue;
       hit.push({ volume: boxVolume(b.min, b.max), exclusive: b.exclusive !== false, rgb: b.rgb });
     }
@@ -265,12 +251,12 @@ export class StaticLighting {
 
   /**
    * The load-time light list of an object with this bounding sphere (0x4cade0 before its
-   * colours exist): ambient, directional base lights and point lights at its centre, of the
-   * lights created before it (`before`: its level object index; absent: every light) and, given
-   * the object's `uid`, in a group that holds it.
+   * colours exist): ambient, directional base lights and point lights at its centre, every
+   * light that is on at load (its first draw comes after all of them exist) and, given the
+   * object's `uid`, in a group that holds it.
    */
-  setFor(cx: number, cy: number, cz: number, r: number, before?: number, uid?: number): LoadTimeSet {
-    return { lights: this.lightsFor(cx, cy, cz, r, before, uid), ambient: this.ambientAt(cx, cy, cz, before), directionals: this.directionalsAt(cx, cy, cz, before) };
+  setFor(cx: number, cy: number, cz: number, r: number, uid?: number): LoadTimeSet {
+    return { lights: this.lightsFor(cx, cy, cz, r, uid), ambient: this.ambientAt(cx, cy, cz), directionals: this.directionalsAt(cx, cy, cz) };
   }
 
   /**
@@ -331,8 +317,7 @@ export interface LoadTimeSet {
 /**
  * Load-time lighting of a level from its parsed entities: the Point Lights that are on at start
  * and created (instance flag 0x8 objects never are), static and switchable; the Directional
- * Lights' base lights that are on at start; the Ambient Lights; each with its creation order
- * (entity index, setFor's `before`). With `lightRegions`
+ * Lights' base lights that are on at start; the Ambient Lights. With `lightRegions`
  * (visgraph.ts) an Ambient / Directional Light applies within its parent group's box and one
  * under the root group everywhere (docs/re/renderer.md §1.4); without (no sector tree) the
  * unscaled Ambient Light is global, scaled ones are boxes, and Directional Lights are left out.
@@ -345,10 +330,8 @@ export function staticLightingFromEntities(ents: readonly Entity[], lightRegions
   const regions: AmbientRegion[] = [];
   const directionals: StaticDirectional[] = [];
   let ambient: [number, number, number] | undefined;
-  let ambientOrder: number | undefined;
   for (const e of ents) {
     if (e.flags & 0x8) continue;
-    const order = e.index;
     const v = e.values;
     if (e.className === 'Point Light') {
       // Off at start (p6 = 0): not in the load-time gather.
@@ -357,7 +340,7 @@ export function staticLightingFromEntities(ents: readonly Entity[], lightRegions
       const intensity = num(v[8]);
       const cull = pointLightCullRadius(intensity, rgb);
       if (!(cull > 0)) continue;
-      const l: StaticPointLight = { x: e.position[0] / 2048, y: e.position[1] / 2048, z: e.position[2] / 2048, intensity, rgb, cull, order };
+      const l: StaticPointLight = { x: e.position[0] / 2048, y: e.position[1] / 2048, z: e.position[2] / 2048, intensity, rgb, cull };
       if (isSwitchablePointLight(e)) l.switchable = true;
       const group = groups?.groupOf(e.uid);
       if (group !== undefined) l.group = group;
@@ -371,7 +354,7 @@ export function staticLightingFromEntities(ents: readonly Entity[], lightRegions
       if (!exclusive && !rgb[0] && !rgb[1] && !rgb[2]) continue;
       const m = instanceRotation(e.rotation);
       const len = Math.hypot(m[2], m[5], m[8]) || 1;
-      const d: StaticDirectional = { dir: [m[2] / len, m[5] / len, m[8] / len], rgb, exclusive, order };
+      const d: StaticDirectional = { dir: [m[2] / len, m[5] / len, m[8] / len], rgb, exclusive };
       if (reg.box) (d.min = [reg.box[0], reg.box[1], reg.box[2]]), (d.max = [reg.box[3], reg.box[4], reg.box[5]]);
       directionals.push(d);
     } else if (e.className === 'Ambient Light') {
@@ -380,13 +363,13 @@ export function staticLightingFromEntities(ents: readonly Entity[], lightRegions
       const reg = lightRegions?.get(e.uid);
       if (reg) {
         if (!reg.box) {
-          if (!ambient) (ambient = rgb), (ambientOrder = order);
-        } else regions.push({ min: [reg.box[0], reg.box[1], reg.box[2]], max: [reg.box[3], reg.box[4], reg.box[5]], rgb, exclusive, order });
+          if (!ambient) ambient = rgb;
+        } else regions.push({ min: [reg.box[0], reg.box[1], reg.box[2]], max: [reg.box[3], reg.box[4], reg.box[5]], rgb, exclusive });
         continue;
       }
       const corners = e.scale ? entityBoxCorners(e as Entity, instanceRotation) : undefined;
       if (!corners) {
-        if (!ambient) (ambient = rgb), (ambientOrder = order);
+        if (!ambient) ambient = rgb;
         continue;
       }
       const min: [number, number, number] = [Infinity, Infinity, Infinity];
@@ -397,8 +380,8 @@ export function staticLightingFromEntities(ents: readonly Entity[], lightRegions
           max[k] = Math.max(max[k], c[k] / 2048);
         }
       }
-      regions.push({ min, max, rgb, exclusive, order });
+      regions.push({ min, max, rgb, exclusive });
     }
   }
-  return new StaticLighting(lights, ambient ?? DEFAULT_AMBIENT, regions, directionals, ambient ? ambientOrder : undefined, groups?.chain);
+  return new StaticLighting(lights, ambient ?? DEFAULT_AMBIENT, regions, directionals, groups?.chain);
 }

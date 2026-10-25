@@ -487,6 +487,11 @@ export interface StompSink {
   pose(uid: number, key: StompTransformKey, track: StompTrack): void;
   /** Remove the object from the level (tracks flagged TRACK_REMOVE_AT_END, at the end). */
   remove?(uid: number): void;
+  /**
+   * A control key reached the object (also while skipping): the engine sends it 0x1001 (taken)
+   * or 0x1002 (handed back) (0x450da0). Before the presenter's own handling (observer `event`).
+   */
+  control?(uid: number, release: boolean): void;
 }
 
 /** Presentation layer (camera, animation, sound, subtitles): src/game/sequence. */
@@ -558,6 +563,7 @@ export class StompRun {
       else if (ev.kind === 'visibility') sink.setVisible(track.uid, ev.key.visible);
       else {
         if (ev.kind === 'attach') this.attach(track, ev.key);
+        else if (ev.kind === 'control') sink.control?.(track.uid, ev.key.release);
         observer?.event(this, track, ev);
       }
     }

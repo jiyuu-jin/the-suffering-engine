@@ -14,6 +14,12 @@ export interface DecodedTexture {
   /** Tightly packed RGBA8, top row first. */
   rgba: Uint8Array;
   hasAlpha: boolean;
+  /**
+   * DXT1 with 1-bit alpha (header alpha mode 1): its alpha-0 texels decode as black in Direct3D;
+   * `rgba` holds them bled from their neighbours for cut-out passes (texture.ts
+   * bleedTransparentTexels, punchThroughBlack).
+   */
+  punchThrough?: boolean;
 }
 
 export interface MeshPart {

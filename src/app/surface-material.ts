@@ -62,7 +62,7 @@ import {
   type SurfaceMaterial,
   type Waveform,
 } from '../formats/model';
-import { coverageMipmaps, decodeTexture } from '../formats/texture';
+import { coverageMipmaps, decodeTexture, punchThroughBlack } from '../formats/texture';
 import type { DecodedTexture } from '../formats/types';
 import { glowMarkAlphaRef, glowMarked, passAlphaRef, passDepthWrite, tintFactor } from '../formats/render-data';
 import { glowMark, setGlowMark } from './glow-mark';
@@ -111,6 +111,11 @@ export interface SurfaceMaterialOptions {
    * mode (docs/enhanced.md "Extension points").
    */
   enhancedMaps?: EnhancedMaps;
+  /**
+   * Lit passes take the object's own light set (engine-light.ts `lightSet`: skinned models, as
+   * the plain character skin is lit) instead of every light per vertex; no baked colours.
+   */
+  lightSet?: boolean;
 }
 
 /**
@@ -147,6 +152,30 @@ export interface SurfaceMaterialResult {
 
 const isUnlitBlend = (b: number) => b === Blend.Add || b === Blend.Subtract || b === Blend.MulAlpha || b === Blend.Modulate2x;
 const isBlended = (b: number) => b !== Blend.Opaque && b !== Blend.Opaque3 && b !== Blend.Cutout;
+
+/**
+ * Blend mode a surface is drawn with: its first textured pass (decoded material, mode 1 on a
+ * 1-bit-alpha texture already promoted to 8 as SUFFERING.EXE 0x48fabd does at draw time). A
+ * part with no decoded material keeps the old reading, texture alpha = cut-out coverage [port].
+ * Static surfaces (createSurfaceMaterial) and skinned ones (character.ts) both decide by this.
+ */
+export function surfaceBaseBlend(material: SurfaceMaterial | undefined, hasAlpha: boolean): number {
+  const l = material?.layers.find((x) => x.texture || x.frames);
+  if (l) return l.blend;
+  return hasAlpha ? Blend.Cutout : Blend.Opaque;
+}
+
+/**
+ * Alpha test of a surface whose base pass has blend mode `blend`, as the engine's pass state
+ * (0x48fab0, docs/re/renderer.md "Alpha test, blend and coverage") [verified]: modes 0 and 7 have
+ * none, whatever the texture's alpha holds (ALPHAREF 0 turns ALPHATESTENABLE off, 0x49a940);
+ * 1..6 keep alpha > 2 / 255 (a glow-marked additive pass > 32 / 255); a cut-out (mode 8) keeps
+ * alpha > 200 / 255 in the engine, here CUTOUT_ALPHA_TEST [port]. 0 = no test.
+ */
+export function surfaceAlphaTest(blend: number, glowMark = false): number {
+  if (blend === Blend.Cutout) return CUTOUT_ALPHA_TEST;
+  return passAlphaRef(blend, glowMark) ?? 0;
+}
 
 // Shared shaders. three.js keys a material's shader by the ids of its nodes, so a node graph of
 // its own made every surface material build (and, through the generated names, often compile)
@@ -218,11 +247,12 @@ class SurfaceBasicMaterial extends THREE.MeshBasicNodeMaterial {
 
 /** Colour node of each surface structure (SurfaceGraph key). */
 const sharedGraphs = new Map<string, N>();
-/** engineLightFactor per lighting kind (precomputed or not), shared by every surface graph. */
-const lightFactors = new Map<boolean, N>();
-const lightFactor = (precomputed: boolean): N => {
-  let f = lightFactors.get(precomputed);
-  if (!f) lightFactors.set(precomputed, (f = engineLightFactor({ precomputed })));
+/** engineLightFactor per lighting kind (precomputed, light set), shared by every surface graph. */
+const lightFactors = new Map<string, N>();
+const lightFactor = (precomputed: boolean, lightSet = false): N => {
+  const k = `${precomputed ? 1 : 0}${lightSet ? 1 : 0}`;
+  let f = lightFactors.get(k);
+  if (!f) lightFactors.set(k, (f = engineLightFactor({ precomputed, lightSet })));
   return f;
 };
 
@@ -481,8 +511,7 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
   let layers = opts.material?.layers.filter((l) => l.texture || l.frames) ?? [];
   if (!layers.length && opts.textureKey) {
     // No decoded material: legacy behaviour, texture alpha = cutout coverage.
-    const cut = src.hasAlpha?.(opts.textureKey) ?? false;
-    layers = [{ texture: opts.textureKey, blend: cut ? Blend.Cutout : Blend.Opaque }];
+    layers = [{ texture: opts.textureKey, blend: surfaceBaseBlend(undefined, src.hasAlpha?.(opts.textureKey) ?? false) }];
   }
   if (opts.hasUvs === false) layers = layers.filter((l) => l.texGen);
 
@@ -500,7 +529,8 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
   // The graph is composed every time (cheap: plain objects) to record the structure and the
   // values; the first material of a structure keeps its graph, later ones share it.
   const S = new SurfaceGraph();
-  S.tok(`${blend}|${opts.vertexColors ? 'vc' : ''}`);
+  const lightSet = !opts.vertexColors && !!opts.lightSet;
+  S.tok(`${blend}|${opts.vertexColors ? 'vc' : ''}${lightSet ? '|set' : ''}`);
   // Engine passes: every layer is lit by the vertex lighting, or by its halved tint (unlit).
   // Enhanced mode: per-surface nodes from generated maps (part of the structure: tokens + slots).
   let surface: unknown;
@@ -528,7 +558,7 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
     S.tok(`em:${maps.normal ? 'n' : ''}${maps.roughness ? 'r' : ''}${maps.specular ? 's' : ''}${maps.detail ? 'd' : ''}`);
     surface = enhancedShading.surface(maps, (t) => S.tex(t, coords), coords);
   }
-  const light: N | null = LEGACY_LIGHTING ? null : surface ? engineLightFactor({ precomputed: opts.vertexColors, surface }) : lightFactor(opts.vertexColors);
+  const light: N | null = LEGACY_LIGHTING ? null : surface ? engineLightFactor({ precomputed: opts.vertexColors, lightSet, surface }) : lightFactor(opts.vertexColors, lightSet);
   const samples = layers.map((l) => {
     const s = sampleLayer(l, src, missing, S);
     return s && light ? shadePass(l, s, light, S) : s;
@@ -553,7 +583,7 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
     // ONE); 1 for everything but faded characters (fx/body-parts.ts).
     if (unlit) node = gammaAdd ? vec4(additiveEffectColor(rgb, alpha.mul(materialOpacity)), alpha) : colour;
     // Lit: already shaded per pass; the projected-shadow receiver pass darkens the result.
-    else if (!LEGACY_LIGHTING) node = vec4(engineSurfaceFinish(rgb, { precomputed: opts.vertexColors, surface }), colour.a);
+    else if (!LEGACY_LIGHTING) node = vec4(engineSurfaceFinish(rgb, { precomputed: opts.vertexColors, lightSet, surface }), colour.a);
     else node = colour;
     if (glow) node = vec4(enhancedShading.glow!(vec4(node).rgb), vec4(node).a);
     sharedGraphs.set(key, node);
@@ -585,15 +615,13 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
     }
     material = m;
   }
+  // Modes 1..6 draw with D3DRS_ALPHATEST > 2/255 (0x48fab0), an additive pass carrying the
+  // glow mark (`depthWrite`: fire cards' Animating p7) with > 32/255; modes 0 and 7 have no test.
+  const alphaTest = surfaceAlphaTest(blend, !!base.depthWrite);
   if (blend === Blend.Cutout) {
-    material.alphaTest = CUTOUT_ALPHA_TEST;
+    material.alphaTest = alphaTest;
     material.alphaToCoverage = true;
-  } else if (!LEGACY_LIGHTING && isBlended(blend)) {
-    // Modes 1..6 draw with D3DRS_ALPHATEST > 2/255 (0x48fab0), an additive pass carrying the
-    // glow mark (`depthWrite`: fire cards' Animating p7) with > 32/255; mode 7 has no test.
-    const ref = passAlphaRef(blend, !!base.depthWrite);
-    if (ref !== null) material.alphaTest = ref;
-  }
+  } else if (!LEGACY_LIGHTING && alphaTest) material.alphaTest = alphaTest;
   applyBlendState(material, blend, base.depthWrite);
   if (gammaAdd) {
     // The colour is already premultiplied (additiveEffectColor).
@@ -671,7 +699,10 @@ function glowMarkMaterial(layers: MaterialLayer[], side: THREE.Side, src: Surfac
 
 /** RGBA8 DataTexture for a decoded texture (stored row order, engine UVs as-is). */
 export function toDataTexture(src: DecodedTexture, opts: { lightmap?: boolean; cutout?: boolean } = {}): THREE.DataTexture {
-  const tex = new THREE.DataTexture(src.rgba, src.width, src.height, THREE.RGBAFormat, THREE.UnsignedByteType);
+  // A punch-through texture drawn by a pass that does not cut it shows its alpha-0 texels black,
+  // as Direct3D decodes DXT1 (texture.ts punchThroughBlack).
+  const rgba = src.punchThrough && !opts.cutout ? punchThroughBlack(src.rgba) : src.rgba;
+  const tex = new THREE.DataTexture(rgba, src.width, src.height, THREE.RGBAFormat, THREE.UnsignedByteType);
   tex.name = src.name ?? src.key;
   // Rows stay in stored (bottom-up) order with flipY=false: uv v=0 samples stored row 0,
   // which is what the engine's Direct3D UVs address.

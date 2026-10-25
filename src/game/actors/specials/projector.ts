@@ -15,9 +15,11 @@
 //             (engine flag bit 24 cleared) and is skipped by the queries that test object +0xc
 //             bit 0x10000000 [use of that bit inferred: object filters 0x425ed4 / 0x4259d4].
 //   p16 (On)  enables it and arms the strobe counter with 1: the next update SHOWS the target
-//             (vt +0x128, the Visibility Toggler's call). Nothing else shows it: 1b's Killjoy
-//             (instance flags 0, hidden) appears when "Turn on Projector & Killjoy" (#80ba)
-//             turns the effect on at 59.09 s of STOMP 12:247.
+//             (vt +0x128, the Visibility Toggler's call). 1b's Killjoy (instance flags 0,
+//             hidden) is shown by STOMP 12:247 taking him at 0 s (a control key shows a
+//             Character: docs/game-logic.md §7), hidden by its "Projector OFF" (p15) at 6.15 s
+//             and shown again here when "Turn on Projector & Killjoy" (#80ba) turns the effect
+//             on at 59.09 s.
 //   p14 (Off) stops the updates, restores the shadow, opacity 1, shows the target.
 //   p15 (Off) hides the target and disables the effect. Off runs p14 then p15 (map order).
 //   update    (enabled, updates on) strobe: while the counter runs the target is hidden; when

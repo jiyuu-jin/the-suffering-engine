@@ -48,6 +48,7 @@ import { fxaa } from 'three/addons/tsl/display/FXAANode.js';
 import type { TierFeatures } from './config';
 import { warmPasses, type WarmPass } from '../prewarm';
 import { VolumetricNode } from './volumetric';
+import { HalfDepthNode } from './half-depth';
 import { TONE } from './tone';
 import { rcas } from './sharpen';
 
@@ -93,6 +94,10 @@ export const grade = {
 };
 
 const LUMA = vec3(0.2126, 0.7152, 0.0722);
+/** The scene pass's outputs (colour, velocity), one instance for every tier's chain. */
+let sceneMRTNode: THREE.MRTNode | null = null;
+/** The viewmodel pass's outputs (colour, coverage), likewise. */
+let vmMRTNode: THREE.MRTNode | null = null;
 
 export interface PipelineParts {
   scene: THREE.Scene;
@@ -120,6 +125,16 @@ export class EnhancedPipeline {
     private readonly parts: PipelineParts,
   ) {
     this.pipeline = new THREE.RenderPipeline(renderer);
+    // The scene and viewmodel passes draw with one render context whatever the chain: three.js
+    // keys contexts (and with them every object's shader state) by the render-call depth too, and
+    // TRAA nests the scene pass one level deeper than FXAA, so a tier switch rebuilt the shaders of
+    // everything in view (Perf C, docs/perf.md). Their MRT nodes are theirs alone, so no other
+    // render shares the context.
+    const rc = (renderer as unknown as { _renderContexts: { get(t: unknown, m: unknown, d?: number): unknown } })._renderContexts;
+    if (!Object.prototype.hasOwnProperty.call(rc, 'get')) {
+      const get = rc.get;
+      rc.get = (t, m, d = 0) => get.call(rc, t, m, m !== null && (m === sceneMRTNode || m === vmMRTNode) ? 0 : d);
+    }
     this.pipeline.outputColorTransform = false;
   }
 
@@ -147,10 +162,18 @@ export class EnhancedPipeline {
     // No MSAA: AO, volumetrics and TRAA read the depth texture (FXAA on the lower tiers).
     const scenePass = pass(scene, camera, { samples: 0 });
     scenePass.setResolutionScale(f.renderScale);
-    const sceneMRT = useTraa ? mrt({ output, velocity }) : null;
-    if (sceneMRT) scenePass.setMRT(sceneMRT);
+    // Velocity at every tier, used by TRAA only: the scene's shaders and pipelines are built for
+    // the pass's outputs, so one layout for all tiers lets a tier switch reuse them. With velocity
+    // on the TRAA tiers only, switching between FXAA and TRAA tiers rebuilt every scene pipeline
+    // in the GPU process and drew no frame for seconds (Perf C, docs/perf.md); writing the unused
+    // velocity at Low / Medium costs about nothing measurable.
+    const sceneMRT = (sceneMRTNode ??= mrt({ output, velocity }));
+    scenePass.setMRT(sceneMRT);
     this.disposables.push(scenePass);
     const color: N = scenePass.getTextureNode('output');
+    // (Asked for at every tier: the pass makes an MRT attachment only for an output someone reads,
+    // and its render context, which keys every object's shaders, counts them.)
+    const vel: N = scenePass.getTextureNode('velocity');
     const depth: N = scenePass.getTextureNode('depth');
     const ctx = { depth, camera, features: f };
     const run = (stage: EnhancedStage, c: N): N => {
@@ -161,7 +184,15 @@ export class EnhancedPipeline {
     let c: N = run('sceneHDR', color);
     let aoTex: N = null;
     if (f.aoSamples > 0) {
-      const aoNode = (ao as N)(depth, null, camera);
+      // (Below full resolution the AO reads a copy of the depth at its own size: half-depth.ts.)
+      let aoDepth: N = depth;
+      if (f.aoScale < 1) {
+        const half = new HalfDepthNode(depth);
+        half.resolutionScale = f.aoScale;
+        this.disposables.push(half);
+        aoDepth = half.getTextureNode();
+      }
+      const aoNode = (ao as N)(aoDepth, null, camera);
       aoNode.resolutionScale = f.aoScale;
       aoNode.samples.value = f.aoSamples;
       aoNode.radius.value = 0.6;
@@ -183,14 +214,14 @@ export class EnhancedPipeline {
       c = vec4(c.rgb.add(vol.getTextureNode().rgb), c.a);
     }
     if (useTraa) {
-      const t = traa(c, depth, scenePass.getTextureNode('velocity'), camera);
+      const t = traa(c, depth, vel, camera);
       this.disposables.push(t);
       c = t;
     }
     // First-person viewmodel over the world, by its coverage (an MRT target the clear leaves black
     // and every drawn fragment writes white; MSAA resolves it to the edge coverage).
     const vmPass = pass(viewmodelScene, viewmodelCamera, { samples: 4 });
-    const vmMRT = mrt({ output, cover: vec4(1, 1, 1, 1) });
+    const vmMRT = (vmMRTNode ??= mrt({ output, cover: vec4(1, 1, 1, 1) }));
     vmPass.setMRT(vmMRT);
     vmPass.setResolutionScale(f.renderScale);
     this.disposables.push(vmPass);

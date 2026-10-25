@@ -854,8 +854,9 @@ export function parseLevel(lvl: SrscFile, name: string, extras: LevelExtras = {}
         const wx = M[0] * px + M[1] * py + M[2] * pz, wy = M[3] * px + M[4] * py + M[5] * pz, wz = M[6] * px + M[7] * py + M[8] * pz;
         r2 = Math.max(r2, wx * wx + wy * wy + wz * wz);
       }
-      // The lights created before the object, of the groups holding it (static-light.ts).
-      pre = extras.staticLighting.setFor(ox, oy, oz, Math.sqrt(r2), o.index, o.uid);
+      // Every light on at load, of the groups holding the object (static-light.ts): the pass
+      // runs at its first draw, after the level has loaded.
+      pre = extras.staticLighting.setFor(ox, oy, oz, Math.sqrt(r2), o.uid);
     }
 
     for (const sm of m.submeshes) {

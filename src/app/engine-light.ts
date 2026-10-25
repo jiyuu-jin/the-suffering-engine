@@ -70,6 +70,7 @@ import {
   vertexColor,
 } from 'three/tsl';
 import { ENHANCED } from './enhanced/config';
+import { lampAxis } from './held-lamp';
 
 // TSL node types are deeply generic; the helpers below pass nodes around untyped.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -408,9 +409,11 @@ export function engineLitColor(tex: N, opts: EngineLightOptions): N {
 /**
  * Final colour (linear) of a lit surface pass stack (surface-material.ts): the projected-shadow
  * receiver pass darkens it on gamma values; Enhanced mode adds its specular / shadow terms.
+ * Light-set objects (skinned models) are casters, not receivers, as in engineLitColor.
  */
 export function engineSurfaceFinish(rgb: N, opts: EngineLightOptions): N {
   if (enhancedShading.finish) return enhancedShading.finish(rgb, opts);
+  if (opts.lightSet && !opts.precomputed) return rgb;
   return toLinear(toSrgb(rgb).mul(engineShadowFactor()));
 }
 
@@ -1173,8 +1176,9 @@ class EngineLightRig {
     if (flashlight && flashlight.visible && flashlight.intensity > 0 && flashlight.parent && !this.perPixelFlashlight) {
       const k = flashlight.intensity / FLASHLIGHT_BASE_INTENSITY;
       const pos = flashlight.getWorldPosition(this.t.d).clone();
-      // The beam follows the view axis (the SpotLight sits off-centre and aims 1 m ahead).
-      const dir = camera.getWorldDirection(this.t.v);
+      // The beam follows the view axis (the SpotLight sits off-centre and aims 1 m ahead): the
+      // holder's, the player's while a security monitor's feed has the camera (held-lamp.ts).
+      const dir = lampAxis(flashlight, camera, this.t.v);
       for (const def of this.flashlight) {
         if (s >= MAX_SPOTS) break;
         this.t.c.setHex(def.color, THREE.LinearSRGBColorSpace);

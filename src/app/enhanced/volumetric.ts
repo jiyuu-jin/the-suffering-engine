@@ -24,7 +24,6 @@ import {
   int,
   interleavedGradientNoise,
   mix,
-  mx_noise_float,
   passTexture,
   pow,
   screenCoordinate,
@@ -36,21 +35,42 @@ import {
   vec3,
   vec4,
   context,
+  texture3D,
 } from 'three/tsl';
 import { engineLightInternals } from '../engine-light';
 import { EU, FLASH, FLASH_NEAR, LAMP_SHADOW_RANGE, lampArray, lampLit } from './lights';
 import { shadowTextures } from './shadows';
+import { DUST_PERIOD, DUST_SIZE, bakeDustNoise } from './dust-noise';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type N = any;
 
 const _quad = new THREE.QuadMesh(undefined as unknown as THREE.NodeMaterial);
+
+/** The dust noise, baked once per page (dust-noise.ts): one trilinear fetch per step. */
+let dustTexture: THREE.Data3DTexture | null = null;
+function dust(): THREE.Data3DTexture {
+  if (!dustTexture) {
+    const t = new THREE.Data3DTexture(bakeDustNoise(), DUST_SIZE, DUST_SIZE, DUST_SIZE);
+    t.format = THREE.RedFormat;
+    t.type = THREE.UnsignedByteType;
+    t.minFilter = t.magFilter = THREE.LinearFilter;
+    t.wrapS = t.wrapT = t.wrapR = THREE.RepeatWrapping;
+    t.generateMipmaps = false;
+    t.unpackAlignment = 1;
+    t.name = 'enhanced-dust';
+    t.needsUpdate = true;
+    dustTexture = t;
+  }
+  return dustTexture;
+}
 const _size = new THREE.Vector2();
 
 /** Henyey-Greenstein phase function. */
 const phaseHG = (cosT: N, g: number): N => {
   const g2 = g * g;
-  return float((1 - g2) / (4 * Math.PI)).div(pow(float(1 + g2).sub(cosT.mul(2 * g)), 1.5));
+  const x = float(1 + g2).sub(cosT.mul(2 * g));
+  return float((1 - g2) / (4 * Math.PI)).div(x.mul(x.sqrt()));
 };
 
 export class VolumetricNode extends THREE.TempNode {
@@ -134,15 +154,18 @@ export class VolumetricNode extends THREE.TempNode {
         const jitter = interleavedGradientNoise(screenCoordinate.xy.add(this.frameJitter));
         const sigma = this.density.mul(1.4).div(fogEnd);
         const acc = vec3(0).toVar();
+        const dustTex: N = texture3D(dust());
+        const drift = vec3(EU.time.mul(0.05), EU.time.mul(0.02), EU.time.mul(-0.03));
         Loop(n, ({ i }: { i: N }) => {
           const t = float(i).add(jitter).mul(stepLen);
           const P = eye.add(dir.mul(t));
           // The authored fog's transmittance to this point (linear ramp, start .. end).
           const T = float(1).sub(t.sub(fogStart).div(fogEnd.sub(fogStart).max(1e-3)).clamp(0, 1));
-          const noise = mx_noise_float(P.mul(0.45).add(vec3(EU.time.mul(0.05), EU.time.mul(0.02), EU.time.mul(-0.03))));
+          // (MaterialX Perlin noise, baked: dust-noise.ts.)
+          const noise = dustTex.sample(P.mul(0.45).add(drift).div(DUST_PERIOD)).level(0).r.mul(2).sub(1);
           const dens = sigma.mul(float(1).add(noise.mul(this.dust)).max(0.05));
           const light = vec3(0).toVar();
-          // Flashlight beam.
+          // Flashlight beam (its shadow lookup only inside the beam: outside it adds nothing).
           const fl = EU.flPos.sub(P);
           const fd2 = dot(fl, fl).max(0.04);
           const fd = fd2.sqrt();
@@ -150,12 +173,15 @@ export class VolumetricNode extends THREE.TempNode {
           const c = dot(fdir.negate(), EU.flDir);
           const cone = smoothstep(EU.flCone.x, EU.flCone.y, c);
           const win = float(1).sub(pow(fd.div(EU.flRange).clamp(0, 1), 4)).clamp(0, 1);
-          const sp = EU.flShadowMatrix.mul(vec4(P, 1));
-          const ndc = sp.xyz.div(sp.w.max(1e-4));
-          const suv = vec2(ndc.x.mul(0.5).add(0.5), mix(ndc.y.mul(0.5).add(0.5), ndc.y.mul(-0.5).add(0.5), EU.flipY));
-          const occ = step(fd.div(FLASH.range).sub(0.004), shadowTextures.flash.sample(suv).level(0).r);
-          const shadow = mix(float(1), occ, EU.flShadowOn.mul(step(ndc.x.abs(), 1)).mul(step(ndc.y.abs(), 1)));
-          light.addAssign(EU.flColor.mul(cone.mul(win).mul(shadow).mul(smoothstep(EU.flStart.x, EU.flStart.y, dot(fl.negate(), EU.flDir))).div(fd2.add(FLASH_NEAR))).mul(phaseHG(dot(dir.negate(), fdir), 0.35)).mul(this.flashScatter));
+          const beam = cone.mul(win).mul(smoothstep(EU.flStart.x, EU.flStart.y, dot(fl.negate(), EU.flDir))).toVar();
+          If(beam.greaterThan(0), () => {
+            const sp = EU.flShadowMatrix.mul(vec4(P, 1));
+            const ndc = sp.xyz.div(sp.w.max(1e-4));
+            const suv = vec2(ndc.x.mul(0.5).add(0.5), mix(ndc.y.mul(0.5).add(0.5), ndc.y.mul(-0.5).add(0.5), EU.flipY));
+            const occ = step(fd.div(FLASH.range).sub(0.004), shadowTextures.flash.sample(suv).level(0).r);
+            const shadow = mix(float(1), occ, EU.flShadowOn.mul(step(ndc.x.abs(), 1)).mul(step(ndc.y.abs(), 1)));
+            light.addAssign(EU.flColor.mul(beam.mul(shadow).div(fd2.add(FLASH_NEAR))).mul(phaseHG(dot(dir.negate(), fdir), 0.35)).mul(this.flashScatter));
+          });
           // Lamps (engine point lights): halos; the cube-shadowed ones cast shafts.
           Loop(EU.lampCount, ({ i: k }: { i: N }) => {
             const a = lampArray.element(int(k).mul(2));
@@ -174,15 +200,17 @@ export class VolumetricNode extends THREE.TempNode {
             });
             light.addAssign(rad.mul(sh).mul(phaseHG(dot(dir, v.normalize()), 0.25)).mul(this.lampScatter).mul(0.6));
           });
-          // Moonlight shafts.
-          const mp = EU.moonMatrix.mul(vec4(P, 1));
-          const muv = vec2(mp.x.mul(0.5).add(0.5), mix(mp.y.mul(0.5).add(0.5), mp.y.mul(-0.5).add(0.5), EU.flipY));
-          const mStored = shadowTextures.moon.sample(muv).level(0).r;
-          const mDepth = P.sub(eye).dot(EU.moonDir.negate()).add(80).div(160);
-          const mLit = step(mDepth.sub(0.002), mStored).mul(step(mp.x.abs(), 1)).mul(step(mp.y.abs(), 1)).mul(EU.moonOn);
-          // Fade towards the map's edges (no hard wall where the box ends).
-          const edge = smoothstep(1, 0.8, mp.x.abs().max(mp.y.abs()));
-          light.addAssign(EU.moonColor.mul(mLit.mul(edge)).mul(phaseHG(dot(dir, EU.moonDir), 0.55)).mul(this.moonScatter).mul(1.2));
+          // Moonlight shafts (none without a moonlight shadow map: a uniform branch).
+          If(EU.moonOn.greaterThan(0.5), () => {
+            const mp = EU.moonMatrix.mul(vec4(P, 1));
+            const muv = vec2(mp.x.mul(0.5).add(0.5), mix(mp.y.mul(0.5).add(0.5), mp.y.mul(-0.5).add(0.5), EU.flipY));
+            const mStored = shadowTextures.moon.sample(muv).level(0).r;
+            const mDepth = P.sub(eye).dot(EU.moonDir.negate()).add(80).div(160);
+            const mLit = step(mDepth.sub(0.002), mStored).mul(step(mp.x.abs(), 1)).mul(step(mp.y.abs(), 1)).mul(EU.moonOn);
+            // Fade towards the map's edges (no hard wall where the box ends).
+            const edge = smoothstep(1, 0.8, mp.x.abs().max(mp.y.abs()));
+            light.addAssign(EU.moonColor.mul(mLit.mul(edge)).mul(phaseHG(dot(dir, EU.moonDir), 0.55)).mul(this.moonScatter).mul(1.2));
+          });
           acc.addAssign(light.mul(dens).mul(T).mul(stepLen));
         });
         return vec4(acc, 1);

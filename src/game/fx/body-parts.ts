@@ -31,6 +31,7 @@ import type { PropValue } from '../../formats/entities';
 import type { SrscFile } from '../../formats/srsc';
 import { findEntry } from '../../formats/model';
 import type { Character } from '../../app/character';
+import { cloneWithGlowMark } from '../../app/glow-mark';
 
 export const SPAWN_ITEM = 151;
 export const DESTROY_ITEM = 152;
@@ -150,6 +151,17 @@ export interface BodyPartsEnv {
   /** Fire an output property of the carrier to its links. */
   fire?(uid: number, slot: number): void;
   log?(m: string): void;
+}
+
+/** A carrier's fader in a saved game (BodyParts.save). */
+export interface FaderSave {
+  uid: number;
+  from: number;
+  to: number;
+  duration: number;
+  elapsed: number;
+  mode: number;
+  opacity?: number;
 }
 
 export interface BodyPartCarrier {
@@ -277,6 +289,37 @@ export class BodyParts {
     for (const [uid, st] of this.states) if (!seen.has(uid) && !st.mats) this.states.delete(uid);
   }
 
+  /**
+   * Saved games: each carrier's fader. The Character save writes its fader component (+0x562,
+   * 0x100ac2e0: from, to, duration, elapsed, mode) and the load reads it back (0x100ac330)
+   * [verified] (docs/re/saves.md "Character"). Without it a checkpoint taken after 1b's scene
+   * faded Hermes in (85 %) came back with his creation fade (p182 0: opacity 0).
+   */
+  save(): FaderSave[] {
+    const out: FaderSave[] = [];
+    for (const [uid, st] of this.states) {
+      const f = st.fader;
+      out.push({ uid, from: f.from, to: f.to, duration: f.duration, elapsed: f.elapsed, mode: f.mode, ...(f.opacity === undefined ? {} : { opacity: f.opacity }) });
+    }
+    return out;
+  }
+
+  /** Restores the faders `save` wrote; the opacity goes to the carriers on the next update. */
+  load(data: readonly FaderSave[] | undefined) {
+    for (const d of data ?? []) {
+      let st = this.states.get(d.uid);
+      if (!st) this.states.set(d.uid, (st = { fader: new CharacterFader(), t: 0 }));
+      const f = st.fader;
+      f.from = d.from;
+      f.to = d.to;
+      f.duration = d.duration;
+      f.elapsed = d.elapsed;
+      f.mode = d.mode;
+      f.opacity = d.opacity;
+      st.applied = undefined;
+    }
+  }
+
   /** Opacity of a carrier (tests / overlay); undefined = never set (drawn as is). */
   opacityOf(uid: number): number | undefined {
     return this.states.get(uid)?.fader.opacity;
@@ -287,15 +330,17 @@ export class BodyParts {
     if (op === undefined || op === st.applied) return;
     st.applied = op;
     const mesh = c.ch.mesh;
+    const cur = mesh.material;
+    // Copies made for another mesh (a carrier rebuilt by a load) are not this one's.
+    if (st.mats && !(Array.isArray(cur) ? cur === st.mats : cur === st.mats[0])) {
+      for (const m of st.mats) m.dispose();
+      st.mats = undefined;
+    }
     if (!st.mats) {
       // Own materials: carriers of one kind share theirs.
       const m = mesh.material;
-      // three r186's NodeMaterial.copy drops alphaTest: keep the cut-out passes cut out.
-      st.mats = (Array.isArray(m) ? m : [m]).map((x) => {
-        const c = x.clone();
-        c.alphaTest = x.alphaTest;
-        return c;
-      });
+      // Keeps the alpha test (three r186's NodeMaterial.copy drops it) and the glow mark.
+      st.mats = (Array.isArray(m) ? m : [m]).map((x) => cloneWithGlowMark(x));
       mesh.material = st.mats.length === 1 ? st.mats[0] : st.mats;
     }
     for (const m of st.mats) {

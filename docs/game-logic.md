@@ -667,6 +667,154 @@ Third person [verified code]: standing plays `p13` (2:27 in every set), not the 
 diagonal movement. Rules, data and the port (`src/game/actors/gait.ts`): docs/re/animation.md §9
 "Third-person locomotion".
 
+Held weapon placement (port; user report "the pistol jitters like crazy walking in third
+person"). The engine attaches an object to a bone and draws it in that bone's frame with no offset
+(hardpoints.ts, EXE 0x450c10), so the weapon is drawn with the pose of the frame it is in
+[inferred from the attach call: the per-draw path was not traced]. The port poses the player's
+body and first-person arms in `PlayerController.update`, *before* the frame is drawn (renderer.ts
+`frame`: player, draw, then the game systems), but placed the held models only in the weapons
+system's update, *after* the draw. Every frame drew the gun at the previous frame's hand pose
+[verified, headless Brave, per-frame record after the draw: the gun's screen position in frame n
+equalled the hand bone's in frame n - 1 to 3 decimals]. In the body's frame the hand moves with
+the arm swing, so the gun slid around the hand: 2.8 cm mean / 5.4 cm max off the hand running
+with the revolver, 1.9 / 3.3 with the shiv, 2.6 / 4.8 with the shotgun, 0.8 / 1.2 walking, the
+same in Original and Enhanced Medium; with uneven frame times (a 33 ms frame: 1.8 cm walking) the
+gap changes from frame to frame. Unarmed has nothing in the hand. The camera, feet and body were
+not involved: their velocities were constant frame to frame (camera dV 0.00 m/s running at 6.64
+m/s): the third-person camera follows the feet + eye height (no bone, no head bob, no smoothing
+besides the wall pull-in), and the clips were one phase-aligned gait cycle with no re-trigger.
+First person is not affected in practice: the right arm is rigid to the view (fpCameraInModel),
+so the gun there was off by at most 0.07 cm. Fix: `HardpointAttacher.updateCarriers` places what
+the player's body and arms hold right before the draw (`LevelRenderer.onBeforeDraw`, weapons
+system); after: 0.00 cm for every weapon, walking and running, both modes. NPC weapons were never
+affected: NPCs are posed by the actors system, which runs with the attacher after the draw.
+
+Held weapon grip (user report after the fix above: "seen from the side in third person the
+revolver sits a few centimetres above Torque's fist").
+- **Attach path** [verified, SUFFERING.EXE]: the skinned-model instance (vtable 0x591588) keeps
+  one 0x8a-byte record per attachment: flags, object handle, bone, a world matrix at +0x0a and a
+  local matrix at +0x4a. Slot 6 (0x46d9d0) attaches an object to a **bone index** (checked
+  against the bone count) and sets the local matrix to identity (0x4d7970). Slot 5 (0x46b5d0)
+  would replace it. The hierarchy walk (0x46ecb0) composes each bone's sampled local transform
+  with its parent's and calls 0x4701c0, which sets the attachment's world matrix to
+  local x bone (0x470353, 0x4d6810). This uses the bone's posed matrix, not its skinning
+  matrix (pose x inverse bind).
+- **Callers** [strong]: slot 6 takes no offset. Its last two arguments are only flags: the
+  third sets record bit 2 and calls the object's vt +0x128 with 0, the fourth sets bit 4. The
+  weapon and throwable attaches in Suffering.rfl (for example 0x1002b060 and 0x10038e4e) pass
+  `(bone, object, 0, 0)`. Of the 24 slot-6 call sites on a model instance, none is followed
+  by a slot-5 call; that search covered 14 instructions around each instance load. The bone is the
+  Player Weapon Properties `p0` (35) or `p5` (27) value used directly, not a channel. The weapon
+  model's own rig is not involved: the revolver 4:15 / Gonzogun 4:282 and shotgun 4:26 roots are
+  turned 180 degrees about Y in their bind, the tommy gun 4:88 root is not, and in every case the
+  vertices sit at their model-space positions (every clip of those rigs keeps the root at its
+  bind). The model origin is the grip point.
+- **First person** uses the same rule on the arms model 2:138 (same rig and bone 35).
+- **Port** [verified, headless Brave]: the held model's vertices, expressed in bone 35's frame,
+  equal its model-space vertices for every weapon, so placement error is 0. Bone 35's bind chain
+  equals the inverse of its inverse bind, and the scale is 1. The bone, offset, pivot, scale and
+  bind handling are all correct.
+- **What the gap is: the clips' hand pose** [verified, data]. In the measurements below,
+  distances are the centre of the right hand's skin (palm 34, fingers 36..47) to bone 35, the
+  grip point, in model units (cm).
+  - The clips made for holding a weapon close the fist around bone 35:
+
+    | Clip | Distance |
+    |---|---|
+    | armed run 2:28 (revolver `p20`) | 1.6 |
+    | shotgun run 2:413, tommy gun run 2:416 | 1.6 |
+    | aim hold 2:283, fire 2:278 | 1.5 |
+    | 2:475 / 2:474 | 1.3 |
+    | draws 2:454 / 2:455 / 2:457 / 2:458 | 0.2 to 1.6 |
+    | first-person revolver set 2:270 / 2:476 / 2:288 | 0.7 |
+    | first-person shotgun 2:450, tommy gun 2:305 | 1.6 / 1.2 |
+
+    The shiv's clips (run 2:408 at 14 cm, hold / draw 2:217 / 2:459 at 9.8 cm) close the fist
+    on the handle, along the blade axis.
+  - Every weapon's standing idle `p13` is 2:27 and its walk `p18` is 2:30. These are the
+    unarmed clips: an open hand with the fingers spread, 4.1 to 4.3 cm from bone 35. So
+    standing or walking in third person, the weapon hangs beside the open hand. The revolver's
+    side view during the 2:28 run shows its frame resting on top of the fist, with the grip
+    inside it (1.6 cm, mostly sideways).
+  - The first-person sets move bone 35 itself: (-0.123, 0.014, -0.007) from the hand bone
+    instead of the bind (-0.108, 0.030, -0.007). Every third-person clip keeps the bind.
+  - Across the whole set, 157 of the 375 clips of rig 2:9 put the fist within 2 cm of bone 35.
+  - Guards (rigs 10:43..10:47, same bone 35) stand in their idle (10:70) 2.5 to 2.6 cm from it.
+    13 of the 118 clips of 10:44 are within 2 cm.
+- **Result**: the original draws the same thing, so the port was not changed. Moving the gun
+  into the fist in third-person idle or walk would mean replacing the shared clips or offsetting
+  the weapon bone, which the original does not do.
+- The selected throwable on the back: see "Carried throwable" below.
+- Tests: `tests/held-weapon-grip.test.ts`.
+
+Carried throwable (user request: the port drew no throwable on the body). Read in Suffering.rfl
+unless marked.
+- **What** [verified 0x10038ca0]: taking out a Missile Item puts away whatever sits on bone
+  Player `p119` = **51** (0x10038430), spawns the item's `p55` thrown object (a BouncingObject;
+  its template `p0` must be 1, else it is destroyed again) and attaches it there with
+  `(bone, object, 0, 0)`: slot 6, identity matrix, like the gun on bone 35. Bone 51 is a child of
+  spine bone 3 at the right of the back, just above the belt (bind (0.144, 1.314, 0.066), model
+  faces −Z). It is the object that is later thrown: there is no separate holstered model. The
+  flare carries its thrown object 4:283, not its pickup model 4:112. The HUD's throwable is the
+  item of what sits on bone 51 (0x10037ce0, 0x1003a3a0).
+- **Selecting** [verified]: the item select routine (0x100395f0) calls 0x10038ca0 for a Missile
+  Item, so a new selection replaces the carried object at once. A throwable given while bone 51
+  is empty is taken out (0x10039b10 -> 0x10039d12).
+- **The throw** [verified]: entering the throw (0x10027b40) needs an object on bone 51 (the Flare
+  key, `+0x9c` 0x40000, needs a flare in the inventory instead).
+  - AttachThrownWeapon (clip message 231, 0x1002ae40) carries a bone (35 in every throw clip:
+    2:534 / 2:107 at 0.184 s, 2:170 at 0.195 s, 2:171 at 0.245 s). The object on that bone (the
+    gun) is detached and hidden (vt +0x128 with 0, kept at `+0x436` / `+0x438`). The object on
+    the back moves to that bone, and the item count drops by one there, not at the start of the
+    throw. With some left, another of the same item is taken out onto the back at once. At 0
+    (and with no Killjoy Rebirth effect registered, 0x10027d10), the carried Missile Item with
+    the highest `p45` is taken out (0x1002b1a4..0x1002b24b; `p45` is signed and must beat −1;
+    a tie keeps the first). Retail `p45`: Shrapnel 5, Molotov 4, TNT 3, Flash/Bang 2, Flare −1
+    (never). None: the back stays empty. The Flare key spawns a fresh Player `p243` (4:455) into
+    the hand instead and leaves the back alone.
+  - ThrowWeapon (230, 0x10029310) detaches the object from the marker's bone and launches it.
+  - Leaving the throw state (0x1002ac50) launches an object still in the hand and attaches the
+    hidden gun to its bone again, shown (vt +0x128 with 1).
+- **Creature form** [verified]: the morph (0x10044e70) takes it off (0x10038620, the item kept in
+  `+0x77c`) along with the weapons; the change back (0x10033170) takes the same item out again
+  (0x100392d0). The Killjoy Rebirth effect does the same (docs/re/object-model.md).
+- **Nothing else removes it** [verified for the callers]: 0x10038620 is called only by the morph
+  and the Rebirth effect, and 0x10038430 only by 0x10038620, 0x10038a50 (weapons put away:
+  weapon switch, grapples 0x100837a8, a player state at 0x10036b1f) and 0x10038ca0. Death,
+  grapples and weapon switches keep it on the back [strong: no other path].
+- **First person** [verified, SUFFERING.EXE 0x46d380]: the swap to 2:138 sets the model on the
+  same animator, which frees its attachment records only when the bone count changes
+  (0x46d3bd); 2:9 and 2:138 both have 62 bones, so the object stays on bone 51 of the arms model
+  (as the gun stays on bone 35). It is not seen [port measured, headless Brave, 1a]: the gun sets'
+  first-person clips (revolver 2:270, tommy gun 2:305, shotgun 2:450) carry a bone 51 track that
+  puts it about 1 m behind the model origin (0.53 behind the eye), and with the shiv and unarmed
+  sets (2:217: no bone 51 track) it stays at its bind, 0.61 in front of and 0.49 below the eye,
+  below the 53° picture at every pitch.
+- **Cinematics** [inferred]: the sequence drives the player's own object, so it keeps what is
+  attached. The port's cinematic puppet (sequence/system.ts) carries neither the gun nor the
+  throwable [port, open].
+- **Port** (`src/game/weapons/back-throwable.ts`, weapons system): `ThrowableCarry` keeps one copy
+  on the body's bone 51 (under the body's root) and one on the arms' bone 51 (under the arms
+  pivot), attached through the HardpointAttacher and placed in `onBeforeDraw` with
+  `updateCarriers`, so it has no one-frame lag. Each frame before the draw it follows the
+  selected throwable as the HUD shows it (`persist.throwable`, else the first owned), and only
+  while the weapons are out (not in creature form). Nothing new is saved: a load sets
+  `persist.throwable` and the back follows. The throw: at the 231 marker of the clip it plays,
+  the count drops, the carried copy moves to the marker's bone, the gun there is hidden until
+  the throw action ends, and at 0 the `p45` rule picks the next. At 230 the hand copy goes and
+  the thrown object is launched. If the weapons are put away in between, the hand copy is
+  launched then. The port still falls back to the first owned throwable when `persist.throwable`
+  is null, so with only flares left the flare shows and can be thrown with the throw key, where
+  the original's back would stay empty (only its Flare key throws flares) [port].
+- Verified in headless Brave (1a, third person, every throwable; scratch frames): each one on the
+  back in the player's view and in close crops; a new selection swaps it the same frame. A
+  single TNT: on the back, in the right hand from the 231 marker with the revolver hidden, gone
+  from the back with the count at 0, and the revolver back after the throw. Two molotovs: the
+  second one on the back while the first is in the hand; after the last one the Shrapnel
+  Grenade (`p45` 5) is on the back. Weapons put away: none; out again: back. First person:
+  attached, out of the picture. NPC attachments are unchanged.
+- Tests: `tests/back-throwable.test.ts`.
+
 ## 5. Placement, links, volumes [verified]
 
 - The position is in engine units, which are 2048 per model unit. Rotation and the axis convention
@@ -753,13 +901,32 @@ time order; the sequence ends at its last key (the 1a intro "Goose", `12:284`, a
 | 1 | 30 | u32 channel, ref clip (u16 id, u16 pkg), f32 start offset (s), f32 blend-in (s), f32 speed, u32 flags | play an animation on the object |
 | 3 | 14 | ref sound, u16 volume (/10000), u16 flags | play a sound |
 | 4 | 14 | u32 track index (0 = clear), u32 hardpoint index | attach that track's object to a hardpoint of this character |
-| 5 | 10 | u32 0/1 | 0 = the sequence takes the object over (AI off; for the player also input off), 1 = control handed back |
+| 5 | 10 | u32 0/1 | 0 = the sequence takes the object over (AI off; for the player also input off; a Character is shown, below), 1 = control handed back |
 | 6 | 10 | u32 0/1 | hide / show |
 | 7 | 18 | u32 message, u32 parameter, u32 flags | send the message to the object (with a parameter when non-zero) |
 | 9 | 18 | f32 time scale, u32 field of view (deg), u32 interpolation (low 3 bits) | camera lens |
 | 10 | 6 | — | marker; ignored by the runtime (6 uses, all on Camera tracks) |
 
 Tags 2 and 8 have runtime handlers but never occur in retail data.
+
+**Control keys show a Character** [verified]. The control key handler (SUFFERING.EXE 0x450da0)
+sends the object 0x1001 when it takes it and 0x1002 when it hands it back, and keeps a "held"
+bit on the object's component (+0xec +8 bit 0x8000). A Character's catch-all (Suffering.rfl
+0x100e1e20) offers a message to its behaviour stack first, then to the Character message handler
+(vt +0x118: 0x100e3ab0; Burrower, Fester, Inferna, Killjoy and Rat override it and pass 0x1001
+on). Its 0x1001 case (0x100e19e0 with 1) pushes the sequence behaviour and ends in
+SetVisible(1) (vt +0x128, the call a Visibility Toggler makes). Once that behaviour is on top it
+takes a second 0x1001 itself (0x100e9dc0) and pops on 0x1002; nothing hides the character at the
+hand-back. So a character placed hidden (instance flag 0x1 clear) appears when a scene takes it
+over, with no show key on its track. Retail cases: 1b's Hermes 7eb4 and Killjoy 7eb5
+("Camera" #247; Killjoy again in #249), 1c's Killjoy 7ab8 ("Victim" #270, the monitor broadcast),
+5b's Killjoys (#9, #10, #11, #13, #17) and 2's Hargrave 31cb (#3). In 1b the scene then hides
+Killjoy itself at 6.15 s ("Projector OFF", the projector's p15) and shows him again at 59.09 s
+(the projector's p16), which only makes sense if the take had shown him. The port: `StompRun`
+hands control keys to its sink (also while skipping) and the world shows a Character other than
+the Player on its first take (`world/logic.ts stompTakeShows`; tests/sequence-take-shows.test.ts).
+Without it 1b's Hermes never drew in the scene that raises him out of the valve pipe, nor in the
+arena after it (docs/playthrough.md bug 79).
 
 **Transform keys.** The stored quaternion is the *inverse* of the object's engine rotation
 (world → object, the engine's row-vector convention), for every kind of object alike; the
@@ -1376,6 +1543,84 @@ Property reads look like `props->vt[2](propIndex, -1)`.
   hand and pulls him in (clips 12:198 / 12:197 against his 12:70 / 12:180); without it the body
   rose into the duct on its own. The same rule shows 1b "StompHatch", the 4b dolls and other
   scripted props in later levels.
+- **Torn-off doors: the door model plays its own clip** (1a "CartWheeler" #223, the guard
+  booth before the sally port puzzle; playthrough bug 75). STOMP Player `5db4` (sequence
+  `12:223`, flags 0x46, 5.54 s) starts when the lobby statue is pushed into Detector `8b3d`.
+  - **What the sequence does to the door** [verified data]. No track has an attach key: the
+    door never hangs on a hand bone, and nothing is launched by physics. At 0 s the real door
+    (Switch `512a`, model 9:1997, origin on its hinge edge at floor level: the model spans
+    x 395..397 from the origin at x 395) gets Destroy and is hidden through Visibility Toggler
+    `68aa`. In the same frame a stand-in, "Door" (Breakable `68a8`, template 9:3098, skinned
+    model 9:2304, parked at the off-map staging area), gets a step transform key onto the real
+    door's spot ((395.00, 88.65, 478.00), yaw 90) and the animation key clip 9:43 (5.53 s, plays
+    once; key flags 0, so every root-motion axis stays in the pose). 9:2304 is the same door
+    (same submeshes and UVs) rigged with two bones: the root at the object origin, which skins
+    nothing (the clip's root track names hash 0x16f4f95b, not in this rig, so the root keeps
+    its bind pose), and the slab bone 0x00fcb24c, which carries all 356 vertices. The clip
+    moves the slab: shaken and pulled out of the frame towards the camera (0 to 2.5 s), raised
+    and thrown (2.5 to 3.2 s), lying flat on the floor from 3.2 s. The CartWheeler (`68e8`) is
+    keyed onto the same spot at 0.01 s with its own clip 10:1697 (5.53 s): the two clips are
+    authored against each other from one origin, like the paired kills (§7).
+  - **After the cutscene** [verified data]. At 5.53 s the stand-in is keyed back to the staging
+    area, "StaticDoor" (Breakable `693c`, its .ldu record draws 9:2322) is keyed onto the floor
+    where the clip left the slab (bounds agree within 0.1 m), and `68aa`'s Show reaches `512a`,
+    which stays hidden because it is destroyed (bug 2). The doorway stays empty, the thrown door
+    is `693c` for the rest of the level, and the CartWheeler (released at 5.53 s, On at
+    5.54 s) fights. `693c` is drawn with its .ldu colours, which the engine uses as read
+    (docs/re/renderer.md §1.9) [strong].
+  - **The port's bug** [verified in headless Brave]. Transforms, clip, visibility and the swap
+    were already right: per frame, the skinned slab's vertex bounds matched the decoded ones
+    within 1 cm, with `512a` hidden from the first frame. The slab was drawn wrong. Its
+    material 7:764 is Layered: a reflection base (7:257, texGen 4), the door's diffuse in
+    mode 7 (7:256, src + dst x alpha, whose alpha masks the reflection), and a modulate-2x
+    detail (7:734). The character skin (`buildSkinnedMesh`) drew only the material's single-pass
+    texture 7:256 and cut its alpha at 0.5 as if it were coverage. An opaque lit pass never
+    alpha-tests in the engine, so this was wrong: the door showed as rusty strips with the
+    creature visible through it from the first frame, and as a few floating bits in the
+    creature's hands. **Fix** (`app/character.ts characterLayeredSurface`): a skinned submesh
+    whose material has more than one textured pass, over a lit base, is drawn through the surface
+    material (every pass, as on every other model), lit by the object's light set (new
+    `lightSet` option of `createSurfaceMaterial`; such objects cast projected shadows but do not
+    receive them, as with `engineLitColor`). The rule is general: it covers 26 submeshes of
+    18 skinned models. Among them are the other sequence doors (the cell door 9:2391 of
+    "BustedDoor" #43, the corridor door 9:1927 of "Door" #71, 9:3117), the rubble 9:2659, the
+    Slayers' blades (10:2 / 10:94) and parts of the NPC models 10:31 / 10:40 / 10:137 / 10:156.
+    Those had no fallback, so the skin drew their reflection base on mesh UVs. Strips (frozen game clock, same nine
+    sequence times) before / after: the door closed in its frame at 0 s, pulled out at
+    0.6 to 1.8 s, overhead at 2.3 s, then gone from view. Test: `tests/sequence-door.test.ts`.
+  - **Follow-up: every skinned pass decides its alpha as a static one** (playthrough bug 78).
+    The engine's pass state (0x48fab0) takes the alpha test from the pass's blend mode alone,
+    never from the texture: modes 0 and 7 have none, 1..6 keep alpha > 2 / 255, 8 (mode 1 on a
+    1-bit-alpha texture, promoted at draw time) > 200 / 255 [verified; docs/re/renderer.md
+    "Alpha test, blend and coverage"]. The static path already followed this; the skin cut any
+    texture with alpha at 0.5 and drew single mode-7 passes as opaque. A census of all 507
+    skinned submeshes (every package) found 10 that differed. Now both paths share
+    `surface-material.ts surfaceBaseBlend / surfaceAlphaTest` (`character.ts
+    characterAlphaTest`):
+    - **Opaque passes no longer cut (6):** Fester 10:40 part 4 (10:1338 = 10:352, a DXT5
+      whose alpha is the reflection mask in the Layered part 3, 99 % below one half: the
+      part was all but invisible); the trunks (part 2, 23:343 / 23:344, a few transparent
+      texels) of the Outdoor Common trees 23:135 / 137 / 138 / 140 (Animating Static, in most
+      levels); the lettering decal of the Prelude's PoliceBoat 55:1 part 10 (55:12, Simple
+      mode 0 over the DXT1 punch-through 55:11). That decal is not a cut-out in the original:
+      mode 0 draws it whole, and Direct3D decodes its transparent texels black, so the
+      lettering sits on a black band (`texture.ts punchThroughBlack`: every pass that does not
+      cut a punch-through texture now samples those texels black; only cut-out passes keep the
+      bled colours) [verified: Simple builder 0x48f300 copies word 2 as the mode, no override].
+    - **Single mode-7 passes blend (4):** Horace 10:135 part 0, the 1a Static Object 10:89,
+      5b's Animating Static 28:46 part 0 and the Docks Breakable 34:87 part 2 (7:627 / 29:888
+      / 7:1079, Advanced mode 7 over the reflection-mask diffuses 7:187 / 7:168 / 7:338). They
+      take the lit surface material (`characterLayeredSurface`): src + dst x alpha, no test, no
+      depth write, lit by the object's light set. The skin had cut 96..99 % of each away.
+    - **Cut-outs stay cut (34):** hair, foliage and fence cards (mode 8) keep their test, now
+      at the static surfaces' CUTOUT_ALPHA_TEST with alpha to coverage and coverage mips
+      instead of 200 / 255 [port, as for static cut-outs]. On their 1-bit textures this moved
+      no pixel measurably in the comparison renders.
+    Renders (headless Brave, 1a, each model built in the cell, Original and Enhanced Medium,
+    HEAD and after): Fester's part 4 appears as solid flesh; the mode-7 parts appear as dark
+    translucent panels / tubes; the boat lettering sits on its black band; the tree foliage and
+    the nine cut-out models rendered (NPC hair / cloth parts, 21:15, 23:134, 4:115, 4:282,
+    9:3938, 34:82) are unchanged. Test: `tests/surface-alpha.test.ts`.
 - **Skip and screen effects**: Screen Faders / Blurs (insanity system) run on game time; after a
   skip they get the skipped time at once (`EffectDirector.fastForward`), so they show their
   state at the sequence end ("Goose" opens on a black fader holding 3.75 s: skipping early left
@@ -1458,8 +1703,8 @@ Property reads look like `props->vt[2](propIndex, -1)`.
    frame's gather and once the upload holds a light, and 0x42c6f7 calls +0x98, not +0x84. The
    gather takes the lights that are on then, in the groups that hold the object (renderer.md
    §1.9). An object hidden at start is not drawn (SetVisible clears +8 bit 0, 0x4541a0), so the
-   Shiv is lit when it is first drawn after being shown. `world/dynamic.ts loadPassBefore`
-   gives objects without instance flag 0x1 every static light that is on at load. [port: the lights
+   Shiv is lit when it is first drawn after being shown. `world/dynamic.ts loadTimeSet`
+   gives every unbaked placed object every static light that is on at load. [port: the lights
    on at load stand for those on at the reveal; in "Goose" relay `5f1b` turns all lights on in
    the same step that shows the Shiv.] Its cell lamp `5c06` is under "cell 4", like the Shiv,
    so the group rule keeps it. The lamp is switchable, and the port bakes no switchable light
@@ -1469,15 +1714,14 @@ Property reads look like `props->vt[2](propIndex, -1)`.
    grey metal (about 70, 60, 44 on screen; the same with `?nobatch`); now it draws about 0.75 of
    that. Test:
    `tests/static-light.test.ts`.
-   **Start-visible objects without .ldu colours** (doors, pickups, map packs, the batteries
-   `7822`) keep the lights stored before them. In 1a that is nothing for every cell door and for
-   21 start-visible pickups, so they show only their switchable lamps per frame. By the code,
-   their first draw happens with every light present. The PC capture of the cell 6 door `587a`
-   at 126.7 s of "Goose" contradicts that: the bars reach p95 180 against 255 when lit with
-   every light, and their shadow sides are without ambient. The doors and the pickups share
-   everything that was checked: the scene object class, the draw path, a ref of 0:0 and similar
-   model header flags. So the pickups follow the doors [inferred: the code path that keeps
-   these colours dark was not found; renderer.md §1.9]. Test: `tests/static-light.test.ts`.
+   **Start-visible objects without .ldu colours** (doors, lockers, pickups, map packs, the
+   batteries `7822`) are lit the same way: their first draw, too, comes after every light exists
+   [verified code: nothing draws the world while the level loads; renderer.md §1.9]. The port
+   used to keep only the lights stored before such an object (its level index) to match one PC
+   capture of the cell 6 door `587a`; in 1a that left every door, locker and most pickups with
+   black colours (no ambient: the root Ambient Light is index 3206), pitch black in a dark room
+   (user report, docs/playthrough.md row 69). The comparison it rested on had baked the
+   switchable lamps into the colours too. Test: `tests/static-light.test.ts`.
 4. The guard room west of the cells (guards `7acd` / `7ace` / `7acf`, alive and dormant at
    379-383, 527-535) is swapped for its corpses: Message Relay `7ada` relays on **Disable** (5)
    and sends On to Visibility Toggler `7af3` (shows the corpse doubles `7af0`-`7af2` and the
@@ -2139,9 +2383,13 @@ one-shot clips did). They take damage without fighting back (WaypointBehavior p3
   insanity attack (state 29).
 - **Sounds** [verified]: Melee Weapon p74 holds the swing sounds and p71 the hit sounds. §4.4
   had them swapped.
-- **Melee auto-face:** Player p173 = 350 °/s is the turn rate "while auto-facing the melee
-  target with no turn input" (docs/re/player.md §12). How that target is picked was not
-  traced.
+- **Melee auto-face:** decoded in §14.1 "Player melee: facing and auto-face". The creature
+  runs the human's states with 2:240's values: a p223 = 105° cone around the body's facing,
+  its PWP 2:241 p10 = 6 m, the nearest first (p224 0.1 / p225 1), and a turn of p173 = 350 °/s
+  with no turn input.
+- **Melee root motion:** decoded in §14.1 "Player melee: root motion". The creature's strikes
+  move by their root, the forward part x PWP 2:241 p85 = 0.5 with no target on the ground; the
+  p89 alternates are class 3 and always move by their whole root (2:366: 4.8 m).
 
 **The port** (`src/game/insanity/melee.ts`, `creature.ts`, `system.ts`):
 
@@ -2155,8 +2403,9 @@ one-shot clips did). They take damage without fighting back (WaypointBehavior p3
   blow.
 - The damage point is the contact on the claw, so head and weak-spot filters see where the
   blow landed.
-- At the start of a swing the body turns at p173 = 350 °/s toward the nearest target ahead of
-  the view within 3.5 m, or else to the view [inferred target choice].
+- Melee auto-face: the shared `weapons/melee-face.ts` (§14.1). It replaces the earlier guess,
+  which picked once the nearest target within 3.5 m ahead of the view and turned only the
+  body.
 - **Removed:** the 3 m air slam.
 
 **Why the player's attacks did no damage before:** the hit was a single 2.4 m + body-radius,
@@ -2187,8 +2436,21 @@ means the meaning was read off the retail values and the port's behaviour, not o
   generators (sparks every few seconds from a broken lamp), **Radius Damage** (explosive props)
   and break sounds (generator p36, one picked at random). No chapter-1 break drops an item.
 - p0 health, p1 max health; p7 **Damage Resistance** attachments: p0 damage type, p1 multiplier
-  (0 = immune) [strong: structure; the type names are not in the data]. The port maps
-  melee 1, bullet 3, explosion 5, fire 6 [guess].
+  (0 = immune). The rule is GameObject damage's (0x100a31b0 -> 0x100a2dc0, docs/re/properties.md
+  §1) [verified]: x1, or x0 when **p5** (`immuneToUnlisted`) is set; the first p7 attachment of
+  the blow's type replaces it with its p1, else the global list (Level Properties p46: types 14
+  and 6 at x0). Types: bullets 1, explosions 3, fire 5, shiv 10, shotgun 13 (properties.md
+  table). The port's props took only the p7 match (the last one) and ignored p5 and the global
+  list until 2026-10 (bug log #73); `props.ts damage` now calls `resistanceMultiplier`
+  (fx/gas.ts), the same function the characters use.
+  - Census of damageable props with p5 set [data, all 18 levels]: the junk pile **9:5353**
+    (model 9:3907, 5 health, Damage Resistance 2:662 type 3 and 2:670 type 5, both x1: explosions
+    and fire only) in 1a (82f0 / 6da0, invulnerable until scripted), 1b (843b / 843c / 843d /
+    88a9 / 88aa), 3a (3585 / 3586 / 3587 / 3820) and 3b (a4d / 2176); 6b's gas tanks
+    13a3 / 13ad (2:491, fire only; their sibling 13ac has no p5 and is the one a bullet sets
+    off); 8b's 181f / 1929 (2:489, explosions only); 9's 18c4 / 18c5 (fire only): neither bullets
+    nor blades hurt these. 1a's TargetableBreakable 8b35 (10:1636) also has p5, but lists types
+    1, 5, 10, 11, 12 and 13.
 - Messages: p11 BlowUp breaks (with effects), p12 Destroy removes it without effects [guess],
   p13 / p14 invulnerability on / off; p15 is fired on every hit, **p21 when it breaks**
   [strong: instances route p21 to Count Down To Zero (Decrement), lamps' lights (Off), other
@@ -2205,6 +2467,220 @@ means the meaning was read off the retail values and the port's behaviour, not o
   Down 18f6 sends Enable, could not be locked at all and then could not be grabbed, because the
   use test also asked for p22).
 - Radius Damage [inferred]: p0 damage, p3 / 2 radius (m).
+
+**Melee on props** [verified unless marked; code `src/game/weapons/melee-sweep.ts`, the strike in
+`weapons/system.ts`, tests `tests/melee-props.test.ts`]. The player's Melee Weapon breaks props
+the way it hurts characters: one sweep code for both.
+
+- **Arm window.** The strike clip's Arm marker (100) arms the Melee Weapon in the hand
+  (0x100ca210, clearing the list of objects struck); the arming frame only records the blade's
+  place. Every frame until the next Disarm (101; 0x100ca4c0 waits for one sweep) the blade is
+  swept from its previous place to its current one (0x100cb6c0 -> 0x100caff0).
+- **Blade.** The weapon model's type-7 node list (§13.9): the shiv 4:79 (model 4:23) is a
+  segment from the hilt to 1.23 m along the blade (-z), so its reach is about 1.2 m past the
+  hand.
+- **Candidates.** The engine's collision query over the swept volume, with the class filter
+  reset and then off for Collider (0xfa5951fc), Invisible Static Object (0xaa7d6985) and
+  category 10 (Item); at most 8 a frame. There is no class test past that: Breakables,
+  Pushables, doors and characters all are candidates. The wielder and what rides on it are left
+  out (0x100c9ca0). Level geometry is not a candidate.
+- **Hit test per candidate** (0x100c9de0): a character by its posed skeleton's leaf spheres
+  (0x100c9680); a rigid object by its model's own leaf volumes moved by the object's matrix:
+  leaf boxes (0x100c99c0, the swept quad's six edges against each oriented box, 64-byte
+  records) when the model has them, else leaf spheres (0x100c9810: sphere against the quad's two
+  triangles). The crate 7:692 holds one leaf box, its bounds (1.16 x 1.07 x 1.12 model units).
+- **Wall test** (0x100c9490), for a damageable non-character: a segment from the wielder's x / z
+  at the contact's height to the contact, with the wielder, the weapon and the target out of
+  the query (engine +8 0x400000) and Items, the Player category, Detector, Water Volume and
+  Invisible Static Object filtered off. Any hit cancels the blow.
+- **Damage** (0x100ca920): Melee Weapon p68 (shiv 8) x the Attack's p6 (third-person combo 1 /
+  1.2 / 1.5, first person 1.6), type p70 (shiv 10), force p69 x Attack p7. No class gate: any
+  GameObject. The prop's own damage then applies the resistance rule above. There is no minimum
+  damage and no "melee only" flag; p5 plus a list of types is how designers make "explosives
+  only" props.
+- **1a's crate** (Breakable 8153, 7:1842 at scale 1.2, 13 health, no p5, no attachments; its
+  p21 BlowUps the chairs 80eb / 80ee, Relay 83bd and EdgeToggler 8498): the shiv breaks it in
+  two blows (8 + 8 or 8 + 9.6; first person 12.8 + 12.8), the revolver in three (6 a shot).
+  The game's own shiv help popup tells the player to smash through objects with it [data].
+
+**Port.** The blade (the held model's type-7 shape, placed by the drawn hand: the arms in first
+person, the body in third) is swept every frame of the Arm window; the swept quad is sampled by
+segments (the blade at four points of the frame's move, then the hilt's and the tip's paths),
+each cast both ways against the collision world and on past every hit, so a gate's bars in
+front of a crate do not hide it [port stand-in for the leaf boxes / spheres: the props' own
+meshes]. Each body once a window, then the wall test, then `services.damage` with p68 x p6 and
+type p70. Characters keep their own hit choice (the nearest in reach and in the 55-degree cone at
+the Arm marker, around the body's facing) [port]. The empty-handed punch (an engine addition) has no blade: one ray from
+the chest along the body's facing.
+
+**Why the shiv could not break the crate** (bug log #73): props were found by one ray of 2.5 m
+from the *camera*. In third person the camera sits about 2.6 m behind the body and 3.4 m up, so
+the ray ended before the body and nothing in front of the player was ever reached; shots, which
+travel from the camera, did reach it.
+
+**Player melee: facing and auto-face** [verified unless marked; code
+`src/game/weapons/melee-face.ts`, used by `weapons/system.ts` (shiv, fire axe, the empty hand) and
+`insanity/creature.ts` (the creature form, which runs the same Player states); tests
+`tests/melee-face.test.ts`].
+
+- **States.** Attack (3, enter 0x10029990) passes a Melee Weapon, or the creature's empty hands,
+  on to MeleeAttack (4) or, in first person, FP Melee Attack (32). Every human Attack template
+  (2:376..2:378, 2:393, 2:432, 2:653, 2:654, 2:433) has p9 = 1, which also enters Aim (2) with the
+  strike (0x1002a318). While 4 or 32 is on, the input handler enters Turn (5) every frame
+  (0x100496c8..0x1004971d), and Aim's per-frame (0x10045830) runs the melee target pick. Both
+  run from the strike's first frame through its recovery clip: state 4 ends only after the
+  combo's last clip (0x1002a13f..0x1002a306).
+- **The pick** (0x1004b350), every frame. It scans the character list (type 7).
+  - The candidate must be an enemy of the player (0x100e4a50).
+  - Its template p128 must be at least the best priority so far, which starts at Player p219 = 5.
+    Creatures have 10 (some 5) and humans 1, so **inmates and guards are never picked**.
+    Props are not characters and are never picked.
+  - It must be within the held Player Weapon Properties' **p10**: 4 for the shiv (2:303) and the
+    fire axe (2:431), 0.01 for the empty hand (2:409, so nothing is ever picked), and 6 for the
+    creature (2:241). The distance is 3D, between the object positions.
+  - Its direction must be within Player **p223** of the **body's** horizontal forward
+    (0x10045470: the player's yaw turned by the gait offset +0x5ae). That is 90° for the human
+    (the whole front half) and 105° for the creature. The candidate's height counts in this angle.
+  - A ray to it must be clear (0x100c7270).
+  - Score = p224 · angle / p223 + p225 · distance / range. A lower score or a higher priority
+    wins; the score to beat starts at p224 + p225. The human has 1 / 0.1 (the most centred
+    wins), the creature 0.1 / 1 (the nearest wins).
+  - The result becomes the player's target (vtable +0x70 → +0xc). No candidate clears it.
+- **Not the aim assist.** The pick is not the console auto-target (+0x664, Ranged Weapons
+  only, §docs/re/player.md 3) and not the camera's aim point. The search starts from the body's
+  facing.
+- **The turn** (Turn per frame 0x10046dc0). It needs states 4 / 32, **no turn input** this
+  frame, and a live target.
+  - The angle from the body's forward to the target is closed at the state's rate without
+    overshoot: the input becomes −angle / (rate · dt), clamped to ±1.
+  - The rate is Player **p173 = 350 °/s**. In first person it is p167 = 220 °/s, because the
+    first-person rate is chosen first.
+  - The rate turns the player object (0x1000d5c0), so the view turns with the body. The camera
+    follows the player's yaw as it does for mouse turning [strong; the third-person camera code
+    was not located].
+  - With turn input the player turns at the normal rate (Aim p164 = 220 °/s) and nothing is
+    auto-faced that frame. With no target there is no auto turn.
+- **First person** runs the same pick and turn (state 32), at 220 °/s.
+- **Body vs view in general.** The body is the player's yaw plus the offset +0x5ae, which only
+  the gait sets.
+  - Moving, the offset is the stick's deviation from the heading set's centre: at most 45°,
+    plus the set's 10 % hysteresis.
+  - When Move leaves (0x100457f9), the offset's goal becomes 0, and the main per-frame
+    (0x1004c33b) turns it there at Player **p133 = 170 °/s**. So a standing body faces the view.
+  - Mouse turning turns the player object, body included. Nothing makes the body face the
+    camera "because a weapon is drawn": the body follows the view as it always does.
+- **Root motion**: decoded below in "Player melee: root motion" (the strike's root carries the
+  player; without a target on the ground its forward part is scaled by the PWP's p85).
+- **Not traced.** Aim's guard 0x10120c30 (state-machine fields +0x6a / +0x6e against Player
+  p26 · 2048) skips the pick when it holds.
+
+**Port.**
+
+- **Swing start.** The port's third-person camera can orbit a standing body; the original turns
+  the player instead. So when a third-person swing starts, the body takes the facing the
+  original's would have: the view when standing, or the current gait offset clamped to ±54°
+  while moving [port mapping].
+- **Every frame of the swing.** From the strike through its recovery clip, `MeleeAutoFace.step`
+  runs the pick from the body's facing, using the templates' values (Player 2:5 / 2:240 p219,
+  p223..p225, p173, p167, and the swung PWP's p10). With no yaw change since the previous frame
+  (the port's turn input: mouse, stick or turn keys), it turns the view yaw and the body
+  together toward the target.
+- **Characters.** The port's hit choice on characters (the nearest in reach and in the
+  55-degree cone at the Arm marker) now uses the body's facing, which is the view in first
+  person. It used the camera's yaw.
+- **The creature form** uses the same code with 2:240's values. It used to pick once, the
+  nearest within 3.5 m ahead of the view, turn only the body, and turn to the view when there
+  was no target [inferred].
+- **Gun aiming is unchanged**: none of this runs outside a melee swing.
+
+**Why the first third-person swing at 1a's crate missed** (bug log #77): the body stood as it
+was, facing the gate, while the camera looked at the crate. The port's camera had orbited the
+standing body. The blade swept where the body faced.
+
+**Player melee: root motion** [verified unless marked; code `src/game/weapons/melee-lunge.ts`,
+used by `weapons/system.ts` and `insanity/creature.ts`; the motor input `moveX / moveZ`
+(`app/physics.ts`) and `PlayerController.rootMove / holdMove` (`app/player.ts`); tests
+`tests/melee-lunge.test.ts`].
+
+- **How the animator moves its object** (SUFFERING.EXE 0x478b90, called from the pose update
+  0x46f246). Each axis of the root bone's translation can be *extracted* (animator flags
+  0x10 / 0x20 / 0x40) or *locked* (0x100 / 0x200 / 0x400); the setters are animator vtable
+  +0x64..+0x88 (+0x70 = extract x, y and z, +0x80 = lock x, y and z). For an extracted, unlocked
+  axis the root's sampled translation minus last frame's becomes the delta; locked or not
+  extracted, it is zeroed (0x478d8b..0x478dbc). The delta is scaled per axis in model space by
+  animator **+0x64 / +0x68 / +0x6c** (x, y, z; 1 from the constructor, 0x46d099), turned by the
+  model's matrix (0x4790c1..0x4790d3) and added to the object's pending matrix, the one its
+  vtable +0xf0 returns (0x4546d0). The gait adds its speed x stick x dt to that same matrix
+  (Move per-frame 0x10046851..0x10046872), so the lunge is moved, collided and grounded by the
+  same mover as walking [the mover itself not traced: strong]. +0x68 is also what the clamber
+  scales to the ledge height (0x100119e0, §14.5), and Jump writes +0x6c with its power.
+- **Which states extract** (the sites of +0x70 / +0x80 in the Player state handlers):
+  - Move (1): per frame while moving, extract off and lock on; leave, extract on and lock off.
+    Idle (6): enter off, leave on. So walking never uses root motion.
+  - **MeleeAttack (4) enter 0x10027970: extract on.** Entering 4 ends Move and Idle (state
+    transition table 0x10175150, entry [new·35 + old]: 0 refuses the new state, 1 lets both run,
+    2 ends the old one; [4][1] = [4][6] = 2), and Move cannot start while 4 runs ([1][4] = 0).
+    So a third-person strike stops the player's walking at once (Move adds no momentum) and the
+    clip's root carries him until the combo's last clip ends.
+  - **FP Melee Attack (32)** touches neither flags nor scales and runs beside Move ([32][1] = 1),
+    whose lock then holds. Its clips (2:218 shiv / empty hand, 2:269 axe) have a rotation-only
+    root with a zero constant [data], so **first person never lunges**.
+  - Others: Jump (8) enter on, Fall (9) enter off / leave on, Landing (12) enter on, Roll (15)
+    enter on, Hit Reacting (17) enter and per frame on, Interact (22) per frame on (and the
+    rotation, +0x84), LadderClimb (27) enter on, the unnamed state 0 enter on.
+- **The z scale** (MeleeAttack per frame 0x10029ff0, every frame): **1** when the player is off
+  the ground (+0x98 bit 0 clear), or when the melee target (+0xc, the pick Aim made this frame;
+  a stale handle is released and cleared) is live, or when the attack class playing (+0x404) is
+  3, the p89 list (the creature form's alternate attacks); **else the held PWP's p85**: shiv
+  2:303 and fire axe 2:431 0.5, the creature 2:241 0.5, the empty hand 2:409 1 (its p10 of 0.01
+  never picks a target anyway). x and y are never scaled. MeleeAttack leave 0x1002a370 puts +0x6c
+  back to 1. Because it is read every frame, a target that enters or leaves the pick mid-swing
+  changes the rate from that frame on.
+- **Walls, ledges, creatures** [strong]: the delta joins the mover's own move, so whatever stops
+  walking stops the lunge, and a lunge over a ledge drops the player into Fall, which runs beside
+  MeleeAttack ([9][4] = 1, [4][9] = 1); in the air the scale is 1.
+- **The clips** [data]. Root forward (-Z) distances: shiv / empty hand 2:124 0.80 m (0.2 s) +
+  recovery 2:212 0.05, 2:210 0.87 + 2:211 0.11, 2:209 1.18 (no recovery); axe 2:523 0.82 +
+  2:521 0.13, 2:522 1.37 + 2:520 0.43, 2:261 1.20; creature 2:354 1.24, 2:351 1.42, 2:352 1.40,
+  2:353 0.46, 2:350 1.62, alternates 2:366 4.84 (with 0.10 sideways) and 2:370 0. The root's y is
+  0 in every strike. The human strikes and recoveries cut in (header blend 0), so the motion is
+  each clip's own root in turn; the creature's recoveries blend in over 0.2 s, and how a blend
+  moves an extracted root was not traced (the port plays no creature recovery).
+- **Other player clips with root motion the port does not run through this path**: hit
+  reactions (Player p89 Hit Reaction 2:128 3.0 m back in 0.53 s, 2:130 / 2:131 0.55 m back; the
+  port plays no player hit reaction), the landing clips (PWP p160 / p161 2:89, 0.4 m forward in
+  0.1 s), the third-person jumps (p151..p153; the port keeps TP_JUMP_SPEED, docs/re/player.md
+  §5.1), LadderClimb. Already moved by their own root elsewhere: Roll (`hud/actions.ts`), use
+  animations (`world/use-anim.ts`), the clamber (`world/interact.ts`). The draw / holster clips
+  have no root motion [data].
+
+**Port.** In third person, from the strike to the end of its recovery (the window the
+auto-face runs), `MeleeLunge` samples the playing clip's root track on the clip's own clock
+(rate included), applies the z scale every frame (`meleeRootScale`: on the ground, this frame's
+auto-face pick, the p89 class, p85), turns the delta by the body's yaw and queues it on
+`PlayerController.rootMove`; the next motor step moves the capsule by it together with its own
+velocity move (`moveCapsule`, then the ground probe). The strike zeroes the ground velocity and
+sets `holdMove`, which ignores the movement input until the window ends. The creature form does
+the same per swing (its alternates unscaled); the port hands the creature's body back to
+locomotion at 90 % of the clip, so the rest of the root goes with that frame. First person: no
+lunge, the stick keeps walking. The port's characters do not block the player's capsule (they
+push apart), so a lunge into a creature ends against it as walking does.
+
+Measured in 1a (headless Brave, third person, 399 / 507.5, `tools/playthrough.mjs --keep`),
+distance along the body's start facing against root x scale:
+
+| Swing | Measured | Root x scale |
+|---|---|---|
+| shiv 2:124 + 2:212, no target | 0.423 | (0.798 + 0.049) x 0.5 = 0.4235 |
+| shiv, three strikes with recoveries, no target | 1.502 | (0.798 + 0.049 + 0.870 + 0.109 + 1.179) x 0.5 = 1.5025 |
+| shiv, CartWheeler picked 2.8 m ahead | 0.846 (turned 16°) | 0.798 + 0.049 = 0.847 |
+| shiv, running into the swing | 0.423 (no walking in the window) | 0.4235 |
+| shiv, wall 0.55 m ahead | 0.319: the capsule stops at the wall (0.35 = its radius) | |
+| fire axe 2:523 + 2:521, no target | 0.474 | (0.822 + 0.126) x 0.5 = 0.474 |
+| first person, shiv | 0 | (2:218 has no root translation) |
+| creature 2:354, no target | 0.621 | 1.241 x 0.5 = 0.6205 |
+| creature alternate 2:366 | 4.838 forward, 0.102 sideways | 4.838, unscaled (class 3) |
+| creature 2:354, CartWheeler picked 4.2 m ahead (1b) | 1.241 | 1.241, unscaled (a target) |
 
 Port: props are taken out of the static merge (`PROP_CLASSES` in `dynamic.ts`), get health,
 take `services.damage`, spawn their p18 generator, fire p21, and are hidden; the broken remains
@@ -2376,6 +2852,36 @@ save provider.
   - Checked in headless Brave, spawned in the 1a cell with before/after strips: the 4:1162
     sparks, the 3:1468 door sparks, the 4:1146 metal impact, the 3:1524 sparks, gun blood
     4:1109 + 4:1125, shiv blood 4:1142 and 3:4658.
+  - **Streak quads were culled** (user report: "you can turn the water on in the showers but
+    the water coming out is not visible at all"). The p48 = 1 pool drew the engine's mirrored
+    frame by scaling the sprite quad by -x. A mirror turns the quad's winding round, and the
+    sprite material culls back faces, so from b42f105 on no p48 = 1 particle was drawn: 1a's
+    shower spray, the metal-impact sparks, gun and shiv blood, glass. The pool now mirrors the
+    texture's u instead (the same picture, the quad's winding kept: `StreakSpriteNodeMaterial`,
+    tests/particle-streak.test.ts). The shiv blood "checked" above was the p48 = 0 part of each
+    burst.
+  - **The 1a showers** [data]: three columns (Switches 5f0b / 5fbb / 5fbc, template 9:2849, at
+    x 429 / 417 / 423, z 466). The switch's On (p64) and Off (p65) go to four spray heads each
+    (3:1793 at 101 m: p1 4 m/s down the local y axis turned by the 160 / 190 deg pitch, 50 a
+    second, additive p46 = 1, p48 = 1 streaks of texture 3:301 (a thin grey streak, 0xa5, alpha
+    up to 0.78) in 0x484a4d, 7-10 cm, 0.35 s fading from the start), two floor steam fountains
+    (3:1889 / 3:1890: 0x202020 additive puffs of 4:1829, 0.8-1.1 m, 9 s, spin ±45 deg/s, rising
+    0.25 m/s), a looping water Sound Effect (3:208, fade-in 0.75 s) and an Object Generator
+    (3:4699, one 3:4700 "Blood Point Generator" a second: washes blood off; not drawn). The
+    same templates run 2 Cellblocks' showers (13 columns, 56 heads) and 3b's (3 heads, 11 + 10
+    steam fountains).
+  - **Particles: doubled** [strong; docs/re/renderer.md §1.8]: the billboard's vertex colour is
+    the particle's colour word unhalved (0x4ad888 copies particle +0x30 to the four vertices;
+    the update only rewrites its alpha byte), and the quad is drawn at once from the particle
+    system's render inside the world loop, where texture stage 1 adds stage 0 to itself. So a
+    particle writes saturate(2 x texture x colour), alpha not doubled (`particlePassColor`). The
+    port drew them at half: the spray added at most ~9 / 255 per streak, the steam half its
+    glow. Every Particle Fountain pool (additive, alpha, lit) now doubles in gamma
+    (`engineStages`), Enhanced without the clamp as for its other world passes.
+  - Measured in headless Brave (1a showers, 5fbc on; before = the old pool emulated in the same
+    build): Original, zoomed on the heads: streaks drawn where there were none (px +20 over the
+    before frame: 0 -> 1123 of 146 k); the steam view's mean luma 50.6 -> 53.4. Enhanced Medium:
+    1.2 / 0.5 mean luma up, the streaks visible likewise.
 - **BouncingObject trail and launch** (1a "Hat Gen" `7047`, Object Generator 3:1480, On at
   7.69 s of #280: the stabbed guard's cap 3:1481, model 3:477).
   - p36 lists Particle Fountains the piece carries [inferred from the data]. The cap carries
@@ -2713,6 +3219,22 @@ the Space key for clambering).
   game time, 0x1001a990; none in chapter 1), p72 / p73 fired when the view starts / ends [guess].
   The monitors in the world show only their own Animating Material: the engine never renders a
   camera into a texture (renderer.md §3.7); the port's old live feed is gone.
+  **The flashlight stays with the player** [verified for the attachment: the give code
+  0x10038f84 attaches the Flashlight object to the player; the view moves only the camera]. The
+  port's lamp hangs on the view camera, so in a feed it shone from the security camera: its hot
+  spot swept along the walls in front of each camera as it panned and blew out whatever came
+  within a few metres (user report: "the lights seem to flash too bright in the camera feeds,
+  occasionally blinding the camera"). It had nothing to do with the glow chain or the render
+  scale: with the lamp off the feeds' mean luma held within 1 over fixed-pose jitter at 1x and
+  3.46x the internal resolution (3456 px wide, the reference display's Auto at native in Original). Now, while
+  another camera shows the player, the renderer holds the lamp at his eye with his view's axis
+  (`app/held-lamp.ts`; the rigs take the beam axis from `lampAxis`, engine-light.ts and
+  enhanced/lights.ts). Feeds with the lamp on, 12 frames each (mean luma min..max, p99 max):
+  Original 6ddf 35.8..37.5 / 187 -> 18.7..19.7 / 74, 68ad 36.3..40.9 / 151 -> 27.0..31.9 / 138,
+  6dec 31.6..32.7 / 188 -> 22.0..23.2 / 82; Enhanced Medium 6ddf 33.4..34.2 / 148 -> 18.1..19.3 /
+  69, 68ad 35.5..39.0 / 163 -> 24.2..29.0 / 143, 6dec 24.8..29.1 / 96 -> 17.8..22.1 / 77; with the
+  lamp off 6ddf was 18.2..19.2. The main view is unchanged (same pose: mean 36.0 / 36.0 Original,
+  30.2 / 30.2 Enhanced). Cinematics turn the lamp off instead (sequence/system.ts) [port].
 - Toilet: p32 flush generator, p31 swirl model.
 - Ladder: p30 height, p32 bottom / top interaction templates (player 0.85 / 0.5 m off the
   rungs), p33 animation set; W / S climb, the top exits onto the landing.
@@ -2800,13 +3322,32 @@ its template choice vt +0xa0 / fit test vt +0x98 0x100bbe20 -> 0x100bb4e0, the a
 - **Candidates.** Every tick the objects touching the player are listed (Switch, Ladder, Toilet,
   Quest Item Pickup, Pushable, Security Monitor, Mountable, Phone, Light Housing, Clamber Point,
   Unspeakable NPC); the list is cleared each frame. No view ray, cone or camera term.
+  **The volume** [verified code path, §14.2 Particle Fountain, "Who touches it"]: the player's body query (engine
+  object +4) has these interactables as touch-only classes, and a touch-only class needs only to
+  be a broad-phase candidate: bounding spheres (+0xa8) and world boxes (+0x78) overlap. Neither
+  the object's collision tree nor its drawn triangles take part, and there is no use radius in
+  the templates; how far a usable is found therefore follows the two bounding volumes [sizes not
+  measured]. The template fit test below then decides.
+- **The crosshair plays no part** [verified]: the use attempt (0x10036240) and the can-use read
+  no camera or view direction, in either view mode. "Facing" is the body's forward. In third
+  person nothing ties Use to where the crosshair is; a mounted light switch is used when the
+  player stands at it facing it, wherever the camera looks.
 - **On the key** (Use 0x42b; Jump 0x42a looks at Clamber Points only) each candidate is asked
   can-use; "not usable" (3) drops it, locked (1) and busy (2) stay. The winner is the nearest
   by 3D distance from the player's feet to the approach point of the template it would use
   (p15..p17; a character's origin); strict <, last listed first. No priority field.
 - **Switch can-use**: with the object's p23 set, a ray from the eye (player model node p285) to
-  the object must be clear (characters, usables, Colliders, Clamber Points ignored) [the target
-  point: inferred, the object's position]; then the first template of its list that fits:
+  the object must be clear (0x100bae80) [verified]: the segment ends at the object's engine
+  position (vt +0x64), and both the player and the object are taken out of the query for its
+  duration (engine +8 bit 0x400000 set, then cleared), so the object never blocks itself and
+  the wall it is mounted on blocks only when its origin lies behind that surface. The query's
+  class filter is reset and then set with 0 for two classes (hashes 0xfa5951fc, 0xec32498a) and
+  categories 3, 7 and 10 [calls verified; 0 read as "off": strong]; a static hit whose surface
+  record +0x44 is 2 is passed, and so is a hit on an object of class 0xaa7d6985 for which
+  0x100bc9d0 returns 0; any other hit makes it "not usable" (3). There is no ranking against
+  surfaces: occlusion is all or nothing, and among usables the nearest approach point wins
+  (below). p23 = 0 (light switches 7:5, every Mountable, many Ladders) skips the ray. Then the
+  first template of its list that fits:
   - anchor A = M.translation + R_current x (p7, p8, p9) m, M the saved placement (p0 = 1) or the
     current transform (p0 = 0); the offset always turns with the current rotation;
   - horizontal reach feet -> A <= p1, |dy| <= p2;
@@ -2823,7 +3364,7 @@ its template choice vt +0xa0 / fit test vt +0x98 0x100bbe20 -> 0x100bb4e0, the a
   p28 2:538, p30 2 m, p31 90) is taken by walking up to it.
 
 Port (`world.ts pickTarget`, `interact.ts switchReach`, `use-anim.ts switchFit`): the port keeps
-its own prompt (the object looked at) and takes items with E [port]. An item offered (looked at
+its own prompt (the object under the crosshair) and takes items with E [port]. An item offered (looked at
 within ~22 degrees and 2.8 m) now comes first, since the original takes it on contact whatever
 usable is around; then the other usables (`interact.pick`); a Switch is offered only when one of
 its templates fits as above (view yaw for the body's facing: the port's body lags the view
@@ -2835,6 +3376,38 @@ A Switch with no model (the only one is 6a's truck jack a08, Interaction Propert
 box to look at: it is offered when a template fits and the view passes within 0.6 m of its anchor
 (`interact.ts viewOnAnchor`) [inferred: its touch volume is not decoded]. Test:
 `tests/woods.test.ts`.
+
+#### The port's prompt: the crosshair's ray [port]
+
+The prompt names the object under the crosshair, so its ray is the crosshair's
+(`world/use-ray.ts`): from the camera along the view direction. The 3 m reach is measured from
+the eye to the point on that ray, so the usable stretch is where the ray passes within 3 m of the
+head, and it ends 0.15 m past the first surface the ray meets (a switch plate or door box sits a
+few cm in front of its wall). Boxes are the objects' world boxes (a lever with its base), as
+before. In third person the eye must also see the picked point (a collision hit on the object's
+own body counts as clear), so nothing is used through a wall the camera looks over. Items and the
+modelless Switch use the eye's direction to the point under the crosshair. In first person the
+camera is the eye and the test is the old one.
+
+The bug this fixed (docs/playthrough.md row 68): the ray started at the head and ran along the
+camera's direction. The third-person camera sits 3.2 m behind a pivot 0.45 m right of and 0.1 m
+under the head (`app/player.ts updateCamera`), so that ray ran parallel to the crosshair, beside
+it. A 10 x 17 cm light switch 1 m away was found only with the crosshair well off it; levers,
+buttons, the chair switch and items likewise, large doors less visibly. The render scale does not
+enter: the camera's aspect is the canvas's CSS size and the HUD draws the crosshair on the CSS
+centre, whatever the drawing buffer's size (checked at 50 %: within one pixel).
+
+Checked in headless Brave (heat maps: the crosshair put on each point of the view, the game's own
+pick recorded): with the crosshair on the visual middle, before / after in third person, the 1a
+light switches 6847 / 66f4 / 8090, lever 74f9, lever box 704a, button 7c69 and chair switch 8588
+none / all found; doors 4a78 / 79b2, the switch 8826, the ladder 8674 and the use-only items 6ccf /
+7822 found both times; first person identical. 5b's doors 10dc / 10dd are found from 1.1 m on
+either side; the harness's "view targets nothing" there came from more than 2 m away (the doors'
+reach). The gas valve columns 5f0b / 5fbb / 5fbc (Switch 9:2060, Interaction Properties 2:561 /
+2:562 / 2:559 / 2:476, one per side; p64 / p65 drive the gas fountains) are usable: the "Use"
+prompt on them is right where a template fits. 1a's lockers are scenery (no 1a Switch uses a
+locker template 2:322 / 2:323 / 2:425), so neither the original nor the port offers them. Tests:
+`tests/use-ray.test.ts`.
 
 #### Use animations: the Interact state (player state 22) [verified unless marked]
 
@@ -4133,7 +4706,12 @@ JumpAttackLaunch 0x100736b0 / 0x100743c0; JumpAttackStick 0x10073920) [verified 
 - Its eye is 0.6 of the hanging depth below the origin; from the origin, the ceiling beams hid
   the room.
 - With no ceiling route it lets go once the target is in sight within 7 m (the old hanger rule).
-- Ceiling waypoint walks go straight to each waypoint.
+- Ceiling waypoint walks go straight to each Waypoint that hangs on the ceiling. A Waypoint more
+  than 1.5 m under the walker's origin is on the floor below (`waypointBelow`; retail ceiling
+  Waypoints sit 0..0.8 m under their walker, floor ones 2.1..11.6 m): the walk takes the
+  crawler path to it, as below.
+- Blocked within 2 m of a transition edge's crossing point (the ceiling probe finds nothing over
+  a hole in the roof), the crawler lets go where it is.
 - Debug: `__specials.runtime.moves.get(actor)` gives `toCeiling()`, `placeOnCeiling()`,
   `letGo()`, `leap()` and `info()`; surface and mode changes are logged in `__specials.events`.
 
@@ -4145,6 +4723,68 @@ JumpAttackLaunch 0x100736b0 / 0x100743c0; JumpAttackStick 0x10073920) [verified 
 - Death on the ceiling (fall-off sequence).
 - Backing off from the flashlight.
 - #64f8 woken by Detector 75db crawls from over the pit, drops 1.4 m by the booth and fights.
+
+**Coming down to a Waypoint on the floor (user report: "the enemy comes out of the roof and gets
+stuck").** Two retail ceiling starters (p180) are handed a WaypointBehavior whose Waypoint is on
+the floor under them:
+- 1b #6501 hangs in the shaft over the ledges past the arena, 7.6 m over the floor. Detector 89ec
+  (the corridor the player walks down to the ledges), or the first of CartWheelers 6725 / 6726 to
+  die, fires Relay 89ed (count 1). The relay drives Behavior Changer 8306, which hands it
+  WaypointBehavior 8947 to Waypoint 89eb on the floor round the corner.
+- 3b #2c24 hangs under the roof 8.7 m over the floor. Detector 2b8e drives Behavior Changer 2c27,
+  which hands it WaypointBehavior 2c28: Waypoint 2c29 straight under it, then 2cfe and 2cff.
+
+The level graph has a ceiling node right over each (1b 89e9 / 89ea, 3b 2c26 / 2c25). Each links
+by a type 3 edge to the floor node under it (8321, 2a8f) [data].
+
+How the original gets them down [verified unless marked]:
+- **The leg.** A WaypointBehavior goes to its Waypoint by a MoveTo (request built at 0x100e9f90:
+  movement mode from p1, distance p2 × 2048 at +0x1c, default 2 m from the request constructor
+  0x100712f0; MoveTo copies it to +0x4a, 0x10111786). The MoveTo follows a path over the graph
+  (FollowPath). The path is a list of edges (+0xaa, edge table 0x1017bcf4: 40-byte records, type
+  at +0x10).
+- **Next leg (0x1010ed20).** A type 2 or 3 edge's leg ends at the edge's crossing point
+  (0x100d5a40); any other leg ends at its node (child type 0x40).
+- **Leg done (0x10110db0).** With a transition pending (+0xc4), and the character's mover on a
+  ceiling (bit 0x100 of its +0x6c) with the edge of type 3 (or on the floor with type 2), it
+  starts the CeilingFloorTransition (type 0x29). The direction is "down" on a ceiling.
+- **Transition done.** FollowPath drops the edge and starts the next leg. The landed body walks
+  on along the floor nodes to the Waypoint. The WaypointBehavior then ends, and the active
+  behaviour (p69 HostilityBehavior) fights.
+- The ceiling node the path starts from is the one over the body [inferred: the edge locate
+  0x100db660 / 0x100db530 was not followed]. The collision on the ceiling is the character's mover
+  with the up vector flipped (SetOnCeiling, above) [inferred]. The port's probe under the ceiling
+  is its own.
+
+Port before: on the ceiling, a Waypoint walk crawled straight at the Waypoint's x / z. 6501's
+shaft has no ceiling face under the probe (the hole), so every step was refused. It hung there
+on its run clip (`waypoint move`, 0.0 m crawled) for good, Waypoint not reached. 2c24's first
+Waypoint is straight under it, so it counted as reached at once. It then crawled the roof
+towards 2cfe and came down only by the "blocked, target within 11 m" rule, if at all.
+
+Port now (`cartwheeler.ts ceilingWaypoints` / `planCeilingRoute` / `followCeilingRoute`):
+- A Waypoint below goes by the crawler path. The walker crawls its ceiling stretch to the first
+  type 3 edge, lets go at the crossing point (6501 is 0.03 m from it, 2c24 0.7 m) and lands.
+- The floor AI walks on to the Waypoint and through the rest of the chain.
+
+A second fault showed at 2cfe. The landed 2c24 ran rings 0.7 m round the Waypoint: running at
+4.1 m/s and turning at 6 rad/s, its turning circle was wider than the port's arrival test (0.45 m).
+A passive walk's goal inside twice the turning radius and more than 20° off is now turned to on
+the spot first (`actor.ts arrivalTurn`) [inferred: SimpleMoveTo steers with "arrival" weights, not
+decoded; the MoveTo distance +0x1c is handed down to its children (0x1010fcc0) but the
+close-enough test itself was not found].
+
+Checked in headless Brave (strips in the agent's scratch):
+- 1b, the harness route `1b.cp2` -> `1b.ledges` through Detector 89ec. Before: 6501 at
+  (473.68, 81.26, 428.82) in `waypoint move` for the whole step. After: it lets go, drops 7.6 m in all
+  (the let-go clip, then the fall), lands at 73.65, walks to 89eb, turns hostile and fights.
+- 1b, the player under the shaft looking up, and the player on the ledge top: it comes down every
+  time. Landed round the corner from a player who stands still out of its sight, it waits at 89eb
+  (HostilityBehavior with no target seen; its 360° sight is blocked by the wall at x 477.0). It
+  comes as soon as the player shows.
+- 3b, the player in Detector 2b8e. 2c24 lets go, lands at 101.26 and walks 2cfe and 2cff. Then it
+  climbs to the roof by the crawler path, crosses it, comes down by the player and leaps and
+  sticks.
 
 #### 15.7.6 Inferna (inferna.ts)
 
@@ -4533,7 +5173,16 @@ sets up: gas emitters on his bones, a partial opacity, and fades.
   Default range 0..1, not applied until a fade. Hermes (vt +0xc 0x10076be0) sets from = p180 /
   100, to = p181 / 100 and applies the end of a fade-in (p182 != 0) or fade-out (p182 = 0) at
   creation: 1a's Hermes (p180 0, p181 85, p182 1) is drawn at 85 %, 1b's (p182 0) is invisible
-  until the scene fades him in.
+  until the scene fades him in. 1b's is also placed hidden (instance flags 0): "Camera" #247
+  shows him by taking him over at 0 s (§7 "Control keys show a Character"), then raises him out
+  of the valve pipe (17.2..19.6 s) while 154, 206 and 207 give him his plumes and the fade.
+- **Saved games [verified that both are saved].** The Character save writes the fader (+0x562:
+  from, to, duration, elapsed, mode; 0x100ac2e0, read back by 0x100ac330) and the body-part set
+  (+0x31c) with its other components (docs/re/saves.md). The port saves each carrier's fader and
+  the bones holding a body part (`fx.bodyParts` provider: `BodyParts.save / load`,
+  `Attachments.partBones`); a checkpoint in the 1b arena brought Hermes back at opacity 0 and
+  without his plumes before. The set's own record was not traced: the port spawns each saved
+  bone's pair again [inferred].
 - **What opacity does to his skin [verified].** The pass setup (0x48fab0) multiplies a tinted
   layer's TFACTOR alpha by the object's +0xd0 (0x48fcdf). Hermes' passes are tinted additive
   (SRCALPHA, ONE), so 85 % opacity scales the glow he adds to 85 % (§16).
@@ -6304,8 +6953,20 @@ its colours. In 1a, vertices lit only by switchable lights keep the flat 13/255 
 close the lamp, while vertices near static lights are brighter. The cell-block lamps are
 switchable (180 of 1a's 254 created Point Lights), so lighting the level from the bake alone, as
 the port once did, left the rooms black; adding every light on top of the bake, as it did next,
-counted the static ones twice. Geometry without .ldu colours is lit by a CPU pass when it loads
-(static-light.ts).
+counted the static ones twice. Geometry without .ldu colours (doors, lockers, pickups, props the
+editor did not bake) is lit by a CPU pass at its first draw (0x4ca3a0 from 0x4ca6c0, called only by
+the draw functions 0x4930f0 / 0x492950) [verified]: ambient + the region's directional base lights +
+up to 5 point lights, over every light that is on then and in a group that holds the object, packed
+clamped to 0..1 without halving (0x4c0480) and from then on drawn as precomputed, `2 × colour` +
+the switchable lights per frame. Its first draw comes after the whole level has loaded, so an
+object shown at start sees every light as well; in a room lit by its ambient alone such an object
+shows twice the ambient of the halved bake around it. A door or locker that opens keeps the
+colours of its first draw (they are never recomputed); only the switchable lights per frame follow
+its new normals. The port (static-light.ts, world/dynamic.ts, level.ts) bakes the static lights
+on at load and leaves the switchable ones to the per-frame rig [port]. Until the user report of
+docs/playthrough.md row 69 it gave start-visible objects only the lights stored before them in
+the level, which drew every 1a door and locker black (docs/re/renderer.md §1.9 has the numbers).
+Enhanced mode reads the same colours as its authored light, so it follows.
 
 Light properties [verified, 0x4c5fd0 / 0x4c60b0]: p0 colour / 255, negated when p1 is set
 (negative lights), p8 radius, p9 hemisphere mode. Ambient Light p0 is the colour; it applies within

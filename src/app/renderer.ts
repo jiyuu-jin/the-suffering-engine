@@ -19,6 +19,7 @@ import { warmObjects, warmTargets, warmHooks, warmViewmodelObjects, warmPasses, 
 import { ENHANCED } from './enhanced/config';
 import type { EnhancedRenderer } from './enhanced';
 import { FramePacer, RenderScaler, type ScaleSetting } from './render-scale';
+import { HELD_AXIS, heldLampPose, LAMP_AIM, LAMP_OFFSET } from './held-lamp';
 
 
 export type BackendName = 'WebGPU' | 'WebGL2';
@@ -200,7 +201,9 @@ export class LevelRenderer {
   private constructor(private readonly container: HTMLElement, forceWebGL: boolean) {
     // The frame target is the engine's back buffer: 8-bit, holding gamma values (engine-light.ts
     // GAMMA_BACK_BUFFER, docs/re/renderer.md §5.1).
-    this.renderer = new THREE.WebGPURenderer({ antialias: true, forceWebGL, trackTimestamp: GPU_TIME, outputBufferType: BACK_BUFFER_TYPE });
+    // (Enhanced mode draws only full-screen quads to the canvas, after its own TRAA / FXAA: no
+    // MSAA there. Perf C, docs/perf.md.)
+    this.renderer = new THREE.WebGPURenderer({ antialias: !ENHANCED, forceWebGL, trackTimestamp: GPU_TIME, outputBufferType: BACK_BUFFER_TYPE });
     this.scaler = new RenderScaler(this.renderer);
     // The engine writes gamma-space colours straight to the screen (Direct3D 9 fixed function):
     // no tone mapping. `?lighting=legacy` keeps the previous ACES look.
@@ -245,8 +248,8 @@ export class LevelRenderer {
 
     // Player-held flashlight (decay 0 + distance cutoff keeps it scale-independent).
     this.flashlight = new THREE.SpotLight(0xfff1d6, 6, 30, THREE.MathUtils.degToRad(24), 0.55, 0);
-    this.flashlight.position.set(0.15, -0.1, 0);
-    this.flashlight.target.position.set(0, 0, -1);
+    this.flashlight.position.set(LAMP_OFFSET.x, LAMP_OFFSET.y, LAMP_OFFSET.z);
+    this.flashlight.target.position.set(LAMP_AIM.x, LAMP_AIM.y, LAMP_AIM.z);
     this.camera.add(this.flashlight, this.flashlight.target);
     this.scene.add(this.camera);
 
@@ -410,6 +413,7 @@ export class LevelRenderer {
   private draw() {
     const probe = frameProbe;
     for (const fn of this.drawListeners) fn();
+    this.holdLamp();
     // World matrices first, so the culler sees objects where they are this frame (systems and
     // sequences move them after the previous render); render() skips its own update
     // (scene.matrixWorldAutoUpdate is off).
@@ -439,6 +443,28 @@ export class LevelRenderer {
     else this.renderer.render(this.scene, this.camera);
     probe.lap('render');
   }
+
+  /**
+   * The flashlight belongs to the player (held-lamp.ts): while another camera shows him (a
+   * security monitor's feed) it stays at his eye instead of riding on the view camera.
+   */
+  private holdLamp() {
+    const fl = this.flashlight, p = this.player;
+    if (this.walking && p.externalView) {
+      this.camera.updateMatrixWorld();
+      heldLampPose(this.camera.matrixWorld, p.eyePosition(this.lampEye), p.yaw, p.pitch, fl.position, fl.target.position, this.lampAxis);
+      fl.userData[HELD_AXIS] = this.lampAxis;
+      this.lampHeld = true;
+    } else if (this.lampHeld) {
+      fl.position.set(LAMP_OFFSET.x, LAMP_OFFSET.y, LAMP_OFFSET.z);
+      fl.target.position.set(LAMP_AIM.x, LAMP_AIM.y, LAMP_AIM.z);
+      delete fl.userData[HELD_AXIS];
+      this.lampHeld = false;
+    }
+  }
+  private lampHeld = false;
+  private readonly lampEye = new THREE.Vector3();
+  private readonly lampAxis = new THREE.Vector3();
 
   private renderViewmodel() {
     if (!this.viewmodel.children.some((c) => c.visible)) return;
@@ -533,7 +559,9 @@ export class LevelRenderer {
     const r = this.renderer;
     const t0 = performance.now();
     // A target registered since the last call: everything has to be compiled for it.
-    const targets = [...warmTargets];
+    // (With own passes, Enhanced mode, the scene is drawn into those only: the screen-effect
+    // target then receives the finished frame, never the scene, so it needs no scene shaders.)
+    const targets = warmPasses.size ? [] : [...warmTargets];
     // Own passes (prewarm.ts warmPasses): only while the frame loop is suspended (a level load).
     const passes = this.suspended ? [...warmPasses] : [];
     const full = !!opts.full || [...targets, ...passes.map((p) => p.target)].some((t) => !this.warmedTargets.has(t));

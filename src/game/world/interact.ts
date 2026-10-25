@@ -52,6 +52,7 @@ import { instanceMatrix } from './dynamic';
 import { hudBus } from '../hud/bus';
 import { MonitorOverlay, monitorFov } from './monitor-view';
 import { hardpointLocal } from './searchlight';
+import { rayBoxEntry, rayPoint, type UseRay, type V3 } from './use-ray';
 
 const num = (v: unknown, d = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
 const ref = (v: unknown): ResRef | null => (v && typeof v === 'object' && !Array.isArray(v) ? (v as ResRef) : null);
@@ -219,10 +220,14 @@ export class Interactions {
   // -------------------------------------------------------------------------
   // Targets
 
-  /** Object under the crosshair that can be used (ray must hit its box before any wall). */
-  pick(eye: THREE.Vector3, dir: THREE.Vector3, limit: number): UseTarget | null {
+  /**
+   * Object under the crosshair that can be used: the crosshair's ray (use-ray.ts) meets its box
+   * within the player's reach and before any wall; `clear` (third person) asks whether the eye
+   * itself sees that point.
+   */
+  pick(r: UseRay, clear?: (p: V3, uid: number) => boolean): UseTarget | null {
     if (this.climb || this.mounted || this.monitorView || this.clamber || this.use.active) return null;
-    const ray = new THREE.Ray(eye, dir);
+    const eye = r.eye;
     let best: UseTarget | null = null;
     let bestT = Infinity;
     for (const cls of USE_CLASSES) {
@@ -235,12 +240,11 @@ export class Interactions {
         // the west walkway) it is 10 m below the eye, so its box decides instead.
         if (cls !== 'Ladder' && (c[12] - eye.x) ** 2 + (c[13] - eye.y) ** 2 + (c[14] - eye.z) ** 2 > 49) continue;
         this.env.dyn.bounds(d, this.box);
-        if (cls === 'Ladder' && this.box.distanceToPoint(eye) > 7) continue;
+        if (cls === 'Ladder' && this.box.distanceToPoint(this.hit.set(eye.x, eye.y, eye.z)) > 7) continue;
         this.box.expandByScalar(cls === 'Ladder' ? 0.3 : 0.05);
-        const p = ray.intersectBox(this.box, this.hit);
-        if (!p) continue;
-        const t = p.distanceTo(eye);
-        if (t > limit + (cls === 'Ladder' ? 0.6 : 0) || t >= bestT) continue;
+        const t = rayBoxEntry(r.origin, r.dir, this.box.min, this.box.max, r.near, r.far + (cls === 'Ladder' ? 0.6 : 0));
+        if (t === null || t >= bestT) continue;
+        if (clear && !clear(rayPoint(r, t), w.uid)) continue;
         const target = this.targetFor(w);
         if (target) (bestT = t), (best = target);
       }

@@ -17,7 +17,11 @@
 // templates name bones directly (Player Weapon Properties p0 = 35, the right hand's weapon bone,
 // p5 = 27, the left hand's; Ranged Weapon p78 / p80 = muzzle bones of the weapon model).
 // The attached object's model space is put in the bone's frame with no offset (the engine passes
-// no offset either), keeping the object's own instance scale.
+// no offset either), keeping the object's own instance scale. Decoded draw path: the skinned
+// instance (vtable 0x591588) attaches with slot 6 (0x46d9d0, identity attachment matrix) and
+// each frame sets the object to that matrix x the bone's posed matrix (0x4701c0), not the
+// skinning matrix; slot 5, which would set an offset, is not used for weapons (§4.5 "Held
+// weapon grip": the third-person idle / walk gap is the clips' open hand, not the placement).
 //
 // Player rig 2:9 (and the human NPC rigs): channel 16 = bone 35 (right-hand weapon bone, a leaf
 // child of hand bone 34), channel 11 = bone 27 (left hand), 22 / 23 = bones 55 / 59 (feet).
@@ -187,6 +191,17 @@ export class HardpointAttacher {
       }
       this.place(a);
     }
+  }
+
+  /**
+   * Place only what `carriers` hold, from their bones as posed now. The player's body and arms
+   * are posed in the player's update, before the frame is drawn, while update() runs with the
+   * game systems after the draw: the weapons system calls this right before the draw
+   * (LevelRenderer.onBeforeDraw), so a gun in the player's hand is not drawn at the previous
+   * frame's hand pose (docs/game-logic.md §4.5 "Held weapon placement").
+   */
+  updateCarriers(...carriers: (Character | null | undefined)[]) {
+    for (const a of this.list.values()) if (carriers.includes(a.carrier) && a.carrier.root.parent) this.place(a);
   }
 
   dispose() {

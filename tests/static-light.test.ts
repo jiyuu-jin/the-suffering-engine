@@ -218,32 +218,17 @@ test('load-time colour: the light sum clamped to 0..1, not halved; precomputed d
   assert.equal(2 * loadTimeColor(k) + k, 3 * k);
 });
 
-test('load-time pass with `before`: only the lights created before the object (objects shown at start, renderer.md §1.9)', () => {
-  const lamp = { ...light(0, 2, 0, 4, [0.855, 0.675, 0.404]), order: 50 };
-  const early = { ...light(1, 2, 0, 4, [1, 1, 1]), order: 5 };
-  const sl = new StaticLighting([lamp, early], [0.1, 0.1, 0.1], [{ min: [-5, -5, -5], max: [5, 5, 5], rgb: [0.2, 0.2, 0.2], order: 40 }], [], 30);
-  // An object at index 20: only the early light; neither ambient exists yet.
-  const at20 = sl.setFor(0, 0, 0, 0.5, 20);
-  assert.deepEqual(at20.lights, [early]);
-  assert.deepEqual(at20.ambient, [0, 0, 0]);
-  // At index 35: the global ambient exists, the region's not yet.
-  assert.deepEqual(sl.setFor(0, 0, 0, 0.5, 35).ambient, [0.1, 0.1, 0.1]);
-  // At index 60: both lights, the region's ambient.
-  const at60 = sl.setFor(0, 0, 0, 0.5, 60);
-  assert.equal(at60.lights.length, 2);
-  assert.deepEqual(at60.ambient, [0.2, 0.2, 0.2]);
-  // No index: every light (floor layers).
-  assert.equal(sl.setFor(0, 0, 0, 0.5).lights.length, 2);
-});
-
-test('load-time pass of an object hidden at start sees every light: it runs at the first draw (0x4ca6c0 from 0x4930f0 / 0x492950)', async () => {
-  const { loadPassBefore } = await import('../src/game/world/dynamic');
-  assert.equal(loadPassBefore({ flags: 0x81, index: 12 }), 12, 'shown at start: creation order');
-  assert.equal(loadPassBefore({ flags: 0x80, index: 12 }), undefined, 'hidden at start: every light');
-  assert.equal(loadPassBefore(undefined), undefined, 'spawned: every light');
-  // A pickup placed during play (world.ts placeDrop: flags 0x81, no level index) is drawn after
-  // every light exists; -1 as the order saw none (1a: the electrocuted guard's revolver black).
-  assert.equal(loadPassBefore({ flags: 0x81, index: -1 }), undefined, 'dropped during play: every light');
+test('load-time pass: no creation order; every light that is on at the first draw (0x4ca6c0 from 0x4930f0 / 0x492950)', async () => {
+  // The pass runs at the object's first draw, after the whole level (and so every light) has
+  // been created and registered. The port used to keep only the lights stored before the object
+  // (its level index): every 1a locker and door came out black (docs/re/renderer.md §1.9).
+  const dyn = await import('../src/game/world/dynamic');
+  assert.equal('loadPassBefore' in dyn, false, 'no creation-order rule');
+  const lamp = light(0, 2, 0, 4, [0.855, 0.675, 0.404]);
+  const sl = new StaticLighting([lamp], [0.1, 0.1, 0.1], [{ min: [-5, -5, -5], max: [5, 5, 5], rgb: [0.2, 0.2, 0.2] }], []);
+  const set = sl.setFor(0, 0, 0, 0.5, 0x1234);
+  assert.deepEqual(set.lights, [lamp]);
+  assert.deepEqual(set.ambient, [0.2, 0.2, 0.2]);
 });
 
 test('1a: the Shiv in the stabbed inmate (Ammo Box 5bfb, hidden until "Goose" shows it) gets the ambient; its switchable cell lamp only per frame', { skip }, async () => {
@@ -253,7 +238,6 @@ test('1a: the Shiv in the stabbed inmate (Ammo Box 5bfb, hidden until "Goose" sh
   const lvl = new SrscFile(await fs.read(deps.lvl));
   const packages = await loadPackages(fs, dirname(deps.lvl), readLevelHeader(lvl).dependencies, () => {});
   const ents = parseEntities(lvl, packages, { resolveStrings: false });
-  const { loadPassBefore } = await import('../src/game/world/dynamic');
   const shiv = ents.find((e) => e.uid === 0x5bfb)!;
   const lamp = ents.find((e) => e.uid === 0x5c06)!;
   assert.equal(shiv.className, 'Ammo Box');
@@ -261,11 +245,7 @@ test('1a: the Shiv in the stabbed inmate (Ammo Box 5bfb, hidden until "Goose" sh
   assert.ok(lamp.index > shiv.index, 'its cell lamp is created after it');
   const sl = staticLightingFromEntities(ents);
   const at = [shiv.position[0] / 2048, shiv.position[1] / 2048, shiv.position[2] / 2048] as const;
-  // Creation order alone: no light, no ambient (drawn black but for the switchable lamp per frame).
-  const ordered = sl.setFor(at[0], at[1], at[2], 0.4, shiv.index);
-  assert.equal(ordered.lights.length, 0);
-  assert.deepEqual(ordered.ambient, [0, 0, 0]);
-  const set = sl.setFor(at[0], at[1], at[2], 0.4, loadPassBefore(shiv));
+  const set = sl.setFor(at[0], at[1], at[2], 0.4);
   assert.ok(sl.lights.some((l) => l.switchable && Math.abs(l.x - lamp.position[0] / 2048) < 1e-3 && Math.abs(l.z - lamp.position[2] / 2048) < 1e-3), 'the cell lamp 5c06 is a switchable light');
   assert.ok(!set.lights.some((l) => l.switchable), 'no switchable light in the colours');
   assert.ok(set.ambient[0] > 0.05, `ambient ${set.ambient}`);
@@ -298,11 +278,11 @@ test('group rule: a light reaches only objects inside its nearest named group (0
   assert.equal(g.groupOf(0x1234), undefined);
   const lamp = { ...light(0, 2, 0, 4, [1, 1, 1]), group: 3 };
   const root = { ...light(0, 2, 0, 4, [1, 1, 1]), group: 1 };
-  const sl = new StaticLighting([lamp, root], [0, 0, 0], [], [], undefined, g.chain);
-  assert.deepEqual(sl.lightsFor(0, 0, 0, 0.5, undefined, 0x5bfb).length, 2, 'same group: both');
-  assert.deepEqual(sl.lightsFor(0, 0, 0, 0.5, undefined, 0x587a), [root], 'another group: only the root one');
+  const sl = new StaticLighting([lamp, root], [0, 0, 0], [], [], g.chain);
+  assert.deepEqual(sl.lightsFor(0, 0, 0, 0.5, 0x5bfb).length, 2, 'same group: both');
+  assert.deepEqual(sl.lightsFor(0, 0, 0, 0.5, 0x587a), [root], 'another group: only the root one');
   assert.equal(sl.lightsFor(0, 0, 0, 0.5).length, 2, 'no uid (floor layers): every light');
-  assert.equal(sl.lightsFor(0, 0, 0, 0.5, undefined, 0x1234).length, 2, 'object outside the tree: every light');
+  assert.equal(sl.lightsFor(0, 0, 0, 0.5, 0x1234).length, 2, 'object outside the tree: every light');
 });
 
 test('1a: group rule and the pass of objects shown at start (cell doors) / hidden at start (Shiv)', { skip }, async () => {
@@ -313,7 +293,6 @@ test('1a: group rule and the pass of objects shown at start (cell doors) / hidde
   const packages = await loadPackages(fs, dirname(deps.lvl), readLevelHeader(lvl).dependencies, () => {});
   const ents = parseEntities(lvl, packages, { resolveStrings: false });
   const { parseSectorTree, lightRegions } = await import('../src/formats/visgraph');
-  const { loadPassBefore } = await import('../src/game/world/dynamic');
   const tree = parseSectorTree(lvl)!;
   const regions = lightRegions(tree, ents.filter((e) => e.className === 'Ambient Light' || e.className === 'Directional Light').map((e) => e.uid));
   const sl = staticLightingFromEntities(ents, regions, tree);
@@ -326,27 +305,60 @@ test('1a: group rule and the pass of objects shown at start (cell doors) / hidde
   // The Shiv (hidden at start, cell 4): the ambient and every static light on at load; its
   // switchable cell lamp reaches it per frame only.
   const shiv = by.get(0x5bfb)!;
-  const s = sl.setFor(...at(shiv), 0.4, loadPassBefore(shiv), shiv.uid);
+  const s = sl.setFor(...at(shiv), 0.4, shiv.uid);
   assert.ok(!s.lights.some((l) => l.switchable));
   assert.ok(s.ambient[0] > 0.05);
   // The fallen cell door (Static Object 848d, hidden until the CartWheeler scene) keeps no lamp
   // in its colours, so it goes dark with the lamps.
   const fallen = by.get(0x848d)!;
   assert.equal(fallen.flags & 1, 0);
-  assert.ok(!sl.setFor(...at(fallen), 1, loadPassBefore(fallen), fallen.uid).lights.some((l) => l.switchable));
-  // Cell 6's door (shown at start, index before every cell lamp and the root ambient): no
-  // load-time light, so only its switchable lamps per frame (PC capture, renderer.md §1.9).
+  assert.ok(!sl.setFor(...at(fallen), 1, fallen.uid).lights.some((l) => l.switchable));
+  // Cell 6's door (shown at start, stored before every cell lamp and the root Ambient Light):
+  // the root ambient in its colours, no point light (its lamps are switchable: per frame only).
   const door = by.get(0x587a)!;
   assert.equal(door.flags & 1, 1);
-  const d = sl.setFor(...at(door), 1, loadPassBefore(door), door.uid);
+  const d = sl.setFor(...at(door), 1, door.uid);
   assert.equal(d.lights.length, 0);
-  assert.deepEqual(d.ambient, [0, 0, 0]);
+  assert.deepEqual(d.ambient, sl.ambient);
+  assert.ok(sl.ambient[2] > 0.1, `root ambient 0x1C1E20: ${sl.ambient}`);
   // The group rule (static lights here; the lamps are switchable): a light in reach under
   // another group is left out.
-  const g = new StaticLighting(sl.lights.map((l) => ({ ...l, switchable: false })), sl.ambient, sl.regions, sl.directionals, sl.ambientOrder, sl.groupsOf);
-  const all = g.lightsFor(...at(door), 1, undefined, door.uid);
+  const g = new StaticLighting(sl.lights.map((l) => ({ ...l, switchable: false })), sl.ambient, sl.regions, sl.directionals, sl.groupsOf);
+  const all = g.lightsFor(...at(door), 1, door.uid);
   assert.ok(all.length > 0 && !all.some((l) => isLamp(l, lamp4)), 'never the cell 4 lamp in cell 6');
   const crate = by.get(0x7b16)!; // Breakable in cell 5
   const r = (crate.bounds?.sphere[3] ?? 1024) / 2048;
-  assert.ok(g.lightsFor(...at(crate), r, undefined, crate.uid).length < g.lightsFor(...at(crate), r).length);
+  assert.ok(g.lightsFor(...at(crate), r, crate.uid).length < g.lightsFor(...at(crate), r).length);
+});
+
+test('1a / 1b: start-visible locker doors and doors get their region ambient, the same as their neighbours (no creation order)', { skip }, async () => {
+  const fs = nodeFS();
+  const { parseSectorTree, lightRegions } = await import('../src/formats/visgraph');
+  const load = async (path: string) => {
+    const deps = await findLevelDependencies(fs, path);
+    const lvl = new SrscFile(await fs.read(deps.lvl));
+    const packages = await loadPackages(fs, dirname(deps.lvl), readLevelHeader(lvl).dependencies, () => {});
+    const ents = parseEntities(lvl, packages, { resolveStrings: false });
+    const tree = parseSectorTree(lvl)!;
+    const regions = lightRegions(tree, ents.filter((e) => e.className === 'Ambient Light' || e.className === 'Directional Light').map((e) => e.uid));
+    return { ents, sl: staticLightingFromEntities(ents, regions, tree), by: new Map(ents.map((e) => [e.uid, e])) };
+  };
+  const amb = (L: Awaited<ReturnType<typeof load>>, uid: number) => {
+    const e = L.by.get(uid)!;
+    assert.equal(e.flags & 1, 1, `${uid.toString(16)} shown at start`);
+    return L.sl.setFor(e.position[0] / 2048, e.position[1] / 2048, e.position[2] / 2048, 1, e.uid).ambient;
+  };
+  // 1a: the two lockers by the guard (Switch 6cc4 / 6cc6, model 7:934) and the corridor door
+  // 734b; all three are stored before the root Ambient Light (index 3206) and drew black.
+  const a = await load('LEVELS/1 PrisonDeathRow/1a PrisonDeathRow.lvl');
+  for (const uid of [0x6cc4, 0x6cc6, 0x734b]) {
+    assert.ok(a.by.get(uid)!.index < 3206);
+    assert.deepEqual(amb(a, uid), a.sl.ambient, uid.toString(16));
+  }
+  // 1b: the locker pair 7b58 / 8210 (index 1301 / 2215) and the doors 653a / 81df (330 / 2185)
+  // straddle the basement's Ambient Light: by creation order one of each pair was black.
+  const b = await load('LEVELS/1 PrisonDeathRow/1b PrisonDeathRow.lvl');
+  assert.deepEqual(amb(b, 0x7b58), amb(b, 0x8210));
+  assert.deepEqual(amb(b, 0x653a), amb(b, 0x81df));
+  assert.ok(amb(b, 0x7b58)[0] > 0.05);
 });

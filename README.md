@@ -80,6 +80,26 @@ Without that step the game runs without cutscenes and sound.
   shots, blasts, gas and fire still hurt. The HUD shows a marker while it is on. See
   [docs/game-logic.md](docs/game-logic.md) §15.17.
 
+## Recent engine changes
+
+- **Use prompt**: the object under the crosshair is found by a ray from the camera, so in third
+  person small switches, buttons and levers are picked where the crosshair is.
+- **Particles**: velocity-aligned streaks (shower water, sparks, blood, glass) are drawn again,
+  and particles are brightened like the world passes, as the engine does.
+- **Monitor feeds**: the flashlight stays with the player while a security camera shows the view.
+- **Object lighting**: placed objects without baked lighting (doors, lockers, pickups) are lit by
+  every light that is on at load instead of being drawn black.
+- **Held weapons and pacing**: held weapons are placed from the current frame's hand pose (no
+  one-frame lag), and 120 Hz displays that miss some frames are paced evenly to 60.
+- **Melee**: blades are swept against props, so the shiv breaks crates, with the props' damage
+  resistance as decoded; strikes turn the player to a creature in reach (auto-face) and carry the
+  strike clip's root motion.
+- **Ceiling CartWheelers** sent to a Waypoint on the floor come down along the crawler path.
+- **Skinned materials**: layered skinned surfaces draw every pass, and skinned models choose
+  alpha test and blending by the engine's pass rule, like static ones.
+- **Sequences**: a scene that takes over a hidden character shows it.
+- **Throwables**: the selected throwable is carried on the player's back.
+
 ## Getting started
 
 Requires Node.js 22 or newer and a recent desktop browser (WebGPU, with a WebGL2 fallback).

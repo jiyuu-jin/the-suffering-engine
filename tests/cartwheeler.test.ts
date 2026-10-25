@@ -14,6 +14,8 @@ import { readDbId, type ResRef } from '../src/formats/model';
 import { EDGE, edgeTypeOf, NavGraph } from '../src/game/actors/nav';
 import { condBits, COND, pickVariant, variantMatches } from '../src/game/actors/variants';
 import { cartWheelerParams, CW_SLOT } from '../src/game/actors/specials/cartwheeler-params';
+import { ceilingStretch, waypointBelow, WAYPOINT_BELOW } from '../src/game/actors/specials/cartwheeler';
+import { arrivalTurn } from '../src/game/actors/actor';
 
 const key = (r: ResRef | undefined) => (r ? `${r.pkg}:${r.id}` : '');
 
@@ -195,4 +197,66 @@ test('1a: ceiling Move Nodes, transition edges and the Slayer that starts on the
   // 10:832 never leaps (p13 0); 10:159 never takes the close stance (p18 = p19 = 100).
   const q = cartWheelerParams(pkgs(), ents.find((x) => x.uid === 0x64f6)!.values, types).killMelee(0);
   assert.equal(q.jumpChance, 0);
+});
+
+test('ceiling route: the ceiling stretch up to the first way down (FollowPath 0x10110db0) [verified]', () => {
+  // Edge types by node pair: 1 / 2 / 3 ceiling, 4 / 5 floor.
+  const ceil = new Set([1, 2, 3]);
+  const type = (a: number, b: number) => edgeTypeOf(ceil.has(a), ceil.has(b));
+  assert.deepEqual(ceilingStretch([1, 4, 5], type), { route: [1], down: 4 }, 'straight down from the first node');
+  assert.deepEqual(ceilingStretch([1, 2, 3, 4, 5], type), { route: [1, 2, 3], down: 4 });
+  assert.equal(ceilingStretch([1, 2, 3], type), null, 'all on the ceiling: no way down');
+  assert.equal(ceilingStretch([4, 5], type), null, 'starts on the floor');
+  assert.equal(ceilingStretch([1], type), null);
+});
+
+test('ceiling walker: a Waypoint more than 1.5 m under its origin is on the floor below [inferred]', () => {
+  assert.equal(WAYPOINT_BELOW, 1.5);
+  assert.equal(waypointBelow(81.26, 73.7), true, '1b 6501 -> 89eb');
+  assert.equal(waypointBelow(94.5, 92.4), true, '3b ae1 -> 2c0b (2.1 m)');
+  assert.equal(waypointBelow(93.3, 92.5), false, '1a 64f8 -> 841c (0.8 m: on its ceiling)');
+  assert.equal(waypointBelow(83.4, 83.2), false, '1b 650f -> 8389');
+  assert.equal(waypointBelow(80, 81), false, 'a Waypoint above');
+});
+
+test('1b: CartWheeler 6501 in the shaft over the ledges drops by its transition edge to Waypoint 89eb [data]', { skip }, () => {
+  const ents = level('1b');
+  const byUid = new Map(ents.map((e) => [e.uid, e]));
+  const at = (e: Entity) => ({ x: e.position[0] / WORLD_SCALE, y: e.position[1] / WORLD_SCALE, z: e.position[2] / WORLD_SCALE });
+  const cw = byUid.get(0x6501)!;
+  assert.equal(cw.values[180], 1, 'p180: starts on the ceiling');
+  // Detector 89ec / the first of 6725, 6726 to die -> Relay 89ed -> Behavior Changer 8306 ->
+  // WaypointBehavior 8947 (p2 first Waypoint 89eb, the only one).
+  const changer = byUid.get(0x8306)!;
+  assert.ok(changer.links.includes(0x6501));
+  assert.equal(changer.values[6], 0x8947);
+  const wb = byUid.get(0x8947)!;
+  assert.equal(wb.className, 'WaypointBehavior');
+  const wp = byUid.get(wb.values[2] as number)!;
+  assert.equal(wp.uid, 0x89eb);
+  const c = at(cw), w = at(wp);
+  assert.ok(waypointBelow(c.y, w.y), `${(c.y - w.y).toFixed(2)} m under it`);
+  // The crawler's graph: ceiling node 89e9 over the shaft, straight down (type 3) to 8321 on the
+  // floor, then along the floor to the node at the Waypoint.
+  const nav = new NavGraph(ents);
+  const from = nav.nearest(c.x, c.y, c.z, null, 6, 0, 'ceiling');
+  const to = nav.nearest(w.x, w.y, w.z, null);
+  assert.equal(nav.nodes[from].uid, 0x89e9);
+  const path = nav.path(from, to, undefined, { crawler: true })!;
+  assert.ok(path, 'a crawler path');
+  assert.equal(nav.path(from, to), null, 'none for a walker');
+  const s = ceilingStretch(path, (a, b) => nav.edgeType(a, b))!;
+  assert.deepEqual(s.route.map((i) => nav.nodes[i].uid), [0x89e9]);
+  assert.equal(nav.nodes[s.down].uid, 0x8321);
+  // The crossing point is under the body: it lets go where it hangs.
+  const tp = nav.transitionPoint(s.route[0], s.down);
+  assert.ok(Math.hypot(tp.x - c.x, tp.z - c.z) < 0.5, `${tp.x.toFixed(2)}, ${tp.z.toFixed(2)}`);
+});
+
+test('steering: a walk turns on the spot to a goal inside its turning circle [inferred]', () => {
+  // 3b 2c24 at Waypoint 2cfe: running 4.1 m/s at 6 rad/s circled it 0.7 m out (turning radius 0.68).
+  assert.equal(arrivalTurn(0.7, 1.0, 4.1, 6), true, 'inside 2 x 0.68 m and 57 degrees off');
+  assert.equal(arrivalTurn(0.7, 0.2, 4.1, 6), false, 'roughly aligned: walk on');
+  assert.equal(arrivalTurn(3, 1.0, 4.1, 6), false, 'far out: turn while walking');
+  assert.equal(arrivalTurn(0.7, 1.0, 4.1, 0), false);
 });

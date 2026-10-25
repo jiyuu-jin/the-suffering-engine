@@ -13,6 +13,7 @@ import { readSkeletonTrailer, readSkinnedModel } from '../src/formats/skeleton';
 import { BLEND_ALPHA_REF, modelCullsBackFaces, translucentPassState } from '../src/formats/render-data';
 import type { PackageSet } from '../src/formats/model';
 import { buildSkinnedMesh, characterAlphaTest, characterSurfaceBlend, decodeCharacterTextures } from '../src/app/character';
+import { CUTOUT_ALPHA_TEST } from '../src/app/surface-material';
 import { beamHidden, beamTriangles, projectorOpacity, projectorParams, ProjectorState, skinnedVertexFor } from '../src/game/actors/specials/projector';
 import { nodeFS, readSrsc, skip } from './helpers';
 
@@ -196,12 +197,13 @@ test("6a's figure 10:196: its cones' cut-out pass 2:904 (alpha 0) is discarded, 
   const sk = readSkinnedModel(pkgs, { pkg: 10, id: 196 })!;
   const cones = sk.model.submeshes[0];
   assert.equal(cones.material?.key, '2:904');
-  assert.equal(characterAlphaTest(cones.material, false), 200 / 255);
+  // The cut-out threshold of every cut-out surface, static or skinned (engine: > 200 / 255).
+  assert.equal(characterAlphaTest(cones.material, false), CUTOUT_ALPHA_TEST);
   const tex = decodeCharacterTextures(sk, pkgs).get('2:164');
   if (tex) {
     let maxA = 0;
     for (let i = 3; i < tex.rgba.length; i += 4) maxA = Math.max(maxA, tex.rgba[i]);
-    assert.ok(maxA <= 200, `texture alpha up to ${maxA}`);
+    assert.ok(maxA <= CUTOUT_ALPHA_TEST * 255, `texture alpha up to ${maxA}`);
   }
   assert.equal(characterAlphaTest(sk.model.submeshes[1].material, false), 0, 'the opaque body has no test');
 });

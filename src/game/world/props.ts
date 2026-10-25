@@ -26,6 +26,7 @@ import type { World, WorldEntity, ActorInfo } from './logic';
 import type { DamageEvent, DamageService, DamageablePropSet } from './damage';
 import type { EntityPackageSet } from '../../formats/entities';
 import type { PropTargetInfo } from '../actors/actor';
+import { resistanceMultiplier } from '../fx/gas';
 
 const num = (v: unknown, d = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
 const ref = (v: unknown): ResRef | null => (v && typeof v === 'object' && !Array.isArray(v) ? (v as ResRef) : null);
@@ -44,7 +45,8 @@ export interface PropRec {
   health: number;
   invulnerable: boolean;
   broken: boolean;
-  /** Damage type -> multiplier (Damage Resistance p0 -> p1). */
+  /** Damage type -> multiplier (the first Damage Resistance p0 -> p1); damage() applies the full
+   *  rule (resistanceMultiplier: also p5 and the global list). */
   resist: Map<number, number>;
   spawned?: boolean;
   /** Spawned from this template (save). */
@@ -239,7 +241,7 @@ export class Props implements DamageablePropSet {
     for (const r of refList(values[7])) {
       if (!r) continue;
       const t = readTemplate(this.env.packages, r);
-      if (t?.cls === 'Damage Resistance') resist.set(num(t.values[0]), num(t.values[1], 1));
+      if (t?.cls === 'Damage Resistance' && !resist.has(num(t.values[0]))) resist.set(num(t.values[0]), num(t.values[1], 1));
     }
     // GameObject p3 = 1: invulnerable from the start (init 0x100a3166 calls the invulnerability
     // setter with p3 == 1, the one the p13 / p14 messages use) [verified].
@@ -333,7 +335,11 @@ export class Props implements DamageablePropSet {
   damage(uid: number, amount: number, type: number, e: DamageEvent) {
     const r = this.recs.get(uid);
     if (!r || r.broken || r.invulnerable || (r.w && r.w.destroyed)) return { damage: 0, killed: false };
-    const mult = r.resist.get(type) ?? 1;
+    // Damage Resistance as GameObject damage applies it (0x100a31b0 -> 0x100a2dc0) [verified]:
+    // x1, or x0 with p5 (immune to unlisted types); the first p7 attachment of the type replaces
+    // it with its p1, else the global list. 9:5353 (the 2 m junk piles of 1a / 1b / 3a / 3b: p5,
+    // types 3 and 5 only) takes nothing from bullets or blades, only explosions and fire.
+    const mult = resistanceMultiplier(this.env.packages, r.values, type);
     const dmg = Math.max(0, amount * mult);
     if (dmg <= 0) return { damage: 0, killed: false };
     r.health -= dmg;

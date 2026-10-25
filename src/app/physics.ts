@@ -1450,6 +1450,12 @@ export interface MotorInput {
   crouch: boolean;
   /** True on the frame jump was pressed (edge). */
   jump: boolean;
+  /**
+   * Extra displacement this step (world metres): an animation's root motion, moved and slid
+   * with the step's own velocity move, so walls stop it and the ground probe follows it.
+   */
+  moveX?: number;
+  moveZ?: number;
 }
 
 export class CharacterMotor {
@@ -1625,17 +1631,18 @@ export class CharacterMotor {
     if (!this.onGround) v.y -= cfg.gravity * dt;
     else v.y = Math.min(v.y, 0);
 
+    const ex = input.moveX ?? 0, ez = input.moveZ ?? 0;
     if (!this.world) {
-      this.position.x += v.x * dt;
+      this.position.x += v.x * dt + ex;
       this.position.y += v.y * dt;
-      this.position.z += v.z * dt;
+      this.position.z += v.z * dt + ez;
       return;
     }
 
     // Move + slide the floating capsule.
     const c = this.capsule(this.currentHeight);
     const dy = this.onGround ? 0 : v.y * dt;
-    const mv = this.world.moveCapsule(c, v.x * dt, dy, v.z * dt, v, this.cosSlope, false, this.onGround);
+    const mv = this.world.moveCapsule(c, v.x * dt + ex, dy, v.z * dt + ez, v, this.cosSlope, false, this.onGround);
     this.lastMove = mv;
     this.position.x = c.x;
     this.position.z = c.z;

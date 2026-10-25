@@ -25,6 +25,8 @@ import { loadClip } from '../actors/clipmap';
 import { readAnimEvents } from '../../formats/animation';
 import { boneName } from '../../formats/skeleton';
 import type { AttackParams, FormParams } from './params';
+import { CREATURE_MELEE_FACE, MeleeAutoFace, readMeleeFaceParams, type FaceCandidate, type MeleeFaceParams } from '../weapons/melee-face';
+import { MeleeLunge, lungeToWorld, meleeRootScale } from '../weapons/melee-lunge';
 import { CREATURE_WEAPON_SHAPES, armWindows, creatureBlowOutcome, meleeDamage, reputationDamageScale, sweepCapsule, sweepSpheres, type ArmWindow, type MeleeShape, type Vec3 } from './melee';
 
 const key = (r: ResRef) => `${r.pkg}:${r.id}`;
@@ -70,12 +72,12 @@ export interface MeleeWorld {
   playerTeam?: string;
   /** Leaf hit spheres of a body as posed now: blows on the dead are tested on them. */
   spheres?(a: ActorLike): readonly { c: Vec3; r: number }[];
+  /** Auto-target priority of an actor (its character template's p128; default 10). */
+  priority?(a: ActorLike): number;
 }
 
 /** Melee auto-face rate (Player p173, deg/s): the body turns to the swing's target. */
-export const MELEE_FACE_RATE_DEG = 350;
-/** Reach used to pick the target the body turns to at the start of a swing (m) [inferred]. */
-const FACE_REACH = 3.5;
+export const MELEE_FACE_RATE_DEG = CREATURE_MELEE_FACE.rateDeg;
 
 class ClipSet {
   readonly clips: AnimClipData[] = [];
@@ -125,8 +127,15 @@ export class CreatureBody {
     clip: number;
     scale: number;
     windows: { w: ArmWindow; weapon: ArmWeapon; prev?: [Vec3, Vec3]; swept: boolean; hit: Set<ActorLike> }[];
-    face?: ActorLike;
   } | null = null;
+  /** Melee auto-face (weapons/melee-face.ts: the human's pick and turn with 2:240's values). */
+  private readonly autoFace = new MeleeAutoFace();
+  private readonly faceParams: MeleeFaceParams;
+  /** The swing's root motion (weapons/melee-lunge.ts); `alt`: a p89 attack (class 3, never scaled). */
+  private readonly lunge = new MeleeLunge();
+  private lungeAlt = false;
+  private lungeTarget = false;
+  private lungePlayer: PlayerController | null = null;
   /** Arm windows per clip index (from the clips' Arm / Disarm events). */
   private windows = new Map<number, ArmWindow[]>();
   /** The form's arm weapons by bone hash. */
@@ -184,6 +193,7 @@ export class CreatureBody {
     const humanRun = human.locomotion?.run?.speed ?? 6.6;
     const creatureRun = loc?.run?.speed ?? humanRun;
     this.speedScale = Math.min(2, Math.max(0.5, creatureRun / humanRun));
+    this.faceParams = readMeleeFaceParams(creature.values, CREATURE_MELEE_FACE);
 
     // Human rig for the morph-back clip (Character Morpher of the creature template).
     const back = creature.morph;
@@ -245,6 +255,7 @@ export class CreatureBody {
   /** Change back: the human rig plays the morph-back clip. Returns the root to show. */
   startMorphOut(duration: number): THREE.Object3D {
     this.swing = null;
+    this.stopLunge();
     if (!this.humanRig || this.humanMorph < 0) return this.ch.root;
     this.ch.root.visible = false;
     this.humanRig.root.visible = true;
@@ -259,6 +270,19 @@ export class CreatureBody {
     if (this.humanRig) this.humanRig.root.visible = false;
     this.swing = null;
     this.current = -1;
+    this.stopLunge();
+  }
+
+  /** End the swing's root motion and give the stick back (MeleeAttack leaves). */
+  private stopLunge() {
+    this.lunge.stop();
+    if (this.lungePlayer) this.lungePlayer.holdMove = false;
+    this.lungePlayer = null;
+  }
+
+  /** The swing's root motion (debug / tests): playing, model-space distance so far. */
+  get lungeState() {
+    return { active: this.lunge.active, moved: { ...this.lunge.moved }, alt: this.lungeAlt, target: !!this.autoFace.target };
   }
 
   get busy() {
@@ -275,6 +299,7 @@ export class CreatureBody {
     const clip = this.ch.clipData[i];
     const dur = Math.max(0.2, clip.duration / (clip.rate || 1));
     this.swing = null;
+    this.stopLunge();
     this.play(i, { loop: false, fade: 0.08 });
     this.oneShotUntil = this.time + dur;
     return dur;
@@ -305,23 +330,28 @@ export class CreatureBody {
       const weapon = this.weapons.get(w.bone);
       return weapon ? [{ w, weapon, swept: false, hit: new Set<ActorLike>() }] : [];
     });
-    this.swing = { clip: pick.clip, scale: pick.a.scale, windows, face: world && player ? this.faceTarget(world, player) : undefined };
+    this.swing = { clip: pick.clip, scale: pick.a.scale, windows };
+    if (player) this.autoFace.start(player, Math.hypot(player.velocity.x, player.velocity.z) > 0.2);
+    // Root motion (melee-lunge.ts): the strike's root carries the form; MeleeAttack ends Move.
+    if (player && player.mode === 'tp') {
+      this.lunge.start(clip);
+      this.lungeAlt = kind === 'alt';
+      this.lungeTarget = false;
+      if (!player.holdMove && player.onGround) player.motor.velocity.x = player.motor.velocity.z = 0;
+      player.holdMove = true;
+      this.lungePlayer = player;
+    }
     return true;
   }
 
-  /** The target the body turns to: the nearest one ahead of the view within reach [inferred]. */
-  private faceTarget(world: MeleeWorld, player: PlayerController): ActorLike | undefined {
-    const p = player.position;
-    const fx = -Math.sin(player.yaw), fz = -Math.cos(player.yaw);
-    let best: ActorLike | undefined, bd = Infinity;
+  /** Pick candidates: live actors the claws may strike (object positions, template p128). */
+  private faceCandidates(world: MeleeWorld): FaceCandidate<ActorLike>[] {
+    const out: FaceCandidate<ActorLike>[] = [];
     for (const a of world.actors) {
-      if (!a.alive || creatureBlowOutcome(this.targetOf(a), world.playerTeam ?? '') === 'skip') continue;
-      const dx = a.position.x - p.x, dz = a.position.z - p.z, d = Math.hypot(dx, dz);
-      if (d > FACE_REACH + (a.radius ?? 0.4) || Math.abs(a.position.y - p.y) > 2.2) continue;
-      if (d > 0.3 && (dx * fx + dz * fz) / d < 0.5) continue;
-      if (d < bd) (bd = d), (best = a);
+      if (!a.alive || a.kind?.decor || creatureBlowOutcome(this.targetOf(a), world.playerTeam ?? '') === 'skip') continue;
+      out.push({ x: a.position.x, y: a.position.y, z: a.position.z, priority: world.priority?.(a) ?? 10, ref: a });
     }
-    return best;
+    return out;
   }
 
   private targetOf(a: ActorLike) {
@@ -337,20 +367,37 @@ export class CreatureBody {
     if (!this.ch.root.visible) return [];
     if (locomotion && !this.busy) this.locomotion(f);
     if (this.swing && this.current !== this.swing.clip) this.swing = null;
-    if (this.swing) this.face(player, f.dt);
+    if (this.swing) this.face(player, f.dt, w);
+    else if (this.autoFace.active) this.autoFace.stop();
+    if (this.lunge.active) {
+      // The port hands the body back to locomotion at 90 % of the clip: the rest of the root
+      // goes with that frame, so a swing moves its whole root track like the original's.
+      // (The ended swing has dropped its pick: the tail keeps the last frame's.)
+      const end = !this.swing || !this.busy;
+      if (!end) this.lungeTarget = !!this.autoFace.target;
+      const d = this.lunge.step(end ? 1e3 : f.dt, meleeRootScale({ onGround: f.onGround, target: this.lungeTarget, alternate: this.lungeAlt, p85: this.creature.lungeScale ?? 1 }));
+      const m = lungeToWorld(d.x, d.z, player.bodyYaw);
+      player.rootMove.x += m.x;
+      player.rootMove.z += m.z;
+      if (end) this.stopLunge();
+    }
     this.ch.update(f.dt);
     return this.sweep(player, w);
   }
 
-  /** Melee auto-face (p173 = 350 deg/s): the body turns to the swing's target, else the view. */
-  private face(player: PlayerController, dt: number) {
-    const t = this.swing?.face;
-    const goal = t && t.alive ? Math.atan2(-(t.position.x - player.position.x), -(t.position.z - player.position.z)) : player.yaw;
-    let d = goal - player.bodyYaw;
-    d -= Math.round(d / (2 * Math.PI)) * 2 * Math.PI;
-    const step = ((MELEE_FACE_RATE_DEG * Math.PI) / 180) * dt;
-    player.bodyYaw += Math.sign(d) * Math.min(Math.abs(d), step);
-    player.root.rotation.y = player.bodyYaw;
+  /**
+   * Melee auto-face every frame of the swing (the creature runs states 4 / 32 too): the pick
+   * from the body's facing in 2:240's p223 = 105° cone within its PWP 2:241 p10 = 6 m, nearest
+   * first (p224 0.1 / p225 1), and the turn at p173 = 350 deg/s of the view and the body together.
+   */
+  private face(player: PlayerController, dt: number, w: MeleeWorld) {
+    const blocked = w.blocked;
+    const p = player.position;
+    const ends = (c: FaceCandidate<ActorLike>): [Vec3, Vec3] => {
+      const a = c.ref;
+      return [[p.x, p.y + 1.2, p.z], [a.position.x, (a.bottom ?? a.position.y) + (a.height ?? 1.8) * 0.6, a.position.z]];
+    };
+    this.autoFace.step(player, dt, this.faceParams, this.creature.meleeRange ?? 6, this.faceCandidates(w), blocked ? (c) => blocked(...ends(c)) : undefined);
   }
 
   /** Sweeps the armed weapons (melee.ts) and returns the blows that landed this frame. */

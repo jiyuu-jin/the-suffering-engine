@@ -74,10 +74,24 @@ agents' browsers at the same time: expect ±5 fps between runs.
   main thread no longer stalls inside WebGPU calls (CPU per frame 11 ms instead of 16-43 ms at
   High with the rate unlimited, `ex5`).
 - **Pacing on fast displays** (`FramePacer`): with the frame-rate limit Off on a display above 75
-  Hz (ProMotion: 120 Hz rAF), when over 20 % of a second's frames miss the display interval the
-  game renders on every other display frame (a steady 60 instead of a 120 / 60 judder), and goes
-  back after 3 s of frames under 70 % of the interval (backing off 5 .. 120 s when a return
-  fails). Headless runs at 60 Hz, so this part has unit tests only.
+  Hz (ProMotion: 120 Hz rAF), when over 5 % (`PACE_LATE_SHARE`; 20 % until the third-person
+  jitter report below) of a second's frames miss the display interval the game renders on every
+  other display frame (a steady 60 instead of a 120 / 60 judder), and goes back after 3 s of
+  frames under 70 % of the interval (backing off 5 .. 120 s when a return fails). Headless runs at
+  60 Hz, so this part has unit tests and a simulated 120 Hz loop only.
+- **Pacing judder band (third-person jitter report).** With the 20 % threshold, a GPU that keeps
+  up with 120 Hz most of the time but not always never got paced: the frames-in-flight limit
+  skipped one display frame every 6..20 (one late frame in 5..19 drawn: 5..19 %), and the game
+  ran an uneven 100..115 fps, 8.3 ms frames with a 16.7 ms one every few, for as long as the load
+  lasted [verified: `FramePacer` fed a 120 Hz rAF with every 10th display frame skipped stayed
+  uncapped at 20 % and paces to 60 at 5 %; `tests/render-scale.test.ts`]. A few hitches a second
+  (GC, a resize) stay under 5 % and keep 120 Hz. Simulated in the browser (Enhanced Medium, two
+  `frame()` calls per 60 Hz rAF at T - 8.33 and T, every 10th display frame given a full GPU
+  backlog): 180 drawn frames in 360 callbacks, every interval 16.5..16.8 ms. Whether the reference
+  machine sat in that band is [inferred] (no 120 Hz display here); the jitter they saw in the
+  hand was the held weapon's one-frame lag (docs/game-logic.md §4.5 "Held weapon placement"),
+  which does not depend on the display. Perf A's gains are unchanged: the cap only engages where
+  120 Hz was already being missed.
 - **HUD**: cleared once when it hides, not every frame.
 - Debug overlay (F1 / dev viewer): `fps · 2073 x 1340 (60 %, auto)`; `__view.scaler` (setting,
   scale, cap, floor, `dyn.log`, `gpu.trace`) and `__view.pacer` for QA.
@@ -314,3 +328,147 @@ unchanged.
 - **Actor culling** looks up each actor's hips bone with `getWorldPosition` twice a frame (the
   update and the pass before the draw), which recomputes the bone's ancestors each time: most of
   9's and 10's actor time.
+
+## Perf C: GPU cost per pixel, compiles, tier switches
+
+### How it was measured
+
+- **GPU time per pass** (`scratchpad/perfC/bench.mjs`): `?gputime` (WebGPU timestamp queries) with
+  Brave at `--enable-dawn-features=allow_unsafe_apis` (unquantised timestamps); each render pass
+  is labelled by its target (`enhanced-volumetric`, `GTAONode.AO`, `output` = the scene pass, `rt`
+  = full-resolution post passes, `canvas`). Apple's GPUs overlap passes, so the raw intervals sum
+  to several times the frame [verified, as Perf A found]; here every pass is credited only with the
+  time no earlier-starting pass covers (sorted by start: end − max(start, latest end so far)), and
+  "busy" is the union of the intervals. Those add up to the frame and track it: Medium at native
+  went from 47 fps with 21 ms busy to 60 fps with 15 ms [verified].
+- Window 1728 x 1117 at DPR 2. The dev page has a sidebar, so "native" here is 2896 x 1960
+  (5.7 Mpx); the game page is 3456 x 2234 (7.7 Mpx). `?scale=1` for the per-pass tables (fixed
+  pixels), the default Auto for the cinematic (what a player gets).
+- Before = a copy of HEAD 639b64d, after = the tree with these changes, both served by their own
+  dev server, back to back, one browser at a time; load average 4-16 (other agents running).
+
+### Where the GPU time went (before)
+
+Medium at native, 1a cell row: busy 21.6 ms, of which volumetrics 8.1, GTAO 5.0, the scene pass
+3.9, the full-resolution post passes 2.5 (grade, FXAA, HDR copy), bloom 1.3 in all, the canvas
+copy with its 4x MSAA 1.0. High: busy 34 ms, volumetrics 15.1 (24 steps, 6 lamps), GTAO 6.1, scene
+6.2, TRAA 1.4. Original: 7-9 ms, almost all the MSAA frame pass: it was never the problem.
+
+Inside the volumetric march (Medium, by removing one part at a time) [verified]: the dust noise
+(three.js's MaterialX Perlin noise, `mx_noise_float`, evaluated at every step) 3.6 of 7.7 ms; the
+lamp halos (4 lamps × 16 steps) 2.4 ms; the rest (flashlight beam, shadow lookups) 1.7 ms. GTAO's
+cost was cache misses: its taps read the full-resolution depth (23 MB) and its 0.6 m kernel spans
+much of the screen near the camera; halving the radius (only to test) took it from 5.0 to 3.1 ms.
+
+The surface shaders (dumped WGSL of a level surface) evaluated the flashlight radiance with its
+PCF loop twice per fragment (once for the light factor, once for the specular), and each lamp cube
+shadow's 5 taps twice too: the two Enhanced hooks built them as separate calls.
+
+### Fixes
+
+| Change | Where | Effect (Medium / High, native, 1a) |
+|---|---|---|
+| Dust noise baked once into a 64³ R8 tiling texture: MaterialX's own Perlin noise (same hash, gradients, fade, scale), lattice wrapped every 16 cells (36 m), 4 texels per cell; one trilinear fetch per step | `enhanced/dust-noise.ts` (new), `volumetric.ts` | volumetrics 8.1 → 3.9 / 15.1 → 7.6 ms |
+| Volumetric flashlight beam: its shadow lookup and phase only where the beam reaches (cone × range × start > 0); moonlight block only with a moonlight map (uniform branch); the phase function without `pow` | `volumetric.ts` | included above; exact (zero terms skipped) |
+| Surface shading: the flashlight radiance and both lamp-cube lookups built once per graph and shared by the light factor and the specular (`fragmentTerms`); PCF taps only inside the shadow frustum and where the beam is non-zero; lamp specular skipped for lamps behind the surface (GGX carries N·L) | `enhanced/shading.ts` | scene pass 6.2 → 4.7 ms at High; exact |
+| GTAO reads a copy of the depth at its own (half) resolution: a depth-only quad pass writes the nearest full-resolution depth at each half-resolution texel centre into a depth texture | `enhanced/half-depth.ts` (new), `post.ts` | GTAO 5.0 → 3.0 / 6.1 → 3.3 ms |
+| Enhanced canvas without MSAA (`antialias: !ENHANCED`): it only receives full-screen quads after TRAA / FXAA. The precompile failure Perf A hit was the scene being compiled for the insanity effects' target (4x MSAA, no longer sharing the canvas's state), into which Enhanced never draws the scene: with own passes those targets are skipped | `renderer.ts` | MSAA canvas pass 0.6 → 0 ms; Original keeps `antialias: true` |
+| Tier switches: the scene pass has the same attachments (colour + velocity) at every tier and the scene / viewmodel passes keep one render context whatever their nesting depth (below) | `post.ts` | no scene shader rebuilt on a switch |
+
+Busy GPU time and frame times at native (`?scale=1`), before → after
+(`scratchpad/perfC/before-native.json`, `after2-native.json`); ms per frame:
+
+| Scene | Tier | GPU busy | scene pass | volumetrics | GTAO | fps | p50 / p95 / p99 |
+|---|---|---|---|---|---|---|---|
+| 1a Goose cine | Medium | 22.9 → 16.5 | 3.8 → 3.3 | 8.1 → 3.8 | 6.2 → 5.3 | 43.5 → 59.4 | 16.7/33.4/33.4 → 16.7/16.8/33.2 |
+| 1a cell row | Medium | 21.6 → 14.9 | 3.9 → 4.1 | 8.1 → 3.9 | 5.0 → 3.0 | 46.3 → 60 | 16.7/33.4/33.4 → 16.7/16.8/16.8 |
+| 1a guard | Medium | 21.4 → 15.3 | 3.4 → 3.8 | 8.3 → 3.8 | 5.8 → 4.6 | 46.9 → 60 | 16.7/33.4/33.4 → 16.7/16.8/16.8 |
+| 1a gas chamber | Medium | 21.0 → 13.6 | 3.4 → 3.2 | 8.6 → 3.9 | 5.3 → 3.4 | 47.5 → 60 | 16.7/33.4/33.4 → 16.7/16.8/16.8 |
+| 3a yard | Medium | 18.5 → 12.6 | 3.6 → 4.1 | 6.9 → 2.8 | 3.6 → 2.0 | 53 → 60 | 16.7/33.4/33.5 → 16.7/16.7/16.8 |
+| 6a woods | Medium | 18.0 → 12.4 | 2.4 → 2.5 | 6.9 → 2.8 | 4.5 → 3.5 | 55.6 → 60 | 16.7/33.3/33.4 → 16.7/16.7/16.8 |
+| 1a Goose cine | High | 36.3 → 24.5 | 6.1 → 4.5 | 15.6 → 8.0 | 8.4 → 6.7 | 27.3 → 40.6 | 33.4/50/50.1 → 16.7/33.4/33.4 |
+| 1a cell row | High | 33.9 → 21.0 | 6.2 → 4.7 | 15.1 → 7.6 | 6.1 → 3.3 | 29.5 → 47.3 | 33.3/50/50.1 → 16.7/33.4/33.4 |
+| 1a guard | High | 35.4 → 22.8 | 6.0 → 4.5 | 16.0 → 8.1 | 7.7 → 5.5 | 28.3 → 43.7 | 33.3/50/50.1 → 16.7/33.4/33.4 |
+| 1a gas chamber | High | 32.6 → 20.6 | 5.1 → 3.9 | 15.6 → 8.2 | 6.6 → 3.9 | 30.7 → 48.6 | 33.3/33.4/33.5 → 16.7/33.3/33.4 |
+| 3a yard | High | 27.0 → 17.1 | 6.3 → 5.1 | 11.2 → 5.0 | 4.0 → 2.1 | 36.9 → 58.3 | 33.3/33.4/33.4 → 16.7/16.8/33.3 |
+| 6a woods | High | 25.7 → 16.8 | 3.5 → 2.8 | 10.9 → 4.9 | 5.5 → 4.2 | 38.9 → 59.3 | 33.2/33.4/33.4 → 16.7/16.8/33.3 |
+| 1a (4 poses), 3a, 6a | Low | 8.4-13.3 → 8.0-10.5 | | 2.4-2.7 → 1.0-1.5 | off | 60 → 60 | 16.7/16.8/16.8 both |
+| 1a, 3a, 6a | Original | 7.5-9.6 → 6.9-9.3 | | | | 60 → 60 | 16.7/16.8/16.8 both |
+
+(The scene pass at Medium gained about 0.4 ms from writing the velocity attachment, see tier
+switches; at High it lost 1.3-1.5 ms to the shared terms. Original's code paths are unchanged;
+its spread is run-to-run noise.)
+
+The opening cinematic at the default Auto resolution, fresh browser per tier (no shader cache;
+25 s from the first frame after the loading screen), before → after
+(`cold-before-*.json`, `cold-after2-*.json`):
+
+| Tier | Internal size (Auto) | fps | p50 / p95 / p99 / max ms | frames > 33 ms |
+|---|---|---|---|---|
+| Original | 2896 x 1960 → same | 60 → 60 | 16.7/16.7/16.8/16.8 → 16.7/16.8/16.8/16.8 | 0 → 0 |
+| Medium | 2027 x 1372 → same (at Perf A's 3.0 Mpx cap) | 59.6 → 60 | 16.7/16.8/16.8/33.4 → 16.7/16.7/16.8/33.4 | 4 → 1 |
+| High | 1303 x 882 (45 %) → 1737 x 1176 (60 %) | 57.2 → 60 | 16.7/16.8/33.4/33.4 → 16.7/16.8/16.8/16.8 | 18 → 0 |
+
+At High, Auto's dynamic resolution now settles at 1.78 times the pixels and holds 60 with p99 =
+p50. Medium sits at its pixel budget (Perf A's `PIXEL_BUDGET`); with this work Medium runs 60 fps
+at full native resolution in the bench above, so that budget could be raised (Open).
+
+### Stutter (shader compiles, uploads)
+
+- **The cinematic and first sight**: with a cold browser the opening cinematic had no frame over
+  33 ms at Original and Medium before or after (the load-time precompile covers its characters,
+  props and effects); no long animation frame (over 50 ms) was recorded in any cinematic window.
+  The worst frame in the first 1.5 s at each fresh pose (cell row, guard post, gas chamber, 3a,
+  6a), before → after: Original 16.8-33.5 → 16.8 ms, Low 16.8-33.4 → 16.8, Medium 33.4-50 →
+  16.8-33.3, High 50-167 → 33.4-50 [verified, `first` in the bench JSON]. Those were GPU-bound
+  frames, not compiles (no node builds, no long tasks), and fell with the GPU work. Texture
+  uploads, audio decoding and GC did not show up as frames over 33 ms in these runs; texture
+  enhancement decodes with `createImageBitmap` and three.js generates the mipmaps on the GPU, so
+  nothing was changed there (its pixel read-back for cut-out mip chains is main-thread work, worth
+  watching if a level's first sight hitches).
+- **Tier switches** (Perf A's open item). Two causes [verified, by logging every node build that
+  missed three.js's cache during a switch]: (1) the scene pass made its velocity attachment only
+  on the TRAA tiers (a PassNode creates an MRT texture only for an output someone reads), and
+  three.js keys every object's shader state by its render context, which counts attachments; (2)
+  contexts are also keyed by the render-call depth, which TRAA changes for the viewmodel pass. A
+  switch into or out of a TRAA tier rebuilt the shaders of everything in view: 54-58 node builds,
+  a 600-680 ms main-thread frame, each time (`newNodeBuilds` in `sw*.js` runs). Now the scene pass
+  always has colour + velocity with one MRT node for every tier's chain, and the scene and viewmodel
+  passes are pinned to one context (`RenderContexts.get` with depth 0 for their own MRT nodes, which
+  no other render uses). A switch now rebuilds only the post chain (10-13 pipelines, no scene node
+  builds): medium → high, medium, ultra, low, high: worst frames 50 / 50 / 83 / 67 / 33 ms instead of
+  683 / 50 / 667 / 33 / 667 ms. In the bench's sequence (`?scale=1`, no timestamps): high 292
+  frames in 6 s, worst 33 ms (before 170 frames, worst 633 ms); ultra 113 frames, worst 67 ms (83,
+  583 ms). Ultra is slow at native resolution regardless.
+- **`?gputime` itself can stall the GPU**: with timestamp queries on, a High / Ultra frame's many
+  passes (lamp cube faces) overflow three.js's query pool and the GPU process stopped presenting
+  for seconds after a switch (0-2 frames in 6 s, reproducible); without the queries the same
+  sequence has no stall. Perf A's "over 6 s" switch stalls may have been this. QA only: measure
+  switches without `?gputime`.
+
+### Visuals
+
+Frames at fixed poses (`?scale=1`, flashlight on), before against after, mean absolute
+difference of display luma on an 1/8-resolution grid (`scratchpad/perfC/shots/*.json`): Original
+0.00-0.8 levels of 255 (cell row and close-up floor 0.00; the rest is animated content: alarm, rain),
+Enhanced Medium 0.16-0.62, High 0.16-1.9 (1a gas 1.3, guard 1.9: the animated alarm and fog
+noise). Mean luma, near-black and clipped shares per pose change by at most 1 level / 1.5 points.
+The dust pattern is the same noise function, now sampled from a texture; it drifts as before.
+
+### Not changed (measured, kept)
+
+- Bloom: 1.0-1.3 ms in all at native (5 mips from half resolution); PCF taps (4 / 9 / 16) are
+  now half the work they were; AO samples and volumetric steps per tier unchanged (they set the
+  look; their per-sample cost is what fell).
+- Texture bandwidth: Medium has no upscaled albedo (High / Ultra only), every enhanced texture
+  has mipmaps, anisotropy 8 (Medium) / 16 (High). The scene pass is 3-5 ms at native, so texture
+  sampling is not where the time goes.
+
+### Open
+
+- Perf A's Auto pixel budgets were set before this work: Enhanced Medium (3.0 Mpx) and High
+  (2.2 Mpx) could rise; High at native now runs 41-59 fps in the bench above (it was 27-39).
+- High's volumetrics are still the largest pass (7.6-8.2 ms at native in 1a: 24 steps × 6 lamps);
+  the lamp halo loop is the next candidate (an analytic in-scatter per unshadowed lamp would
+  remove the per-step lamp loop but loses the dust modulation on the halos).
+- A tier switch still compiles the post chain (10-13 pipelines, up to 83 ms).

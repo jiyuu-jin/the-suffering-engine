@@ -34,11 +34,12 @@
 // Particles have no ground test (Emitter.update) [verified].
 
 import * as THREE from 'three/webgpu';
-import { float, instancedBufferAttribute, instancedDynamicBufferAttribute, modelViewMatrix, positionGeometry, rotate, texture as tslTexture, uniform, vec2, vec3, vec4 } from 'three/tsl';
-import { additiveEffectColor, engineLights, LEGACY_LIGHTING } from '../../app/engine-light';
+import { float, instancedBufferAttribute, instancedDynamicBufferAttribute, modelViewMatrix, positionGeometry, rotate, texture as tslTexture, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
+import { additiveEffectColor, engineLights, engineStages, gammaDecode, gammaEncode, LEGACY_LIGHTING } from '../../app/engine-light';
 import type { Entity, EntityPackageSet, PropValue } from '../../formats/entities';
 import { readObjectTemplate, className as classNameOf, classByHash, decodeTemplateProps, entityBoxCorners } from '../../formats/entities';
 import { instanceRotation, WORLD_SCALE } from '../../formats/level';
+import { worldStageColor } from '../../formats/render-data';
 import { findEntry, readModel, type PackageSet, type ResRef } from '../../formats/model';
 import { COLLISION_LAYER, type CollisionWorld, type RayHit } from '../../app/physics';
 import { bounceHit } from '../weapons/data';
@@ -132,9 +133,12 @@ const POOL_CAP = 2048;
 
 /**
  * Sprite material for velocity-aligned particles (p48 = 1, fountainStreak): the quad is scaled
- * by `scaleNode` (vec2, x negative: the engine's streak frame is mirrored against its upright
- * one), turned by `rotationNode` and then squashed along screen y by `squashNode` (f), all in
- * view space, which is the engine's screen space up to the perspective divide.
+ * by `scaleNode` (vec2), turned by `rotationNode` and then squashed along screen y by
+ * `squashNode` (f), all in view space, which is the engine's screen space up to the perspective
+ * divide. The engine's streak frame is mirrored against its upright one; the pool mirrors the
+ * texture's u instead of the quad (the same picture), because a quad mirrored in x turns its
+ * winding round and the front-face cull dropped every streak: from b42f105 on no p48 = 1
+ * particle was drawn (1a's shower spray, metal-impact sparks, gun blood, glass).
  */
 class StreakSpriteNodeMaterial extends THREE.SpriteNodeMaterial {
   squashNode: THREE.Node | null = null;
@@ -173,22 +177,31 @@ class ParticlePool {
     }
     const col = instancedDynamicBufferAttribute(this.colAttr, 'vec4') as unknown as ReturnType<typeof vec4>;
     const misc = instancedDynamicBufferAttribute(this.miscAttr, 'vec3') as unknown as ReturnType<typeof vec3>;
-    const tex = tslTexture(map);
+    // Streaks: the mirror is in the texture (u -> 1 - u), the quad keeps its winding.
+    const tex = streak ? tslTexture(map, vec2(float(1).sub(uv().x), uv().y)) : tslTexture(map);
     mat.positionNode = instancedDynamicBufferAttribute(this.posAttr, 'vec3');
     if (mat instanceof StreakSpriteNodeMaterial) {
-      mat.scaleNode = vec2(misc.x.negate(), misc.x);
+      mat.scaleNode = vec2(misc.x, misc.x);
       mat.squashNode = misc.z;
     } else mat.scaleNode = misc.x;
     mat.rotationNode = misc.y;
+    // The billboard's vertex colour is the particle's colour word as it is (p33, or p33 x the
+    // light for p46 = 3; SUFFERING.EXE 0x4ad888 copies particle +0x30 to the four vertices, and
+    // the update 0x4ac4e0..0x4ac5f3 only rewrites its alpha byte), and the quad is drawn at once
+    // inside the world loop, where texture stage 1 adds the stage-0 colour to itself: the pass
+    // writes saturate(2 x texture x colour), as every other world pass (docs/game-logic.md §14.2
+    // "Particles: doubled"; engine-light.ts engineStages). The port drew them at half that: 1a's
+    // shower spray (3:1793, 0x484a4d) added at most ~9 / 255 and did not show.
+    const rgb = LEGACY_LIGHTING ? tex.rgb.mul(col.rgb) : gammaDecode(engineStages(gammaEncode(tex.rgb.mul(col.rgb))));
     // Additive particles: gamma-space add that fades to black with the fog, like the engine's
     // blend-mode-2 passes (fog colour forced to black, 0x49a990; engine-light.ts). The engine
     // adds source x source alpha, and the alpha is the texture's times the particle's: the spark
     // and glow textures (4:1830, 4:1808, ...) are white with the shape in their alpha, so without
     // it every spark drew as its whole quad, a large orange ball.
     if (additive && !LEGACY_LIGHTING) {
-      mat.colorNode = vec4(additiveEffectColor(tex.rgb.mul(col.rgb), tex.a.mul(col.a)), float(1));
+      mat.colorNode = vec4(additiveEffectColor(rgb, tex.a.mul(col.a)), float(1));
       mat.fog = false;
-    } else mat.colorNode = additive ? vec4(tex.rgb.mul(col.rgb).mul(tex.a.mul(col.a)), float(1)) : vec4(tex.rgb.mul(col.rgb), tex.a.mul(col.a));
+    } else mat.colorNode = additive ? vec4(rgb.mul(tex.a.mul(col.a)), float(1)) : vec4(rgb, tex.a.mul(col.a));
     if (blend === 3) mat.alphaTest = 0.4;
     // The engine alpha-tests every blended pass at > 2/255 (render-data BLEND_ALPHA_REF).
     else if (blend !== 0) mat.alphaTest = 2 / 255;
@@ -306,7 +319,8 @@ export function fountainStreak(v: PropValue[]): boolean {
  * sparks, 4:1934 blood) is turned along the motion. Only the y components carry f, which flattens
  * a particle flying at the camera. In view space with y up (w = (u.x, -u.y)) this is a sprite
  * mirrored in x, turned by `angle` = atan2(-w.x, w.y) and scaled by (1, `squash` = f) after the
- * turn (StreakSpriteNodeMaterial). `view` is the camera's world-to-view matrix.
+ * turn (StreakSpriteNodeMaterial; the pool mirrors the texture's u, which draws the same picture
+ * without turning the quad's winding round). `view` is the camera's world-to-view matrix.
  */
 export function streakFrame(view: THREE.Matrix4, p: THREE.Vector3, vel: THREE.Vector3, size: number, out = { angle: 0, squash: 1 }): { angle: number; squash: number } {
   const e = view.elements;
@@ -372,6 +386,20 @@ export function fountainParticleAlpha(age: number, life: number, fadeIn: number,
   const a = fadeIn > 0 ? Math.min(1, age / fadeIn) : 1;
   const b = fadeOut > 0 ? Math.min(1, Math.max(0, life - age) / fadeOut) : 1;
   return a * b;
+}
+
+/**
+ * Colour channel (gamma, 0..1) a particle's billboard pass writes for texture value `tex` and
+ * particle colour `colour` (p33, or p33 x the light for p46 = 3) [strong: the vertex colour is the
+ * particle's colour word unchanged (SUFFERING.EXE billboard build 0x4ad888 copies particle +0x30
+ * to the four vertices; the update 0x4ac4e0..0x4ac5f3 only rewrites its alpha byte), the quad is
+ * drawn at once (0x496c60 sets the texture, 0x4969f0 draws) from the particle system's render in
+ * the world loop, and texture stage 1 adds stage 0 to itself for every world pass (0x48c4d7,
+ * docs/re/renderer.md §1.8)]: saturate(2 x tex x colour). The alpha is not doubled. The port's
+ * pools apply it in the shader (ParticlePool, engine-light.ts engineStages).
+ */
+export function particlePassColor(tex: number, colour: number): number {
+  return worldStageColor(tex * colour);
 }
 
 /**

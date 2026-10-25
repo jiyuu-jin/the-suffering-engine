@@ -462,9 +462,22 @@
   // other classes.
   const infMode = (a) => (a?.entity?.className === 'Inferna' ? window.__specials?.of?.(a)?.inf ?? null : null);
   const infHits = (a) => { const m = infMode(a); return m === null || m === 'flaming' || m === 'ash' || m === 'unlit'; };
+  // Did this creature land a blow on the player in the last `secs` s of game time (__pt.dmg)?
+  const hurtMe = (a, secs) => {
+    const key = (a.entity?.uid ?? a.id).toString(16) + ' ', t = __world.world.time;
+    for (let i = dmg.length - 1; i >= 0 && dmg[i].t > t - secs; i--) if (dmg[i].from.startsWith(key)) return true;
+    return false;
+  };
   function engage(range = 20, all = false, huntOnly = false, area = null) {
     const p = P();
     let best = null, bd = Infinity, bk = Infinity;
+    // Swings held for an ally in front (attack()): a creature hurting the player is then set aside
+    // as before, and the player walks on (1a's gate ambush: with the escort guard at his shoulder
+    // he stood under 64ee's blows, 117 in 40 s, run am1).
+    // (allyInFront reads the weapon in hand: none before 1a's shiv.)
+    const held = !!window.__weapons?.persist?.current && allyInFront(3);
+    // Fighting hand to hand (no gun with rounds, or the creature form): see focus below.
+    const melee = (window.__insanity?.model?.form ?? 'human') !== 'human' || !(window.__weapons?.service.weapons.some((x) => x.kind === 'ranged' && x.clip + x.reserve > 0) ?? false);
     for (const a of __actors.manager.actors) {
       if (a.health <= 0 || a.state === 'dead' || !a.ch.root.visible || a.dormantHidden) continue;
       // Whoever is after a companion (1c's inmate, 2's Dallas) is fought first, as a player
@@ -476,7 +489,10 @@
       if ((window.__ptSpare ?? []).includes(a.entity?.uid)) continue;
       // (A gunman shooting at the player from outside the area is shot back at all the same.)
       if (area && Math.hypot(a.motor.position.x - area[0], a.motor.position.z - area[1]) > area[2] && !(a.state === 'shoot' && !!a.target?.player && canShoot(a.id))) continue;
-      if ((ap.memo?.get(a.id)?.until ?? 0) > performance.now()) continue;
+      // (Not one that is hurting the player now: its blows reach him, so his reach it. The walk's
+      // threat probe, engage(7) on a walk that does not fight, ran the 8 s below on a copy that
+      // was cutting the player down, and the 1b arena then stood still under it for 30 s.)
+      if ((ap.memo?.get(a.id)?.until ?? 0) > performance.now() && !(hurtMe(a, 3) && !held)) continue;
       // Allies (the escort guard) fight creatures, not the player.
       if (!a.hostile && !onAlly && !(a.target?.player || a.grudge?.player)) continue;
       // (An Inferna that no hit affects now, unlit or collapsing / reforming: nothing to swing at.)
@@ -492,7 +508,12 @@
       // Order: whoever is after a companion, an Inferna's ash pile (its few seconds of being
       // hurtable), a gunman shooting at the player (each second alive is bullets taken), then the
       // nearest.
-      const dd = onAlly ? d - 8 : infMode(a) === 'ash' ? d - 6 : a.state === 'shoot' && !!a.target?.player ? d - 4 : d;
+      // Hand to hand with several in reach (2 m): the weakest first, one striking before one that
+      // is not. Each kill is one blade fewer; the nearest-first order kept a stunned copy of 12
+      // health under the blade while one of 11 cut the player from behind (1b's ledge ambush, the
+      // CartWheelers 6725 / 6726 / 6501, run d1).
+      const focus = melee && !onAlly && hunting && d < 2;
+      const dd = onAlly ? d - 8 : focus ? -6 + a.health / 50 - (a.state === 'attack' ? 1 : 0) : infMode(a) === 'ash' ? d - 6 : a.state === 'shoot' && !!a.target?.player ? d - 4 : d;
       if (dd < bk && d < range) (bk = dd), (bd = d), (best = a);
     }
     // A creature that takes no damage for 8 s while engaged (out of reach behind a shelf, up in
@@ -509,7 +530,7 @@
       // After its 30 s off, a fresh 8 s try (the old `since` had already run out, so the creature
       // was set aside again at once and never fought again: the 1b arena's last copy attacked an
       // invulnerable player for the rest of the 600 s).
-      if (!m || m.hp !== best.health || (m.until && now >= m.until)) memo.set(best.id, { hp: best.health, since: now, until: 0, x: q.x, z: q.z });
+      if (!m || m.hp !== best.health || (m.until && now >= m.until) || (hurtMe(best, 3) && !held)) memo.set(best.id, { hp: best.health, since: now, until: 0, x: q.x, z: q.z });
       else if (!all && bd >= 3 && Math.hypot(q.x - m.x, q.z - m.z) > 0.5) {
         // A chaser on its way: watch it afresh from here.
         m.since = now;
@@ -718,6 +739,10 @@
       // Still at the authored placement (props, dormant NPCs): the data's height, not the port's.
       const pl = a.entity?.position;
       if (pl && Math.hypot(pl[0] / 2048 - q.x, pl[1] / 2048 - q.y, pl[2] / 2048 - q.z) < 0.05) continue;
+      // Still where a scene's last key left it (1b's Hermes 7eb4 after "Camera" #247: 79.63 over
+      // the valve box at 80.1, shown since a scene's take shows a hidden character): the data's.
+      const sk = a.entity && window.__world?.world.get(a.entity.uid)?.s.stompKey?.position;
+      if (sk && Math.hypot(sk[0] / 2048 - q.x, sk[1] / 2048 - q.y, sk[2] / 2048 - q.z) < 0.05) continue;
       // An NPC motor stands on the ground under its feet point (the original's rule, docs/
       // game-logic.md §14.9): measured the same way, not with a 15 cm sphere that also touches the
       // rim of a step beside the feet.

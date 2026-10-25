@@ -16,6 +16,7 @@ import { renderGroup, step, uniform, uniformArray } from 'three/tsl';
 import { CULL_LUMA, RANK_LUMA, spotConstants } from '../../formats/render-data';
 import { FLASHLIGHT_BASE_INTENSITY, FLASHLIGHT_SPOTS, engineLightInternals, engineLights } from '../engine-light';
 import { AMBIENT_FLOOR, GLOW_GAIN } from './tone';
+import { lampAxis } from '../held-lamp';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type N = any;
@@ -148,7 +149,8 @@ export class EnhancedLights {
     const on = flashlight.visible && flashlight.intensity > 0 && !!flashlight.parent;
     const k = on ? flashlight.intensity / FLASHLIGHT_BASE_INTENSITY : 0;
     flashlight.getWorldPosition(EU.flPos.value);
-    camera.getWorldDirection(EU.flDir.value);
+    // The holder's view axis: the player's while a security monitor's feed has the camera (held-lamp.ts).
+    lampAxis(flashlight, camera, EU.flDir.value);
     EU.flColor.value.set(FLASH_COLOR.r, FLASH_COLOR.g, FLASH_COLOR.b).multiplyScalar(FLASH_POWER * k);
 
     // Lamps: the rig's uploaded point lights ranked by their light at the camera.

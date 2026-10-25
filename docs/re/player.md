@@ -614,7 +614,8 @@ Not changed:
     0.1 s.
 - **Turn** (Turn per-frame 0x10046dc0): yaw rate = axis × Turn sensitivity (settings `+0x1c`)
   × 220 °/s. The 220 comes from p167 in first person, p170 airborne, p164 Aim, p161 Move or p158
-  otherwise. p173 = 350 °/s applies while auto-facing a melee target with no turn input.
+  otherwise. p173 = 350 °/s applies while auto-facing a melee target with no turn input (in
+  first person p167 still wins; the pick and the turn: game-logic.md §14.1 "Player melee").
   - There is no ramp: the applied rate snaps to the requested one every frame (`+0x182` = 1e6).
   - p159 / p160 (250 / 3000) and p174 / p175 are not read [strong].
   - p157 = 60 °/s only picks the turn-in-place clip.

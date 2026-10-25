@@ -430,14 +430,24 @@ const ROUTE = [
     // On the arena floor: creatures right under the walkway would "attack" from below (their start
     // test is horizontal only) and could not be reached.
     stand: [470, 73.7, 484],
+    // The fight is kept to the arena (its wall holes and cloners are 6..13 m from the stand): the
+    // ledge ambush's CartWheeler 6725, asleep at its placement (478.2, 73.7, 450.1) 35 m off, was
+    // engaged and walked at two or three times a try, with no path within 15 m of it (runs b1,
+    // h1, f1).
+    hold: 18,
+    preyR: 18,
     until: `!!__world.world.get(0x6a4a).s.unlocked`,
     timeout: 600,
     force: { why: 'arena not finished in time: relay 7ed2 sent (the end of sequence 80a6)', js: `__world.world.send(0x7ed2, 1, 0x80a6)` },
+    loot: 14,
     expect: { played: [0x80a6] },
     shot: true,
   },
-  { id: '1b.cp2', obj: 'through the arena door: checkpoint', do: 'goto', to: [448.5, 73.7, 476.3], expect: { checkpoint: 0x8339 } },
-  { id: '1b.ledges', obj: 'up the ledges past the arena (clamber twice)', do: 'clamber', from: [473.3, 73.65, 428.4], face: [[471.75, 75, 428.4], [469, 79.5, 428.5]], stands: [null, [471.75, 76.23, 428.5]] },
+  // The Xombium bottles on the way are picked up (`loot`): the arena's 7fa3 / 7fa4 / 7fa5, 88e5
+  // past its door, 700e / 700f by the ledges. From the deep link the player has none, and the
+  // arena and the ledge ambush cost him 40..110 health (runs f1, e1..e4).
+  { id: '1b.cp2', obj: 'through the arena door: checkpoint', do: 'goto', to: [448.5, 73.7, 476.3], loot: 14, expect: { checkpoint: 0x8339 } },
+  { id: '1b.ledges', obj: 'up the ledges past the arena (clamber twice)', do: 'clamber', from: [473.3, 73.65, 428.4], preLoot: 16, face: [[471.75, 75, 428.4], [469, 79.5, 428.5]], stands: [null, [471.75, 76.23, 428.5]] },
   { id: '1b.cp3', obj: 'the checkpoint on the ledge', do: 'walk', to: [469, 79.7, 428.4], expect: { checkpoint: 0x833b }, shot: true },
   // Horace talks again on the way (Detector 88f4); the hall ends at a locked door with 30 health.
   { id: '1b.door', obj: 'smash the locked door at the end of the hall', do: 'break', from: [438.6, 79.65, 393.9], uids: [0x53c2], expect: { destroyed: [0x53c2] } },
@@ -2262,12 +2272,14 @@ try {
       }
       let s;
       try {
-        s = await ev(`(() => { const ap = __pt.ap; const near = __pt.engage(7); if (near && !['chase', 'attack', 'shoot', 'hurt'].includes(near.st)) { ap.follow = 0; ap.active = !ap.done; } return { done: ap.done, stuck: ap.stuck, door: (ap.stuck >= 1 || ap.active) ? __pt.blockingDoor() : null, threat: near && ['chase', 'attack', 'shoot', 'hurt'].includes(near.st) ? near : null }; })()`);
+        s = await ev(`(() => { const ap = __pt.ap; const near = __pt.engage(7); if (near && (${noFight} || !['chase', 'attack', 'shoot', 'hurt'].includes(near.st))) { ap.follow = 0; ap.active = !ap.done; } return { done: ap.done, stuck: ap.stuck, door: (ap.stuck >= 1 || ap.active) ? __pt.blockingDoor() : null, threat: near && ['chase', 'attack', 'shoot', 'hurt'].includes(near.st) ? near : null }; })()`);
       } catch (e) {
         if (await leftLevel()) break;
         throw e;
       }
       if (s.done) break;
+      // (A walk that does not fight walks on: engage() stops the autopilot and turns the view to
+      // the creature, and such a walk then stood still under its blows to its end, run b2.)
       if (s.threat && !noFight) {
         await hold(false);
         note(`attacked by #${hex(s.threat.uid)} (${s.threat.st}, ${s.threat.d} m)`);
@@ -3057,13 +3069,22 @@ try {
             if (!swings) {
               // Nothing comes at the player: go to the nearest creature that is up (a copy idle in
               // the pit or on a ledge), else back to the stand.
-              const prey = await ev(`(() => { const p = __player.position; const skip = new Set(${JSON.stringify([...skipPrey])}); let best = null, bd = 45; for (const a of __actors.manager.actors) { if (a.template || !(a.spawned || ${JSON.stringify(step.prey ?? [])}.includes(a.entity?.uid)) || a.health <= 0 || a.state === 'dead' || !a.ch.root.visible || a.dormantHidden || !a.hostile || skip.has(a.id)) continue; const q = a.motor.position; if (Math.abs(q.y - ${step.stand[1]}) > ${step.preyDy ?? 1e9}) continue; if (${step.preyR ? 1 : 0} && Math.hypot(q.x - ${step.stand[0]}, q.z - ${step.stand[2]}) > ${step.preyR ?? 0}) continue; const d = Math.hypot(q.x - p.x, q.y - p.y, q.z - p.z); if (d < bd) (bd = d), (best = { id: a.id, hp: a.health, pos: [q.x, q.y, q.z] }); } return best; })()`);
+              const prey = await ev(`(() => { const p = __player.position; const skip = new Set(${JSON.stringify([...skipPrey])}); let best = null, bd = 45; for (const a of __actors.manager.actors) { if (a.template || !(a.spawned || ${JSON.stringify(step.prey ?? [])}.includes(a.entity?.uid)) || a.health <= 0 || a.state === 'dead' || !a.ch.root.visible || a.dormantHidden || !a.hostile || skip.has(a.id)) continue; const q = a.motor.position; if (Math.abs(q.y - ${step.stand[1]}) > ${step.preyDy ?? 1e9}) continue; if (${step.preyR ? 1 : 0} && Math.hypot(q.x - ${step.stand[0]}, q.z - ${step.stand[2]}) > ${step.preyR ?? 0}) continue; const d = Math.hypot(q.x - p.x, q.y - p.y, q.z - p.z); if (d < bd) (bd = d), (best = { id: a.id, uid: a.entity?.uid ?? 0, cls: a.entity?.className ?? '', st: a.state, hp: a.health, pos: [q.x, q.y, q.z] }); } return best; })()`);
               if (prey) {
-                const r = await walkRaw(prey.pos, 1.2, 25);
+                // (Fighting what attacks on the way: a copy that comes down while the player walks
+                // to another is fought, not walked through. With walkRaw the 1b arena's copies cut
+                // the player down from behind on those walks, runs b1 / h1.)
+                const r = await walk(prey.pos, 1.2, 25, { area });
                 // Out of reach (a ledge, a hole) or not taking hits: leave it for a while.
                 const hp = await ev(`__actors.manager.actors.find((a) => a.id === ${prey.id})?.health ?? 0`);
-                if (!r.arrived || hp >= prey.hp) preyMiss.set(prey.id, (preyMiss.get(prey.id) ?? 0) + 1);
-                if ((preyMiss.get(prey.id) ?? 0) >= 2) skipPrey.add(prey.id);
+                // (No path gets within 5 m of it: left alone at once. The 1b arena's copies up on
+                // the wall tops, 6..7 m beyond any path, come down by themselves.)
+                if (!r.arrived && r.plan && !r.plan.ok && r.plan.rem > 5) preyMiss.set(prey.id, 2);
+                else if (!r.arrived || hp >= prey.hp) preyMiss.set(prey.id, (preyMiss.get(prey.id) ?? 0) + 1);
+                if ((preyMiss.get(prey.id) ?? 0) >= 2 && !skipPrey.has(prey.id)) {
+                  skipPrey.add(prey.id);
+                  note(`left #${hex(prey.uid)} (${prey.cls}, ${prey.st}) at ${prey.pos.map((v) => v.toFixed(1))} alone: out of reach or taking no hits`);
+                }
               }
               else {
                 const far = await ev(`(() => { const p = __player.position; return Math.hypot(p.x - ${step.stand[0]}, p.z - ${step.stand[2]}) > 4 || Math.abs(p.y - ${step.stand[1]}) > 2; })()`);
@@ -3246,6 +3267,15 @@ try {
             }
             // `until` (JS): done another way (5b: the projector breaks before its Breakable).
             for (let n = 0; n < 30 && !abortRun && !(await ev(`!!__world.world.get(${u})?.destroyed`)) && !(step.until && (await ev(step.until))); n++) {
+              // (A death here was not seen: the game restored its checkpoint while the loop went
+              // on hitting, and the run counted none; 1b's locked hall door, shot from the hall.)
+              await checkDeath();
+              // What hunts the player meanwhile is fought first, then the spot walked to again
+              // (1b's hall: shot, 15 a volley, while he hit the door 53c2, run s1).
+              if (await ev(`(() => { const t = __pt.engage(14, false, true); __pt.ap.follow = 0; return !!t || __pt.exposed().length > 0; })()`)) {
+                await fight(15, false, true);
+                await walk(step.from, 0.4, 30);
+              }
               // `aim`: the point to hit instead of the middle (a tall target reached by a blade).
               // Aim, let a frame draw the view there, then fire: a shot leaves along the drawn
               // camera, which still shows the last shot's kick in the frame the aim is set (5b's
@@ -3308,6 +3338,12 @@ try {
           if (!step.here) {
             await walk(step.from, step.tol ?? 0.3, 40);
             if (await fight(40, false, true)) await walk(step.from, step.tol ?? 0.3, 40);
+            // `preLoot` (m): what lies by the foot is picked up before the climb (1b: Xombium
+            // bottles 700e / 700f by the ledges, after the ambush).
+            if (step.preLoot) {
+              await loot(step.preLoot);
+              await walk(step.from, step.tol ?? 0.3, 40);
+            }
           }
           for (const [i, f] of step.face.entries()) {
             // Where to stand on a ledge for the next one (a corner landing faces the wrong side).

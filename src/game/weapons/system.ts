@@ -98,6 +98,11 @@ import { migrateItemKey, registerSave } from '../save/providers';
 import { byNameOnce } from '../world/inventory';
 import { padPlaying } from '../hud/bindings';
 import { aimAssist, shotTarget, withinWeaponCone, type AimProvider } from './aim-assist';
+import { bladePropContacts, bladeWallClear, sweptQuadSegments, type BladePose, type Vec3 as SweepVec3 } from './melee-sweep';
+import { MeleeAutoFace, readMeleeFaceParams, type FaceCandidate } from './melee-face';
+import { MeleeLunge, lungeToWorld, meleeRootScale, readLungeScale } from './melee-lunge';
+import { THROWABLE_BONE, ThrowableCarry, throwableAfterEmpty } from './back-throwable';
+import { readModelSphereNodes, weaponShape, type WeaponShape } from '../../formats/model-spheres';
 import { HEALTH_HINT_EVENT, canDrinkHealth, healAmount, healthHintDue } from '../../app/player-rules';
 
 // ---------------------------------------------------------------------------
@@ -200,17 +205,17 @@ const refOf = (k: string): ResRef => {
   return { pkg, id };
 };
 
-/** Animation markers (.adu type 5, kind 1): message id + time (s). */
-export function clipMarks(pkgs: PackageSet, r: ResRef): { time: number; param: number }[] {
+/** Animation markers (.adu type 5, kind 1): message id + time (s) + the bone's hash. */
+export function clipMarks(pkgs: PackageSet, r: ResRef): { time: number; param: number; boneHash: number }[] {
   const adu = pkgs.get(r.pkg)?.adu;
   const e = adu && findEntry(adu, ADU_EVENTS, r.id);
   if (!adu || !e || e.size < 4) return [];
   const v = adu.data(e);
   const n = v.getUint32(0, true);
-  const out: { time: number; param: number }[] = [];
+  const out: { time: number; param: number; boneHash: number }[] = [];
   for (let i = 0; i < n && 4 + 16 * i + 16 <= v.byteLength; i++) {
     const o = 4 + 16 * i;
-    if (v.getUint32(o, true) === 1) out.push({ time: v.getFloat32(o + 4, true), param: v.getUint32(o + 12, true) });
+    if (v.getUint32(o, true) === 1) out.push({ time: v.getFloat32(o + 4, true), param: v.getUint32(o + 12, true), boneHash: v.getUint32(o + 8, true) });
   }
   return out;
 }
@@ -915,14 +920,25 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     const b = body();
     const idx = atk ? clipIndex(atk.clip) : -1;
     const dur = b && idx >= 0 ? b.playAction(idx) : 0.45;
-    const arm = (atk && clipMarks(pkgs, atk.clip).find((m) => m.param === 100)?.time) ?? dur * 0.4;
+    const marks = atk ? clipMarks(pkgs, atk.clip) : [];
+    const arm = marks.find((m) => m.param === 100)?.time ?? dur * 0.4;
+    // Disarm: the next Disarm marker (101) after the Arm, else the clip's end (melee.ts armWindows).
+    const disarm = Math.max(arm, marks.find((m) => m.param === 101 && m.time >= arm)?.time ?? dur);
     const mult = atk?.mult ?? 1;
+    // Melee auto-face (melee-face.ts): the body faces the view (or its gait offset) as the swing
+    // starts, then turns to the picked target every frame of the strike and its recovery.
+    startMeleeFace(st, dur);
+    // Root motion (melee-lunge.ts): the strike clip's root carries the player (third person).
+    startMeleeLunge(st, idx >= 0 ? atk?.clip : undefined);
     play(st.swing, undefined, 0.8);
-    after(Math.max(0.05, arm), () => meleeHit(st, mult, atk?.forceMult ?? 1));
+    after(Math.max(0.05, arm), () => meleeHit(st, mult, atk?.forceMult ?? 1, Math.max(0, disarm - arm)));
     const rec = atk?.recovery;
     const myCombo = combo;
     if (rec && b) after(dur, () => {
-      if (combo === myCombo) b.playAction(clipIndex(rec), { interruptible: true });
+      if (combo !== myCombo) return;
+      const rd = b.playAction(clipIndex(rec), { interruptible: true });
+      if (meleeFace.st === st) meleeFace.until = Math.max(meleeFace.until, clock + (rd || 0));
+      if (meleeFace.st === st && meleeLunge.lunge.active) meleeLunge.lunge.start(rd ? clipData(rec) : undefined);
     });
     cooldown = Math.max(0.15, dur);
     comboUntil = clock + dur + 0.45;
@@ -931,11 +947,183 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
   };
   let lastStrike: { at: number; unarmed: boolean } | null = null;
 
-  const meleeHit = (st: Strike, mult: number, forceMult = 1) => {
+  // Melee auto-face (docs/game-logic.md §14.1 "Player melee: facing and auto-face"): Player 2:5
+  // p219 / p223..p225 / p173 / p167 and the swung Player Weapon Properties' p10 (the pick's range).
+  const meleeFaceParams = readMeleeFaceParams(tpl(epk, PLAYER_TEMPLATE)?.v);
+  const meleeRangeCache = new Map<string, number>();
+  const meleeRange = (st: Strike): number => {
+    const r = st.pwp?.ref;
+    if (!r) return 0;
+    const k = keyOf(r);
+    let v = meleeRangeCache.get(k);
+    if (v === undefined) {
+      const n = tpl(epk, r)?.v[10];
+      v = typeof n === 'number' && Number.isFinite(n) ? n : 0;
+      meleeRangeCache.set(k, v);
+    }
+    return v;
+  };
+  const meleeFace = { face: new MeleeAutoFace(), st: null as Strike | null, key: null as string | null, until: 0 };
+  const startMeleeFace = (st: Strike, dur: number) => {
+    const v = view.player.velocity;
+    meleeFace.face.start(view.player, Math.hypot(v.x, v.z) > 0.2);
+    meleeFace.st = st;
+    meleeFace.key = current?.key ?? null;
+    meleeFace.until = clock + dur;
+  };
+  /** Live enemies as pick candidates (object positions, template p128). */
+  const meleeFaceCandidates = (): FaceCandidate<ActorLike>[] =>
+    (actors()?.list() ?? [])
+      .filter((a) => a.alive && (a.hostile || a.provoked) && !a.kind.decor && !a.hidden)
+      .map((a) => ({ x: a.position.x, y: a.position.y, z: a.position.z, priority: priorityOf(a), ref: a }));
+  const meleeFaceBlocked = (c: FaceCandidate<ActorLike>) => {
+    const p = view.player.position, a = c.ref;
+    return aimProvider.blocked({ x: p.x, y: p.y + 1.2, z: p.z }, { x: a.position.x, y: a.bottom + a.height * 0.6, z: a.position.z });
+  };
+  /** Per player frame: states 4 / 32 of the original, from the strike's start to its recovery's end. */
+  const stepMeleeFace = (dt: number) => {
+    const m = meleeFace;
+    if (!m.st) return;
+    if (clock > m.until || !view.walking || (current?.key ?? null) !== m.key) {
+      m.face.stop();
+      m.st = null;
+      stopMeleeLunge();
+      return;
+    }
+    m.face.step(view.player, dt, meleeFaceParams, meleeRange(m.st), meleeFaceCandidates(), meleeFaceBlocked);
+    stepMeleeLunge(dt);
+  };
+  const offMeleeFace = view.player.onUpdate((f) => stepMeleeFace(f.dt));
+
+  // Melee root motion (melee-lunge.ts; docs/game-logic.md §14.1 "Player melee: root motion"): in
+  // third person (MeleeAttack, state 4) the strike and recovery clips' root moves the player
+  // through the motor, its forward part scaled every frame by the swung PWP's p85 (shiv / axe
+  // 0.5) when no target is picked on the ground; entering the state ends Move, so the stick does
+  // not walk until it leaves. First person (state 32) keeps Move, and its clips have no root.
+  const meleeLunge = { lunge: new MeleeLunge(), p85: 1 };
+  const startMeleeLunge = (st: Strike, clip: ResRef | undefined) => {
+    const pl = view.player;
+    if (pl.mode !== 'tp') return stopMeleeLunge();
+    meleeLunge.p85 = readLungeScale(st.pwp ? tpl(epk, st.pwp.ref)?.v : undefined);
+    meleeLunge.lunge.start(clipData(clip));
+    if (!pl.holdMove && pl.onGround) pl.motor.velocity.x = pl.motor.velocity.z = 0;
+    pl.holdMove = true;
+  };
+  const stopMeleeLunge = () => {
+    meleeLunge.lunge.stop();
+    view.player.holdMove = false;
+  };
+  const stepMeleeLunge = (dt: number) => {
+    const l = meleeLunge.lunge, pl = view.player;
+    if (!l.active) return;
+    const d = l.step(dt, meleeRootScale({ onGround: pl.onGround, target: !!meleeFace.face.target, alternate: false, p85: meleeLunge.p85 }));
+    const w = lungeToWorld(d.x, d.z, pl.bodyYaw);
+    pl.rootMove.x += w.x;
+    pl.rootMove.z += w.z;
+  };
+
+  // Props (Breakables, doors, ...): the blade swept frame by frame over the Arm window against
+  // the props' collision (melee-sweep.ts; docs/game-logic.md §14.1 "Melee on props"). It used to
+  // be one ray of 2.5 m from the camera, which in third person (camera ~2.6 m behind the body)
+  // ended before anything in front of the player: the shiv never reached a crate.
+  const bladeShapes = new Map<string, WeaponShape | null>();
+  const bladeShape = (def: WeaponDef | undefined): WeaponShape | undefined => {
+    const r = def?.model;
+    if (!r) return undefined;
+    const k = keyOf(r);
+    let s = bladeShapes.get(k);
+    if (s === undefined) {
+      const mdu = pkgs.get(r.pkg)?.mdu;
+      s = (mdu && weaponShape(readModelSphereNodes(mdu, r.id))) || null;
+      bladeShapes.set(k, s);
+    }
+    return s ?? undefined;
+  };
+  /** The held blade in world space now (the drawn hand: first-person arms or the body). */
+  const bladePose = (): BladePose | null => {
+    const m = heldModel();
+    const s = bladeShape(held?.def);
+    if (!m || !s) return null;
+    m.root.updateWorldMatrix(true, false);
+    const at = (v: readonly number[]): SweepVec3 => {
+      const w = tmpV.set(v[0], v[1], v[2]).applyMatrix4(m.root.matrixWorld);
+      return [w.x, w.y, w.z];
+    };
+    // A one-point weapon (a sphere) sweeps its centre's path [port: its radius is not added].
+    return { a: at(s.a), b: at(s.b ?? s.a) };
+  };
+  interface PropSweep {
+    st: Strike;
+    amount: number;
+    /** Clock time of the Disarm; the window ends after the first sweep at or past it. */
+    until: number;
+    prev: BladePose;
+    struck: Set<number>;
+    /** The blade met level geometry (its impact effect is played once a window) [port]. */
+    wall: boolean;
+  }
+  let propSweep: PropSweep | null = null;
+  const segmentCast = (o: SweepVec3, e: SweepVec3) => {
+    const dx = e[0] - o[0], dy = e[1] - o[1], dz = e[2] - o[2];
+    const len = Math.hypot(dx, dy, dz);
+    const h = len > 1e-4 ? view.collision?.raycast(o[0], o[1], o[2], dx, dy, dz, len) : null;
+    return h ? { distance: h.distance, point: h.point, normal: h.normal, body: h.dynamic } : null;
+  };
+  /** One blow on a prop body (null: not a damageable prop, or the wall test failed). */
+  const strikeProp = (st: Strike, amount: number, body: number, point: SweepVec3, normal: SweepVec3) => {
+    const dmg = damageSvc();
+    const pl = view.player.position;
+    const clear = bladeWallClear(pl, point, body, (o, dir, len) => {
+      const h = view.collision?.raycast(o[0], o[1], o[2], dir[0], dir[1], dir[2], len);
+      return h ? { distance: h.distance, body: h.dynamic } : null;
+    });
+    if (!clear) return null;
+    const at = new THREE.Vector3(...point);
+    const dir = at.clone().sub(tmpV.set(pl.x, at.y, pl.z));
+    const r = dmg?.apply({ point: at, normal: new THREE.Vector3(...normal), amount, kind: st.type, source: 'player', body, dir: dir.lengthSq() > 1e-8 ? dir.normalize() : camDir() });
+    return r ?? null;
+  };
+  const stepPropSweep = () => {
+    const s = propSweep;
+    if (!s) return;
+    const cur = bladePose();
+    if (!cur) {
+      propSweep = null;
+      return;
+    }
+    const contacts = bladePropContacts(sweptQuadSegments(s.prev, cur), segmentCast, s.struck);
+    s.prev = cur;
+    for (const c of contacts) {
+      s.struck.add(c.body);
+      const r = strikeProp(s.st, s.amount, c.body, c.point, c.normal);
+      if (!r) continue;
+      const at = new THREE.Vector3(...c.point), n = new THREE.Vector3(...c.normal);
+      // Wall / prop hit effects: the Melee Weapon Material Effects (p77) of the surface.
+      if (!fx.impact(s.st.fx, at, n, { point: c.point, normal: c.normal, dynamic: c.body }, camDir())) play(s.st.hit, at, r.hits.length ? 1 : 0.5);
+      if (r.hits.length) hitMarker(r.hits.some((h) => h.killed));
+    }
+    // Level geometry in the blade's way: the surface's impact effect, once [port].
+    if (!contacts.length && !s.wall) {
+      const h = view.collision?.raycast(cur.a[0], cur.a[1], cur.a[2], cur.b[0] - cur.a[0], cur.b[1] - cur.a[1], cur.b[2] - cur.a[2], Math.hypot(cur.b[0] - cur.a[0], cur.b[1] - cur.a[1], cur.b[2] - cur.a[2]));
+      if (h && h.dynamic === undefined) {
+        s.wall = true;
+        const at = new THREE.Vector3(...h.point), n = new THREE.Vector3(...h.normal);
+        if (!fx.impact(s.st.fx, at, n, h, camDir())) play(s.st.hit, at, 0.5);
+      }
+    }
+    if (clock >= s.until) propSweep = null;
+  };
+
+  const meleeHit = (st: Strike, mult: number, forceMult = 1, window = 0) => {
     const p = view.player.position;
-    const yaw = view.player.yaw;
+    // The blow goes where the body faces (in first person the view), which the auto-face turns
+    // to the picked target; it was the camera's yaw, which in third person can face elsewhere.
+    const yaw = view.player.mode === 'fp' ? view.player.yaw : view.player.bodyYaw;
     const fwdX = -Math.sin(yaw), fwdZ = -Math.cos(yaw);
     const amount = (st.min + Math.random() * (st.max - st.min)) * mult;
+    // Arm: the blade's place now is recorded; the props are swept from the next frame on.
+    const pose = st !== unarmed ? bladePose() : null;
+    if (pose) propSweep = { st, amount, until: clock + window, prev: pose, struck: new Set(), wall: false };
     let best: ActorLike | null = null;
     let bestD = Infinity;
     for (const a of actors()?.list() ?? []) {
@@ -955,18 +1143,19 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
       hitActor(best, amount, at, st.type, undefined, st.suite, st.force !== undefined ? st.force * forceMult : undefined);
       return;
     }
-    // Props in reach (breakables): the world's damage router.
-    const o = camPos(), d = camDir();
+    // No blade to sweep (the port's empty-handed punch, a weapon model without hit nodes): one
+    // ray from the chest along the body's facing [port], no longer from the camera (in third
+    // person the camera's 2.5 m ended behind the player).
+    if (pose) return;
+    const o = new THREE.Vector3(p.x, p.y + 1.2, p.z), d = new THREE.Vector3(fwdX, 0, fwdZ);
     const w = view.collision?.raycast(o.x, o.y, o.z, d.x, d.y, d.z, MELEE_REACH + 0.4);
-    const dmg = damageSvc();
-    if (w) {
-      const point = new THREE.Vector3(...w.point);
-      const normal = new THREE.Vector3(...w.normal);
-      const r = dmg?.apply({ point, normal, amount, kind: st.type, source: 'player', body: w.dynamic, dir: d });
-      // Wall / prop hit effects: the Melee Weapon Material Effects (p77) of the surface.
-      if (!fx.impact(st.fx, point, normal, w, d)) play(st.hit, point, r?.hits.length ? 1 : 0.5);
-      if (r?.hits.length) hitMarker(r.hits.some((h) => h.killed));
-    }
+    if (!w) return;
+    const point = new THREE.Vector3(...w.point);
+    const normal = new THREE.Vector3(...w.normal);
+    const r = w.dynamic !== undefined ? strikeProp(st, amount, w.dynamic, w.point, w.normal) : null;
+    // Wall / prop hit effects: the Melee Weapon Material Effects (p77) of the surface.
+    if (!fx.impact(st.fx, point, normal, w, d)) play(st.hit, point, r?.hits.length ? 1 : 0.5);
+    if (r?.hits.length) hitMarker(r.hits.some((h) => h.killed));
   };
 
   const reload = () => {
@@ -1024,11 +1213,68 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     // Empty-handed the original's set is Player p143 (0x1003db3b), as for the strikes.
     const dur = (b ? b.weaponAction('throw', current?.pwp?.ref ?? unarmed.pwp?.ref ?? DEFAULT_PWP) : 0) || 1;
     const clip = (b?.lastActionClip ?? current?.pwp?.throw ?? readPlayerWeaponProps(epk, DEFAULT_PWP)?.throw) || undefined;
-    const at = (clip && clipMarks(pkgs, clip).find((m) => m.param === 230)?.time) ?? dur * 0.6;
-    consume(def.template, 1);
-    action = { kind: 'throw', until: clock + dur * 0.9 };
-    after(at, () => launch(def));
+    const marks = clip ? clipMarks(pkgs, clip) : [];
+    const at = marks.find((m) => m.param === 230)?.time ?? dur * 0.6;
+    // AttachThrownWeapon (231) takes the carried one into the hand and counts it off; without
+    // that marker before the release the count drops at once and nothing shows in the hand.
+    const grab = marks.find((m) => m.param === 231 && m.time <= at);
+    const grabBone = grab && b ? b.body.skinned.skeleton.byHash.get(grab.boneHash) : undefined;
+    action = { kind: 'throw', until: clock + dur * 0.9, then: showHandHeld };
+    if (grab) after(grab.time, () => attachThrown(def, grabBone));
+    else attachThrown(def, undefined);
+    after(at, () => {
+      carry.releaseHand();
+      launch(def);
+    });
     return true;
+  };
+
+  // The carried throwable (back-throwable.ts; docs/game-logic.md §4.5 "Carried throwable"): the
+  // selected one rides Player p119 = bone 51; AttachThrownWeapon moves it to the marker's bone
+  // (the right hand, 35), hiding the gun there, and the next one is taken out.
+  const carry = new ThrowableCarry(attach.attacher, (m) => buildStaticModel(pkgs, m));
+  const throwableBone = (() => {
+    const v = tpl(epk, { pkg: 2, id: 5 })?.v[119];
+    return typeof v === 'number' && v >= 0 ? v : THROWABLE_BONE;
+  })();
+  /** Held models hidden while the throwable is in their hand (restored as the throw ends). */
+  let handHidden: HeldModel[] = [];
+  const showHandHeld = () => {
+    for (const m of handHidden) m.root.visible = enabled;
+    handHidden = [];
+  };
+  const attachThrown = (def: WeaponDef, bone: number | undefined) => {
+    syncCarry();
+    consume(def.template, 1);
+    const b = body();
+    if (bone !== undefined && b && carry.backKey === def.key) {
+      const handBones = [b.body.skeleton.bones[bone], b.arms?.skeleton.bones[bone]];
+      for (const m of held ? [...held.tp, ...held.fp] : []) {
+        const on = attach.attacher.boneOf(m.root);
+        if (on && handBones.includes(on) && m.root.visible) {
+          m.root.visible = false;
+          handHidden.push(m);
+        }
+      }
+      carry.toHand(bone);
+    }
+    // Run out: the carried throwable with the highest p45 is taken out next (none: nothing on
+    // the back); not while the Killjoy Rebirth effect holds the throwables (stow()).
+    if (countOf(def.template) <= 0 && !stowed) {
+      const next = throwableAfterEmpty(ownedThrowables(), (d) => {
+        const p = tpl(epk, d.template)?.v[45];
+        return typeof p === 'number' ? p : -1;
+      });
+      persist.throwable = next?.key ?? null;
+    }
+  };
+  /** What rides the back now: the selected throwable while the weapons are out. */
+  const syncCarry = () => {
+    const b = body();
+    const list = enabled && b ? ownedThrowables() : [];
+    const def = list.find((d) => d.key === persist.throwable) ?? list[0];
+    const model = def && (def.thrown?.model ?? def.model);
+    carry.syncBack(b ? { body: b.body, arms: b.arms, armsParent: b.armsPivot } : null, def && model ? { key: def.key, model } : null, throwableBone);
   };
 
   const launch = (def: WeaponDef) => {
@@ -1213,8 +1459,13 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     if (!on) {
       action = null;
       timers.length = 0;
+      // Leaving the throw state launches what is still in the hand (0x1002ac50).
+      const inHand = carry.handKey && weaponDef(epk, refOf(carry.handKey));
+      carry.releaseHand();
+      if (inHand && inHand.thrown) launch(inHand);
     }
     for (const m of held ? [...held.fp, ...held.tp] : []) m.root.visible = on;
+    handHidden = [];
   };
 
   // -------------------------------------------------------------------------
@@ -1500,6 +1751,10 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     get lastStrike() {
       return lastStrike;
     },
+    /** The strike's root motion (melee-lunge.ts): playing, model-space distance of the clip, p85 (debug / tests). */
+    get meleeLunge() {
+      return { active: meleeLunge.lunge.active, moved: { ...meleeLunge.lunge.moved }, p85: meleeLunge.p85, target: !!meleeFace.face.target };
+    },
     /** The unarmed Player Weapon Properties (Player p143) and its attacks (debug / tests). */
     unarmed: () => ({ pwp: unarmed.pwp?.ref ?? null, attacks: (unarmed.pwp?.attacks ?? []).map((a) => keyOf(a.clip)), fp: (unarmed.pwp?.fpAttacks ?? []).map((a) => keyOf(a.clip)) }),
     /** False while the weapons are put away (creature form). */
@@ -1656,7 +1911,19 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
   // Re-equip the weapon carried in from the previous level once the body exists.
   let restored = false;
 
-  Object.assign(window, { __weapons: { attach, service, persist, shots, thrown, loaded: ctx.loaded } });
+  Object.assign(window, { __weapons: { attach, service, persist, shots, thrown, carry, loaded: ctx.loaded } });
+
+  // The player's body and arms are posed by the player's update, which runs before the frame is
+  // drawn; the game systems (this update) run after the draw. Their attachments (the held weapon
+  // models) are placed again right before the draw, from this frame's pose: placed only in
+  // update(), the gun was drawn at the previous frame's hand pose, 3..5 cm behind the hand when
+  // running and more on uneven frame times (docs/game-logic.md §4.5 "Held weapon placement").
+  const offDraw = view.onBeforeDraw(() => {
+    // The carried throwable follows the selection first, so a new one is placed this frame too.
+    syncCarry();
+    const b = body();
+    if (b) attach.attacher.updateCarriers(b.body, b.arms);
+  });
 
   return {
     name: 'weapons',
@@ -1688,6 +1955,7 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
       for (let i = timers.length - 1; i >= 0; i--) {
         if (clock >= timers[i].at) timers.splice(i, 1)[0].fn();
       }
+      stepPropSweep();
       // (A held trigger is one struggle press while a creature holds the player, not one a frame.)
       if (fireHeld && current?.auto && canAct() && !view.player.attackOverride) attack();
       if (current?.kind === 'ranged' && clipOf(current) <= 0 && reserveOf(current) > 0 && !busy() && cooldown <= 0) reload();
@@ -1723,7 +1991,10 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     },
     dispose() {
       offSave();
+      offDraw();
       offThrownSave();
+      offMeleeFace();
+      stopMeleeLunge();
       if (aimAssist.provider === aimProvider) aimAssist.provider = null;
       aimAssist.lock = null;
       document.removeEventListener('mousedown', onDown);
@@ -1733,6 +2004,7 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
       dom.removeEventListener('contextmenu', onCtx);
       if (inv && origAdd) inv.add = origAdd;
       combatLink.attack = null;
+      carry.dispose();
       dropHeld();
       npcWeapons.dispose();
       for (const m of warmHeld) {

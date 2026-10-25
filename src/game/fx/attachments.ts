@@ -321,6 +321,15 @@ export class Attachments {
     return (this.sets.get(uid) ?? []).map((a) => ({ hp: a.hp, ref: a.ref, generators: a.gens.length, emitters: a.emitters?.length ?? 0, light: !!a.light, worn: !!a.worn }));
   }
 
+  /**
+   * Bones holding a body part (spawnParts) of a carrier, for saved games: the Character save
+   * writes its body-part set (+0x31c) with the rest of its components (docs/re/saves.md
+   * "Character") [verified: the component is saved; its record not traced].
+   */
+  partBones(uid: number): number[] {
+    return (this.sets.get(uid) ?? []).filter((a) => a.emitters && !a.worn).map((a) => a.hp);
+  }
+
   /** Creation sets still waiting for their carrier (tests / overlay). */
   get pendingCount() {
     return this.pending.size;

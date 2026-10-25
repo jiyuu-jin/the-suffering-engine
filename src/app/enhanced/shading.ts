@@ -98,7 +98,10 @@ const vogel = (i: N, n: N, rot: N): N => {
   return vec2(th.cos(), th.sin()).mul(r);
 };
 
-/** Lit fraction (0..1) of P in the flashlight's shadow map (PCF, EU.taps). */
+/**
+ * Lit fraction (0..1) of P in the flashlight's shadow map (PCF, EU.taps). The taps are only
+ * fetched inside the map's frustum (outside it the result is 1 either way: Perf C, docs/perf.md).
+ */
 export const flashShadow = Fn(([P, Nrm]: N[]) => {
   const lit = float(1).toVar();
   If(EU.flShadowOn.greaterThan(0.5), () => {
@@ -108,17 +111,19 @@ export const flashShadow = Fn(([P, Nrm]: N[]) => {
     const Pb = P.add(Nrm.mul(dist.mul(0.004).add(0.01)));
     const sp = EU.flShadowMatrix.mul(vec4(Pb, 1));
     const ndc = sp.xyz.div(sp.w.max(1e-4));
-    const uv0 = vec2(ndc.x.mul(0.5).add(0.5), mix(ndc.y.mul(0.5).add(0.5), ndc.y.mul(-0.5).add(0.5), EU.flipY));
-    const d = Pb.sub(EU.flPos).length().div(EU.flRange).sub(0.0025);
-    const rot = interleavedGradientNoise(screenCoordinate.xy).mul(6.2832);
-    const sum = float(0).toVar();
-    const n = EU.taps;
-    Loop(n, ({ i }: { i: N }) => {
-      const o = vogel(i, n, rot).mul(EU.flShadowTexel.mul(1.6));
-      sum.addAssign(step(d, shadowTextures.flash.sample(uv0.add(o)).level(0).r));
-    });
     const inside = step(ndc.x.abs(), 1).mul(step(ndc.y.abs(), 1)).mul(step(0, sp.w));
-    lit.assign(mix(float(1), sum.div(float(n)), inside));
+    If(inside.greaterThan(0.5), () => {
+      const uv0 = vec2(ndc.x.mul(0.5).add(0.5), mix(ndc.y.mul(0.5).add(0.5), ndc.y.mul(-0.5).add(0.5), EU.flipY));
+      const d = Pb.sub(EU.flPos).length().div(EU.flRange).sub(0.0025);
+      const rot = interleavedGradientNoise(screenCoordinate.xy).mul(6.2832);
+      const sum = float(0).toVar();
+      const n = EU.taps;
+      Loop(n, ({ i }: { i: N }) => {
+        const o = vogel(i, n, rot).mul(EU.flShadowTexel.mul(1.6));
+        sum.addAssign(step(d, shadowTextures.flash.sample(uv0.add(o)).level(0).r));
+      });
+      lit.assign(sum.div(float(n)));
+    });
   });
   return lit;
 });
@@ -150,9 +155,13 @@ export const flashRadiance = Fn(([P, Nrm]: N[]) => {
   // magnified blobs (6a's foliage).
   const axial = dot(Lv.negate(), EU.flDir);
   const att = win.mul(win).div(d2.add(FLASH_NEAR)).mul(smoothstep(EU.flStart.x, EU.flStart.y, axial));
-  const k = flashCone(Ldir).mul(att);
+  const k = flashCone(Ldir).mul(att).toVar();
   const ndl = dot(Nrm, Ldir).max(0);
-  const sh = flashShadow(P, Nrm);
+  // (The shadow lookup only where the beam reaches: elsewhere k is 0 and so is the radiance.)
+  const sh = float(1).toVar();
+  If(k.greaterThan(0), () => {
+    sh.assign(flashShadow(P, Nrm));
+  });
   return vec4(EU.flColor.mul(k).mul(sh), ndl);
 });
 
@@ -224,6 +233,23 @@ const surfaceSpecular = (s?: EnhancedSurfaceNodes): N => {
   return own.lessThan(0).select(EU.specular, own);
 };
 
+/**
+ * The flashlight radiance and the two lamp-cube lookups at the fragment, shared by a graph's light
+ * factor and its specular (both read them): one variable each per shader, keyed by the normal node
+ * the graph lights with. Built twice, every lit fragment ran the flashlight's PCF and the lamp
+ * cubes' taps twice (Perf C, docs/perf.md).
+ */
+const sharedTerms = new WeakMap<object, { fl: N; s0: N; s1: N }>();
+const fragmentTerms = (Nrm: N): { fl: N; s0: N; s1: N } => {
+  let t = sharedTerms.get(Nrm);
+  if (!t) {
+    const P = positionWorld;
+    t = { fl: flashRadiance(P, Nrm).toVar(), s0: lampShadow(0, P, Nrm).toVar(), s1: lampShadow(1, P, Nrm).toVar() };
+    sharedTerms.set(Nrm, t);
+  }
+  return t;
+};
+
 /** engineLightFactor in Enhanced mode. */
 function lightFactor(L: N, o: EngineLightOptions): N {
   const opts = o as EngineLightOptions & { surface?: EnhancedSurfaceNodes };
@@ -231,8 +257,9 @@ function lightFactor(L: N, o: EngineLightOptions): N {
     const P = positionWorld;
     const Nrm = surfaceNormal(opts.surface as EnhancedSurfaceNodes | undefined);
     // Take out the shadowed lamps' share where their cube map says occluded.
-    const occl0 = float(1).sub(lampShadow(0, P, Nrm));
-    const occl1 = float(1).sub(lampShadow(1, P, Nrm));
+    const terms = fragmentTerms(Nrm);
+    const occl0 = float(1).sub(terms.s0);
+    const occl1 = float(1).sub(terms.s1);
     // (At most 1 − SHADOW_KEEP of the authored light: the lamp's share is an estimate, and baked
     // light that is already dark must not go black.)
     const L0 = vec3(L).max(0);
@@ -242,7 +269,7 @@ function lightFactor(L: N, o: EngineLightOptions): N {
     // Ambient floor: part of the ambient light of the camera's region (lights.ts), so a room's
     // dark corners stay readable as the original's ambient keeps them.
     const E = pow(softLight(Ls).max(EU.ambientFloor), vec3(TO_LINEAR)).mul(EU.engineGain).toVar();
-    const fl = flashRadiance(P, Nrm);
+    const fl = terms.fl;
     E.addAssign(fl.xyz.mul(fl.w));
     return pow(E, vec3(1 / TO_LINEAR)).mul(0.5);
   })();
@@ -258,11 +285,9 @@ const specular = (opts: EngineLightOptions): N =>
     const f0 = float(0.04).mul(surfaceSpecular(opts.surface as EnhancedSurfaceNodes | undefined).mul(2)).toVar();
     const acc = vec3(0).toVar();
     // Flashlight.
-    const fl = flashRadiance(P, Nrm);
+    const { fl, s0, s1 } = fragmentTerms(Nrm);
     acc.addAssign(fl.xyz.mul(ggx(Nrm, V, EU.flPos.sub(P).normalize(), rough, f0)));
     // Lamps: engine colour (linear) × min(I / d², 2), their cube shadow when they have one.
-    const s0 = lampShadow(0, P, Nrm).toVar();
-    const s1 = lampShadow(1, P, Nrm).toVar();
     Loop(EU.lampCount, ({ i }: { i: N }) => {
       const a = lampArray.element(int(i).mul(2));
       const b = lampArray.element(int(i).mul(2).add(1));
@@ -270,7 +295,11 @@ const specular = (opts: EngineLightOptions): N =>
       const d2 = dot(v, v).max(0.05);
       const rad = b.xyz.mul(a.w.div(d2).min(2)).mul(1.4);
       const sh = mix(float(1), mix(s0, s1, step(0.5, b.w)), step(-0.5, b.w));
-      acc.addAssign(rad.max(0).mul(sh).mul(ggx(Nrm, V, v.div(d2.sqrt()), rough, f0)));
+      const Ld = v.div(d2.sqrt());
+      // (GGX carries N·L: a lamp behind the surface adds exactly nothing.)
+      If(dot(Nrm, Ld).greaterThan(0), () => {
+        acc.addAssign(rad.max(0).mul(sh).mul(ggx(Nrm, V, Ld, rough, f0)));
+      });
     });
     return acc;
   })();

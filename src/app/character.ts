@@ -13,12 +13,12 @@ import * as THREE from 'three/webgpu';
 import type { DecodedTexture } from '../formats/types';
 import { Blend, findEntry, TDU_TEXTURE, type PackageSet, type SurfaceMaterial } from '../formats/model';
 import { decodeTexture } from '../formats/texture';
-import { modelCullsBackFaces, passAlphaRef } from '../formats/render-data';
+import { modelCullsBackFaces } from '../formats/render-data';
 import { boneSubtree, MAX_INFLUENCES, type Skeleton, type SkinnedModel } from '../formats/skeleton';
 import { blendInto, guessClipLabel, type AnimClipData } from '../formats/animation';
 import { instanceRotation, toOutputSpace, type LevelObject } from '../formats/level';
 import { engineLightMaterial } from './engine-light';
-import { createSurfaceMaterial, enhancedTextures, missingTexture } from './surface-material';
+import { createSurfaceMaterial, enhancedTextures, missingTexture, surfaceAlphaTest, surfaceBaseBlend, toDataTexture } from './surface-material';
 
 /**
  * Whether a character submesh needs its decoded surface material rather than the plain lit
@@ -36,6 +36,33 @@ export function characterSurfaceBlend(m: SurfaceMaterial | undefined): boolean {
   const b = l?.blend;
   if (l?.tint !== undefined) return true;
   return b === Blend.Alpha || b === Blend.Add || b === Blend.Subtract || b === Blend.MulAlpha || b === Blend.Modulate2x;
+}
+
+/**
+ * Whether a skinned submesh with a lit, untinted base pass takes the surface material: a
+ * Layered material (several passes), or a single mode-7 pass (the only blended mode that
+ * characterSurfaceBlend leaves to the skin), both lit by the object's light set. Several passes:
+ * a Layered material, as the engine draws it on every model (docs/game-logic.md §16) [verified
+ * data]: typically an
+ * environment-reflection base (texGen 4), a mode-7 diffuse whose alpha masks the reflection,
+ * and a modulate-2x detail pass. Such a submesh takes the surface material (every pass, lit by
+ * the object's light set) instead of the plain lit skin. The skin drew only the single-pass
+ * texture (`textureKey`: the material's fallback, else the reflection base on mesh UVs) and cut
+ * its alpha at 0.5, but that alpha is the reflection mask, not coverage (a lit opaque pass never
+ * alpha-tests): 1a's booth door torn off by the CartWheeler (skinned Breakable 68a8, model
+ * 9:2304, material 7:764 = 7:257 reflection + 7:256 mode 7 + 7:734 detail) drew as a few rusty
+ * strips with the creature visible through it. 26 submeshes of 18 skinned models (the sequence
+ * doors 9:1927 / 9:2304 / 9:2391 / 9:3117, the Slayers' blades 10:2 / 10:94, ...).
+ */
+export function characterLayeredSurface(m: SurfaceMaterial | undefined): boolean {
+  if (!m || characterSurfaceBlend(m)) return false;
+  const passes = m.layers.filter((x) => x.texture || x.frames);
+  // One mode-7 pass (src + dst x srcAlpha, no alpha test, no depth write: 0x48fab0 / 0x49a990):
+  // the reflection-masked diffuse of a Layered material drawn alone over the frame. Horace's
+  // 10:135, the 1a Static Object 10:89, 5b's 28:46 and the Docks Breakable 34:87 have one; the
+  // lit skin cut its alpha (the reflection mask, mostly below one half) at 0.5 and drew 96..99 %
+  // of each such part as holes.
+  return passes.length > 1 || passes[0]?.blend === Blend.AddOverAlpha;
 }
 
 /**
@@ -95,22 +122,19 @@ export function decodeCharacterTextures(skinned: SkinnedModel, packages: Package
     add(s.textureKey);
     // Surface-material submeshes draw every pass: their later layers' textures too (Killjoy's
     // second pass 10:428 was missing and drew the placeholder).
-    if (characterSurfaceBlend(s.material)) for (const l of s.material!.layers) add(l.texture);
+    if (characterSurfaceBlend(s.material) || characterLayeredSurface(s.material)) for (const l of s.material!.layers) add(l.texture);
   }
   return out;
 }
 
-function toTexture(src: DecodedTexture): THREE.DataTexture {
-  const tex = new THREE.DataTexture(src.rgba, src.width, src.height, THREE.RGBAFormat, THREE.UnsignedByteType);
-  tex.name = src.name ?? src.key;
-  tex.flipY = false; // engine UVs address stored rows directly
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.magFilter = THREE.LinearFilter;
-  tex.minFilter = THREE.LinearMipmapLinearFilter;
-  tex.generateMipmaps = true;
+/**
+ * GPU texture of a character pass: the static surfaces' (surface-material.ts toDataTexture: a
+ * cut-out pass gets the coverage-preserving mips, any other pass sees a punch-through texture's
+ * alpha-0 texels black), at the characters' anisotropy.
+ */
+function toTexture(src: DecodedTexture, cutout = false): THREE.DataTexture {
+  const tex = toDataTexture(src, { cutout });
   tex.anisotropy = 4;
-  tex.needsUpdate = true;
   return tex;
 }
 
@@ -130,16 +154,20 @@ export function buildSkeleton(skel: Skeleton): { skeleton: THREE.Skeleton; bones
 }
 
 /**
- * Alpha test of a character pass drawn lit (not a surface-material pass): a cut-out pass (mode 8)
- * keeps alpha > 200 / 255 whatever the texture's header says (0x48fab0). Killjoy's figures carry
- * 2:904 (texture 2:164, alpha 0 everywhere) on their light cones: drawn opaque, the cones pinned
- * to a lens became the black stretched triangles of 6a's phone vision. Otherwise a texture with
- * alpha cuts at 0.5, as before [port].
+ * Alpha test of a character pass drawn lit (not a surface-material pass): the static surfaces'
+ * rule (surface-material.ts surfaceBaseBlend / surfaceAlphaTest), from the pass's blend mode
+ * alone as the engine's pass state decides it (0x48fab0) [verified]. A cut-out pass (mode 8)
+ * keeps alpha above CUTOUT_ALPHA_TEST whatever the texture's header says: Killjoy's figures
+ * carry 2:904 (texture 2:164, alpha 0 everywhere) on their light cones; drawn opaque, the cones
+ * pinned to a lens became the black stretched triangles of 6a's phone vision. An opaque pass
+ * (mode 0) has no test, whatever its texture's alpha holds: the skin used to cut any texture
+ * with alpha at 0.5, which opened Fester's 10:40 part 4 (10:352, whose alpha is a reflection
+ * mask, 99 % below one half), the trunks of the Outdoor Common trees 23:135 / 137 / 138 / 140
+ * and the lettering decal of the Prelude's PoliceBoat 55:1. Only a part without a decoded
+ * material still reads its texture's alpha as cut-out coverage [port].
  */
 export function characterAlphaTest(m: SurfaceMaterial | undefined, hasAlpha: boolean): number {
-  const l = m?.layers.find((x) => x.texture || x.frames);
-  if (l?.blend === Blend.Cutout) return passAlphaRef(Blend.Cutout)!;
-  return hasAlpha ? 0.5 : 0;
+  return surfaceAlphaTest(surfaceBaseBlend(m, hasAlpha));
 }
 
 /** SkinnedMesh with one material group per submesh. Triangles are re-wound to CCW-front. */
@@ -160,6 +188,15 @@ export function buildSkinnedMesh(
   const materials: (THREE.MeshStandardNodeMaterial | THREE.MeshBasicNodeMaterial)[] = [];
   const disposables: { dispose(): void }[] = [geometry];
   const texCache = new Map<string, THREE.DataTexture>();
+  // One GPU texture per (texture, cut-out or not): the two differ in mips and punch-through texels.
+  const tex = (key: string, cutout = false) => {
+    const d = textures.get(key);
+    if (!d) return null;
+    const id = `${cutout ? 'cut' : 'tx'}:${d.key}`;
+    let t = texCache.get(id);
+    if (!t) (t = toTexture(d, cutout)), texCache.set(id, t), disposables.push(t);
+    return t;
+  };
   // Back faces: the object draw (SUFFERING.EXE 0x493410) culls them for a model whose header flag
   // word has bit 23, characters included (Killjoy 10:90, Hermes 10:92); every other model is
   // drawn two-sided (docs/re/renderer.md §5.1) [verified].
@@ -174,35 +211,25 @@ export function buildSkinnedMesh(
     geometry.addGroup(o, s.indices.length, i);
     o += s.indices.length;
 
-    if (characterSurfaceBlend(s.material)) {
+    const layered = characterLayeredSurface(s.material);
+    if (layered || characterSurfaceBlend(s.material)) {
       // Effect passes (additive ghosts and the like): the surface material with its blend
-      // state, tint and alpha test; unlit like every effect pass.
-      const tex = (key: string) => {
-        const d = textures.get(key);
-        if (!d) return null;
-        let t = texCache.get(d.key);
-        if (!t) (t = toTexture(d)), texCache.set(d.key, t), disposables.push(t);
-        return t;
-      };
+      // state, tint and alpha test; unlit like every effect pass. Layered lit materials (a
+      // reflection base under a masked diffuse): every pass, lit by the object's light set.
       const { material } = createSurfaceMaterial(
-        { material: s.material, textureKey: s.textureKey, vertexColors: false, hasUvs: true, side },
-        { texture: (key) => tex(key), missing: missingTexture, hasAlpha: (key) => !!textures.get(key)?.hasAlpha },
+        { material: s.material, textureKey: s.textureKey, vertexColors: false, hasUvs: true, side, lightSet: layered },
+        { texture: (key, cutout) => tex(key, cutout), missing: missingTexture, hasAlpha: (key) => !!textures.get(key)?.hasAlpha },
       );
       materials.push(material);
       disposables.push(material);
       return;
     }
     const src = s.textureKey ? textures.get(s.textureKey) : undefined;
-    let map: THREE.DataTexture | null = null;
-    if (src) {
-      map = texCache.get(src.key) ?? toTexture(src);
-      if (!texCache.has(src.key)) {
-        texCache.set(src.key, map);
-        disposables.push(map);
-      }
-    }
+    // Alpha test and coverage as for a static surface of the same blend mode (characterAlphaTest).
+    const cutout = surfaceBaseBlend(s.material, !!src?.hasAlpha) === Blend.Cutout;
+    const map = src ? tex(s.textureKey!, cutout) : null;
     // Enhanced mode: the texture cache's upscaled albedo (surface-material.ts enhancedTextures).
-    const drawn = src && map && enhancedTextures.texture ? enhancedTextures.texture(src.key, false, map) : map;
+    const drawn = src && map && enhancedTextures.texture ? enhancedTextures.texture(src.key, cutout, map) : map;
     const mat = new THREE.MeshStandardNodeMaterial({
       color: map ? 0xffffff : 0x8a7f74,
       map: drawn,
@@ -211,6 +238,7 @@ export function buildSkinnedMesh(
       side,
       alphaTest: characterAlphaTest(s.material, !!src?.hasAlpha),
     });
+    mat.alphaToCoverage = cutout;
     mat.name = s.textureKey ?? 'untextured';
     // Lit like the engine's dynamic objects: its own light set (ambient region, directional / rim
     // lights, at most 5 point lights ranked at the character, spots) (engine-light.ts).

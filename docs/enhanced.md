@@ -173,8 +173,9 @@ noise.
 
 A ray march from the camera to the depth buffer, or to the fog end, at `volumetricScale`
 resolution with `volumetricSteps` steps and per-frame jitter. Density is `1.4 / fogEnd`, so
-thicker fog means denser air, times a slowly drifting 3D noise (dust). Transmittance follows the
-authored fog ramp. It scatters:
+thicker fog means denser air, times a slowly drifting 3D noise (dust: MaterialX's Perlin noise,
+baked once into a tiling 64³ texture, `dust-noise.ts`; docs/perf.md "Perf C"). Transmittance
+follows the authored fog ramp. It scatters:
 
 - the flashlight beam (Henyey-Greenstein g 0.35, through its shadow map, so bars cut the beam);
 - lamp halos and shafts (g 0.25); the cube-shadowed lamps cast shafts;
@@ -189,7 +190,8 @@ like the surface light.
 ### Post stack and horror grade (`post.ts`)
 
 - **GTAO** (three.js `GTAONode`, depth-reconstructed normals) multiplied at 50 % (`grade.ao`):
-  the baked light already carries the contact darkening.
+  the baked light already carries the contact darkening. Below full resolution it reads a copy of
+  the depth at its own size (`half-depth.ts`).
 - **TRAA** (High / Ultra) or **FXAA** (Low / Medium). The scene pass has no MSAA because every
   depth consumer needs a single-sample depth texture.
 - The **viewmodel** (first-person arms, weapon) is its own MSAA pass, composited by an MRT
@@ -246,7 +248,7 @@ What it replaced, and why it failed the user's test of Medium, High and Ultra:
 ### Precompile (`post.ts`, `shadows.ts`, `prewarm.ts warmPasses`, `renderer.ts precompile`)
 
 Enhanced draws the scene into its own passes, never into the canvas: the scene pass (HDR, MRT
-colour + velocity on TRAA tiers), the viewmodel pass (MSAA, MRT colour + coverage) and the
+colour + velocity at every tier, so a tier switch reuses its shaders), the viewmodel pass (MSAA, MRT colour + coverage) and the
 shadow maps (red half float, depth; distance materials instead of the scene's). three.js keys
 shaders and pipelines by the render context, so Original's load-time precompile (the canvas
 pass) built nothing Enhanced drew, and every zone, character and caster first seen in play built

@@ -43,6 +43,7 @@ import { Props, type PropsSaveState } from './props';
 import { Searchlights, type SearchlightsSave } from './searchlight';
 import { Lights, type LightsSaveState } from './lights';
 import { Interactions, viewOnAnchor, type UseTarget } from './interact';
+import { USE_RAY_SLACK, rayBoxEntry, rayPoint, thirdPersonRay, useRay } from './use-ray';
 import { createDamageService, type DamageService } from './damage';
 import { seeThroughParts, sightBlocked } from '../actors/sight';
 import type { DynamicParts, RayHit } from '../../app/physics';
@@ -586,26 +587,49 @@ export async function createWorldSystem(ctx: GameContext): Promise<GameSystem> {
   const overlay = new DevOverlay(world, view.camera, container, () => view.player.position.clone());
   view.scene.add(overlay.group);
 
-  const ray = new THREE.Ray();
   const box = new THREE.Box3();
   const standBox = new THREE.Box3();
-  const hit = new THREE.Vector3();
   let target: { w: WorldEntity; d: DynamicObject | undefined; use?: UseTarget } | null = null;
 
+  /**
+   * In third person, does the eye itself see the point the crosshair picked (no wall between the
+   * head and the object the camera looks at over it)? A hit on the object's own body counts as
+   * clear; the slack lets a ray graze the surface the object is mounted on.
+   */
+  const eyeSees = (eye: THREE.Vector3Like, p: THREE.Vector3Like, uid: number) => {
+    const dx = p.x - eye.x, dy = p.y - eye.y, dz = p.z - eye.z;
+    const len = Math.hypot(dx, dy, dz);
+    if (len < 1e-3) return true;
+    const h = view.collision?.raycast(eye.x, eye.y, eye.z, dx, dy, dz, len);
+    if (!h || h.distance >= len - USE_RAY_SLACK) return true;
+    return h.dynamic !== undefined && dyn.uidOfBody(h.dynamic) === uid;
+  };
+
   const pickTarget = () => {
-    const eye = view.walking ? view.player.eyePosition() : view.camera.position.clone();
+    // The crosshair's ray (use-ray.ts, docs/game-logic.md §14.5 "The port's prompt"): from the
+    // camera along the view, usable where it passes within reach of the eye and up to just past
+    // the first wall. First person: the camera is the eye. Third person: the camera sits behind
+    // an over-the-shoulder pivot; the ray from the head along the view (before) ran 0.45 m beside
+    // the crosshair, so small switches were found only with the crosshair off them.
+    const cam = view.camera.getWorldPosition(new THREE.Vector3());
     const dir = view.camera.getWorldDirection(new THREE.Vector3());
-    ray.set(eye, dir);
+    const eye = view.walking ? view.player.eyePosition() : cam.clone();
     const reach = 3;
-    const wall = view.collision?.raycast(eye.x, eye.y, eye.z, dir.x, dir.y, dir.z, reach);
-    const limit = Math.min(reach, (wall?.distance ?? reach) + 0.15);
+    const camEye = Math.hypot(cam.x - eye.x, cam.y - eye.y, cam.z - eye.z);
+    const wall = view.collision?.raycast(cam.x, cam.y, cam.z, dir.x, dir.y, dir.z, camEye + reach);
+    const r = useRay(cam, dir, eye, reach, wall?.distance);
+    if (!r) return null;
+    const clear = thirdPersonRay(r) ? (p: THREE.Vector3Like, uid: number) => eyeSees(eye, p, uid) : undefined;
+    // The eye's own look at the point under the crosshair (items, modelless switches).
+    const look = new THREE.Vector3(r.eyeDir.x, r.eyeDir.y, r.eyeDir.z);
     // The original never ranks pickups against usables (docs/game-logic.md §14.5 "Use
     // target"): a pickup is taken by touch (the Item touch handler 0x100bda00, within Player
     // p239 / p240 = 2 m), the Use key only goes to usables. The port takes items with E instead
     // of touch, so an item offered here comes first: the original would have taken it anyway.
-    // Items: the one closest to the view direction (within ~22 deg, 2.8 m, not behind a wall).
-    // An item granted by a Quest Item Pickup targets that spot, scenery items nothing (logic.ts
-    // pickupVia: 1a's Shiv in the inmate's back is taken through spot 8368, which kills him).
+    // Items: the one closest to the eye's look at the crosshair's point (within ~22 deg, 2.8 m,
+    // not behind a wall). An item granted by a Quest Item Pickup targets that spot, scenery items
+    // nothing (logic.ts pickupVia: 1a's Shiv in the inmate's back is taken through spot 8368,
+    // which kills him).
     let item: typeof target = null;
     let itemScore = Infinity;
     const v = new THREE.Vector3();
@@ -617,7 +641,7 @@ export async function createWorldSystem(ctx: GameContext): Promise<GameSystem> {
         v.set(seen.pos[0], seen.pos[1] + 0.1, seen.pos[2]).sub(eye);
         const dist = v.length();
         if (dist > 2.8 || dist < 1e-3) continue;
-        const cos = v.dot(dir) / dist;
+        const cos = v.dot(look) / dist;
         if (cos < 0.93) continue;
         const occ = view.collision?.raycast(eye.x, eye.y, eye.z, v.x, v.y, v.z, dist);
         if (occ && occ.distance < dist - 1.0) continue;
@@ -626,18 +650,17 @@ export async function createWorldSystem(ctx: GameContext): Promise<GameSystem> {
       }
     }
     if (item) return item;
-    const used = interact.pick(eye, dir, limit);
+    const used = interact.pick(r, clear);
     if (used) return { w: used.w, d: dyn.objects.get(used.uid), use: used };
-    // Switches / doors: looked at (the ray hits their box before any wall: the port's prompt),
-    // and usable from where the player stands as the original tests it (Interactions
-    // switchReach: the template fit test, reach / height / facing / side); the nearest
-    // approach point wins, as the original ranks usables [verified].
+    // Switches / doors: looked at (the crosshair's ray meets their box within reach, before any
+    // wall: the port's prompt), and usable from where the player stands as the original tests it
+    // (Interactions switchReach: the template fit test, reach / height / facing / side); the
+    // nearest approach point wins, as the original ranks usables [verified].
     let best: typeof target = null;
     let bestScore = Infinity;
     for (const d of dyn.objects.values()) {
       if (!d.visible) continue;
       const w = world.get(d.uid);
-      // p23 = 0: the player cannot use it (scripted doors); the engine never offers it.
       if (!w || !world.switchUsable(w)) continue;
       const c = d.root.matrix.elements;
       const dx = c[12] - eye.x, dy = c[13] - eye.y, dz = c[14] - eye.z;
@@ -645,13 +668,12 @@ export async function createWorldSystem(ctx: GameContext): Promise<GameSystem> {
       dyn.bounds(d, box);
       // A lever's box (its p37 base) is looked at as the switch.
       if (d.stand?.visible) box.union(dyn.bounds(d.stand, standBox));
-      const p = ray.intersectBox(box, hit);
-      if (!p) continue;
-      const t = p.distanceTo(eye);
-      if (t > limit) continue;
-      const reach = view.walking ? interact.switchReach(w) : undefined;
-      if (reach === null) continue;
-      const score = reach ?? t;
+      const t = rayBoxEntry(r.origin, r.dir, box.min, box.max, r.near, r.far);
+      if (t === null) continue;
+      if (clear && !clear(rayPoint(r, t), d.uid)) continue;
+      const fit = view.walking ? interact.switchReach(w) : undefined;
+      if (fit === null) continue;
+      const score = fit ?? t;
       if (score < bestScore) (bestScore = score), (best = { w, d: d as DynamicObject | undefined, use: undefined });
     }
     // A Switch without a model (the only one: 6a's truck jack a08, Interaction Properties 2:924,
@@ -664,10 +686,10 @@ export async function createWorldSystem(ctx: GameContext): Promise<GameSystem> {
         if (w.destroyed || !w.visible || dyn.objects.has(w.uid) || !world.switchUsable(w)) continue;
         const dx = w.pos[0] - eye.x, dy = w.pos[1] - eye.y, dz = w.pos[2] - eye.z;
         if (dx * dx + dy * dy + dz * dz > 36) continue;
-        if (!viewOnAnchor(eye, dir, interact.switchAnchors(w), reach)) continue;
-        const r = interact.switchReach(w);
-        if (typeof r !== 'number') continue;
-        if (r < bestScore) (bestScore = r), (best = { w, d: undefined, use: undefined });
+        if (!viewOnAnchor(eye, look, interact.switchAnchors(w), reach)) continue;
+        const fit = interact.switchReach(w);
+        if (typeof fit !== 'number') continue;
+        if (fit < bestScore) (bestScore = fit), (best = { w, d: undefined, use: undefined });
       }
     }
     return best;

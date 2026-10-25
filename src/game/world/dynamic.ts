@@ -53,31 +53,6 @@ function usablePushable(e: Entity): boolean {
   return e.className === 'Pushable' && e.values[23] !== 0;
 }
 
-/**
- * `before` index of a placed object's load-time light pass (static-light.ts setFor): which
- * lights it sees. In SUFFERING.EXE the pass (0x4ca3a0) runs at the object's first draw: scene
- * object vtable +0x84 (0x4ca6c0) is called only by the draw functions 0x4930f0 / 0x492950, once
- * the frame's gather (+0x164) has filled an upload with at least one light [verified]. An object
- * hidden at start (instance flag 0x1 clear: SetVisible(0) clears scene object +8 bit 0,
- * 0x4541a0) is not drawn before the logic shows it, so its pass sees every light that is on then:
- * undefined (every static light on at load, below) [port: the lights on at load stand for those on at the
- * reveal]. 1a: the Shiv in the stabbed inmate's back (Ammo Box 5bfb, index 419) precedes its
- * cell's lamp (5c06, 427) and the root Ambient Light (3206); with the order rule it was black.
- * An object shown at start keeps the lights created before it (its level index): the 1a cell
- * doors, shown at start like the start-visible pickups and drawn the same way, have black
- * colours in the PC captures, which every light at their first draw cannot give (rendered: bars
- * at 255 against 180) [inferred from data; the code path that makes it so was not found,
- * docs/re/renderer.md §1.9]. Either way only static lights go into the colours; switchable
- * ones light the object per frame, so its colours do not stay lit when a lamp goes out
- * (static-light.ts) [port].
- * An object created during play (a dead guard's dropped revolver, world.ts placeDrop: no level
- * index, -1) is first drawn long after every light exists: every light too. (With its -1 as
- * the order it saw no light at all and was drawn black, lit only by the flashlight.)
- */
-export function loadPassBefore(e: Pick<Entity, 'flags' | 'index'> | undefined): number | undefined {
-  return e && e.flags & 1 && e.index >= 0 ? e.index : undefined;
-}
-
 /** Synthetic uids for objects spawned at runtime (debris, broken remains). */
 let nextSpawnUid = 0x40000000;
 
@@ -216,8 +191,8 @@ export class DynamicObjects {
     lduFile: SrscFile | undefined,
     /**
      * The level's lights for the load-time pass (formats/static-light.ts): placed objects
-     * without .ldu colours get their colours from the engine's pass (the lights it sees:
-     * loadPassBefore, in the object's groups). Absent: lit as dynamic objects (`?lighting=legacy`, tests).
+     * without .ldu colours get their colours from the engine's pass (every light on at load, in
+     * the object's groups). Absent: lit as dynamic objects (`?lighting=legacy`, tests).
      */
     private readonly loadLighting?: StaticLighting,
   ) {
@@ -355,7 +330,7 @@ export class DynamicObjects {
   /**
    * Build a mesh + optional collision body for a model at a placement matrix (output space).
    * `colors` = baked .ldu colours. Without them, `lightAtLoad` (placed objects) runs the engine's
-   * load-time pass at the placement (formats/static-light.ts: the lights of loadPassBefore in the
+   * load-time pass at the placement (formats/static-light.ts: every light on at load in the
    * object's groups, stored unhalved, then drawn as precomputed: 2 × colour + the switchable lights per frame,
    * docs/re/renderer.md §1.6); otherwise the mesh is lit like a dynamic object (the colour
    * attribute, the level's median brightness, is read only by the legacy look) [port: spawned
@@ -385,7 +360,7 @@ export class DynamicObjects {
     const m = this.model(modelRef);
     if (!m) return undefined;
     const colors = opts.colors && opts.colors.length === 4 * m.vertexCount ? opts.colors : undefined;
-    const load = !colors && opts.lightAtLoad && this.loadLighting && !LEGACY_LIGHTING ? this.loadTimeSet(m, base, opts.scale, loadPassBefore(opts.entity), opts.entity?.uid) : undefined;
+    const load = !colors && opts.lightAtLoad && this.loadLighting && !LEGACY_LIGHTING ? this.loadTimeSet(m, base, opts.scale, opts.entity?.uid) : undefined;
 
     const root = new THREE.Group();
     root.name = name;
@@ -488,10 +463,10 @@ export class DynamicObjects {
 
   /**
    * The load-time pass of a placed model (formats/static-light.ts): its light list at its
-   * bounding-sphere centre (loadPassBefore, the object's groups), and a shader of its (scaled, local)
+   * bounding-sphere centre (the object's groups), and a shader of its (scaled, local)
    * vertices at the placement.
    */
-  private loadTimeSet(m: RiotModel, base: THREE.Matrix4, scale: [number, number, number] | undefined, index: number | undefined, uid?: number) {
+  private loadTimeSet(m: RiotModel, base: THREE.Matrix4, scale: [number, number, number] | undefined, uid?: number) {
     const L = this.loadLighting!;
     const s = scale ?? [1, 1, 1];
     const e = base.elements;
@@ -515,8 +490,11 @@ export class DynamicObjects {
       world(m.positions[3 * i] * s[0], m.positions[3 * i + 1] * s[1], m.positions[3 * i + 2] * s[2], p);
       r2 = Math.max(r2, (p[0] - cx) ** 2 + (p[1] - cy) ** 2 + (p[2] - cz) ** 2);
     }
-    // The lights the pass sees (loadPassBefore), of the groups holding the object (static-light.ts).
-    const set = L.setFor(cx, cy, cz, Math.sqrt(r2), index, uid);
+    // The pass runs at the object's first draw (0x4ca6c0, only from the draw functions 0x4930f0 /
+    // 0x492950), after the whole level is loaded: every light on at load, shown at start or not,
+    // dropped during play or placed, of the groups holding the object (static-light.ts)
+    // [verified code; docs/re/renderer.md §1.9].
+    const set = L.setFor(cx, cy, cz, Math.sqrt(r2), uid);
     const nm = new THREE.Matrix3().getNormalMatrix(base).elements;
     const q = [0, 0, 0];
     return {

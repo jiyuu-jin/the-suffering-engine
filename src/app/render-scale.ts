@@ -250,13 +250,23 @@ export const URL_SCALE: ScaleSetting | null = typeof location !== 'undefined' ? 
 
 /**
  * Smooth pacing on high-refresh displays (ProMotion: 120 Hz rAF) with the frame-rate limit Off:
- * when frames keep missing the display's interval (over 20 % of a second's frames more than 1.5
- * intervals apart), render on every other display frame (a steady 60 instead of a 120 / 60
- * judder); back to every frame after 3 s whose frames took under 70 % of the interval on the main
+ * when frames keep missing the display's interval (over PACE_LATE_SHARE of a second's frames more
+ * than 1.5 intervals apart), render on every other display frame (a steady 60 instead of a
+ * 120 / 60 judder); back to every frame after 3 s whose frames took under 70 % of the interval on the main
  * thread. A return that fails within 5 s doubles the wait before the next (5 s .. 120 s): the GPU
  * side of the frame is not measurable (DynamicResolution). Displays at 75 Hz and below are never
  * paced. Pure (tests).
  */
+/**
+ * Share of a second's drawn frames that may miss the display interval before the pacer halves
+ * the rate. It was 0.2: a GPU that keeps up with 120 Hz most of the time but not always (the
+ * frames-in-flight limit then skips a display frame every 6..20 frames) stayed below it, so the
+ * game ran an uneven 100..115 fps (8.3 ms frames with a 16.7 ms one every few) for as long as the
+ * load lasted: a judder of the whole picture on ProMotion displays. A few hitches a second (GC,
+ * a resize) stay under 0.05.
+ */
+export const PACE_LATE_SHARE = 0.05;
+
 export class FramePacer {
   /** Frame-rate cap in effect (0 = every display frame). */
   cap = 0;
@@ -294,7 +304,7 @@ export class FramePacer {
     this.acc = this.late = this.frames = this.work = 0;
     if (this.hz <= 75) return (this.cap = 0);
     if (this.cap === 0) {
-      if (lateShare > 0.2) {
+      if (lateShare > PACE_LATE_SHARE) {
         this.backoff = now - this.since < 5000 ? Math.min(120_000, this.backoff * 2) : 5000;
         this.cap = Math.round(this.hz / 2);
         this.since = now;

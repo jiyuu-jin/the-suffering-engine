@@ -139,6 +139,12 @@ its rotation. `0x44fd70` turns them into animator flags, for channel-0 keys only
 
 - A start time > 0 with any extracted axis resets the reference (animator flag 0x80), so the
   delta does not jump.
+- The extracted delta is scaled per axis in model space by animator +0x64 / +0x68 / +0x6c
+  (x, y, z; 1 by default) before the model's matrix turns it, and is added to the object's
+  pending matrix (object vtable +0xf0, `0x4546d0`), the same one the player's gait moves.
+  Gameplay writers: the player's melee strike (+0x6c = PWP p85 without a target), the jump
+  power (+0x6c) and the clamber's ledge height (+0x68). `docs/game-logic.md` §14.1 "Player
+  melee: root motion".
 - Data:
   - 1240 of 1433 keys use 0000;
   - walk / run clips driven by transform keys use `0020` (forward axis z locked, sway and bob
