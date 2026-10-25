@@ -12,7 +12,10 @@
 //   p62/p63 heartbeat volume (%) p64/p65 heartbeat pitch     p70/p71 reputation range (-150..150)
 //   p80/p81 meter-gain scale at reputation p70 / p71         p82/p83 drain /s at p70 / p71
 //   p143 Player Weapon Properties (locomotion clips + speeds)  p253 other-form template
+//   p254 the morph's lead-in clip on this form's rig (its MorphCharacter event starts p255)
 //   p255 Character Morpher (model, clip p3, duration p4)       p257 health drain /s at empty meter
+//   p272 morph clock divisor (the game clock runs at 1 / p272 while morphing; Torque's clips x p272)
+//   p273 the morph-in's Screen Blur   p274 the morph's Object Generator (a light at the player)
 //   p258 meter maximum   p259 kill-combo window (s)   p260/p261 combo x2 / x3+ multipliers
 //   p262 unknown-flag multiplier   p263 melee-kill multiplier   p264 held Melee Weapon multiplier
 //   p265 Screen Blur, p266/p267 Screen Faders while transformed   p270/p271 FOV pulse (deg)
@@ -69,7 +72,18 @@ export interface FormParams {
   fovPulse: [number, number];
   lowMeterPct: number;
   /** Morph to the other form: model, clip and duration (Character Morpher, p255). */
-  morph?: { model?: ResRef; clip?: ResRef; duration: number };
+  morph?: { model?: ResRef; clip?: ResRef; duration: number; cosine?: boolean };
+  /**
+   * p254: the clip this form's rig plays when a morph starts (Morph state enter 0x10044e70 ->
+   * 0x100440f0); its MorphCharacter event (message 220 -> 0x10044970) spawns the p255 morpher.
+   */
+  morphLead?: ResRef;
+  /** p272: while morphing the game clock runs at 1 / p272 and the player's clips at x p272 (0: none). */
+  morphClockDiv: number;
+  /** p273: Screen Blur spawned when a morph out of this form starts (morph-in only: 0x100441e3). */
+  morphBlur?: ResRef;
+  /** p274: Object Generator spawned at the player for the morph (4:1250: a white Point Light). */
+  morphEffect?: ResRef;
   /** Screen effects while in this form (creature: blur + tint; human: unused here). */
   blur?: ResRef;
   tint?: ResRef;
@@ -92,9 +106,10 @@ export interface FormParams {
   hitDamageType?: number;
   /**
    * The form's arm weapons (p231 Melee Weapons on the p232 bones, by skeleton index): p68 the
-   * damage of a blow (flat, x the Attack's p6), p70 its type (src/game/insanity/melee.ts).
+   * damage of a blow (flat, x the Attack's p6), p69 its impact force (x the Attack's p7), p70 its
+   * type (src/game/insanity/melee.ts).
    */
-  armWeapons: { template: ResRef; bone: number; damage: number; type?: number }[];
+  armWeapons: { template: ResRef; bone: number; damage: number; force: number; type?: number }[];
   /** Reputation scale of the player's blows on Unspeakable NPCs: p78 / p79 over p70..p71. */
   npcDamageScale: [number, number];
   insanityAttacks: ResRef[];
@@ -174,8 +189,10 @@ export interface AttackParams {
   template: ResRef;
   clip?: ResRef;
   follow?: ResRef;
-  /** p6: damage multiplier [inferred]. */
+  /** p6: damage multiplier (Melee Weapon p68 x p6, Suffering.rfl 0x100ca920). */
   scale: number;
+  /** p7: impact force multiplier (Melee Weapon p69 x p7, 0x100caa7d): what the hit reaction reads. */
+  forceScale: number;
 }
 
 const soundKeys = (v: PropValue | undefined) => refs(v).map(keyOf);
@@ -183,7 +200,7 @@ const soundKeys = (v: PropValue | undefined) => refs(v).map(keyOf);
 function readAttack(pkgs: EntityPackageSet, r: ResRef): AttackParams | undefined {
   const t = templateValues(pkgs, r);
   if (!t || t.cls !== 'Attack') return undefined;
-  return { template: r, clip: ref(t.values[0]) ?? undefined, follow: ref(t.values[3]) ?? undefined, scale: num(t.values[6], 1) };
+  return { template: r, clip: ref(t.values[0]) ?? undefined, follow: ref(t.values[3]) ?? undefined, scale: num(t.values[6], 1), forceScale: num(t.values[7], 1) };
 }
 
 function readLocomotion(pkgs: EntityPackageSet, r: ResRef | null): Locomotion | undefined {
@@ -216,7 +233,7 @@ export function readForm(pkgs: EntityPackageSet, template: ResRef): FormParams |
   const pair = (a: number, b: number, da: number, db: number): [number, number] => [num(v[a], da), num(v[b], db)];
   const morphT = templateValues(pkgs, ref(v[255]));
   const morph = morphT && morphT.cls === 'Character Morpher'
-    ? { model: morphT.model, clip: ref(morphT.values[3]) ?? undefined, duration: num(morphT.values[4], 1) }
+    ? { model: morphT.model, clip: ref(morphT.values[3]) ?? undefined, duration: num(morphT.values[4], 1), cosine: num(morphT.values[5], 0) === 1 }
     : undefined;
   return {
     template,
@@ -244,6 +261,10 @@ export function readForm(pkgs: EntityPackageSet, template: ResRef): FormParams |
     fovPulse: pair(270, 271, 55, 62),
     lowMeterPct: num(v[302], 35),
     morph,
+    morphLead: ref(v[254]) ?? undefined,
+    morphClockDiv: num(v[272], 0),
+    morphBlur: ref(v[273]) ?? undefined,
+    morphEffect: ref(v[274]) ?? undefined,
     blur: ref(v[265]) ?? undefined,
     tint: ref(v[266]) ?? undefined,
     flash: ref(v[267]) ?? undefined,
@@ -257,7 +278,7 @@ export function readForm(pkgs: EntityPackageSet, template: ResRef): FormParams |
       const w = templateValues(pkgs, r);
       const bone = Array.isArray(v[232]) ? Number((v[232] as unknown[])[i]) : NaN;
       if (!w || w.cls !== 'Melee Weapon' || !Number.isFinite(bone)) return [];
-      return [{ template: r, bone, damage: num(w.values[68]), type: typeof w.values[70] === 'number' ? (w.values[70] as number) : undefined }];
+      return [{ template: r, bone, damage: num(w.values[68]), force: num(w.values[69]), type: typeof w.values[70] === 'number' ? (w.values[70] as number) : undefined }];
     }),
     npcDamageScale: pair(78, 79, 1, 1),
     insanityAttacks: refs(v[276]),

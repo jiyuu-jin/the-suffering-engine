@@ -391,7 +391,13 @@ export async function createWorldSystem(ctx: GameContext): Promise<GameSystem> {
     for (const w of world.of('STOMP Player')) for (const t of world.sequenceOf(w)?.tracks ?? []) driven.add(t.uid);
     // Ambient Sound (crossfade zones) and Flying Sound objects are run by the fx system
     // (src/game/fx/ambient.ts, flying.ts), not as positional loops.
-    const emitters = levelSoundEmitters(parseLevelObjects(lvl), packages, audio).filter((e) => !(e.kind === 'sound' && driven.has(e.uid)) && e.kind !== 'loop' && e.kind !== 'ambient-set');
+    // Animating Statics ('zone' here) are no emitters: their p37 / p40 name animation clips (p40
+    // played at creation when p41 is set, 0x100937a0 -> 0x100935b0; p37 when the player brushes
+    // it, at most every 0.2 s, 0x10093d10), handed to the object's animation component (+0xec
+    // vt +0x34), not sounds [strong]. Read as sound keys, 1b's arena props 6600 / 6676 (7:1950 /
+    // 7:1952, clip 7:17) looped the music track 7:17 within 40 m: the "intense music" over the
+    // tutorial and after it (docs/game-logic.md §15.7.12).
+    const emitters = levelSoundEmitters(parseLevelObjects(lvl), packages, audio).filter((e) => !(e.kind === 'sound' && driven.has(e.uid)) && e.kind !== 'loop' && e.kind !== 'ambient-set' && e.kind !== 'zone');
     audio.setEmitters(emitters);
   } catch (err) {
     console.warn('[world] emitters not filtered', err);

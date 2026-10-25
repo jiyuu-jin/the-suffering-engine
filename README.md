@@ -99,6 +99,21 @@ Without that step the game runs without cutscenes and sound.
   alpha test and blending by the engine's pass rule, like static ones.
 - **Sequences**: a scene that takes over a hidden character shows it.
 - **Throwables**: the selected throwable is carried on the player's back.
+- **Creature morph**: the change into the creature form and back plays both ways as decoded
+  (lead-in clip, Character Morpher cross-fade, slowed clock, camera orbit); the held gun survives it.
+- **Sequence takes**: characters a played sequence took are shown, and saves from older builds
+  are repaired on load (the shown characters, their fades and gas).
+- **Projectors**: Projector Effects are saved and restored, so projected figures and their beams
+  come back right after a checkpoint or a load.
+- **Tutorial speech**: lines stop with their speaker (removal, death, a behaviour change), the
+  insanity filter waits for the end of the morph, and hallucinations come at the decoded cadence.
+- **Light shafts**: decoded and left faithful in Original; Enhanced fades additive light volumes
+  edge-on and near the camera.
+- **Baked vertex alpha**: untinted passes (water, shore and light-sheet edges) take their baked
+  alpha, so authored soft edges show.
+- **Creature gore**: claw kills draw their chunks, and blows strike the first hit sphere as decoded.
+- **Engine-lit objects**: lighting graphs take position and normal before any light loop, so
+  dynamic-lit objects draw in levels without Ambient Light regions; a smoke check covers it.
 
 ## Getting started
 

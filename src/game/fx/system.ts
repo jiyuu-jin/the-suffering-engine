@@ -326,6 +326,25 @@ export async function createFxSystem(ctx: GameContext): Promise<GameSystem> {
           for (const b of d?.parts?.find((p) => p.uid === c.uid)?.bones ?? []) attachments.spawnParts(c.uid, c.values, b);
         }
       },
+      // A level record without this entry was written before 45f4dd8, which made a sequence's
+      // take show a Character and began saving the faders and parts: 1b's Hermes came back
+      // hidden, at his creation fade (0) and without his gas, after "Camera" #247 had raised
+      // him. Rebuild both from the sequences the level has played (docs/game-logic.md §15.7.12
+      // "Saved games"): the takes show, and their 154 / 206..209 keys give the parts and the
+      // fades' end.
+      absent: () => {
+        const shown = world.showTakenCharacters();
+        const replayed: string[] = [];
+        world.replayPlayedSequences({
+          send: (uid, msg) => {
+            const w = world.get(uid);
+            if (!w || w.destroyed || w.e.family !== 'Character' || !BodyParts.handles(w.cls)) return;
+            const c = bodyCarrier(uid, w.cls, w.e.values);
+            if (c && bodyParts.replay(c, msg)) replayed.push(`${uid.toString(16)}:${msg}`);
+          },
+        });
+        if (shown.length || replayed.length) log(`older save: shown ${shown.map((u) => u.toString(16)).join(',') || '-'}; replayed ${replayed.join(' ') || '-'}`);
+      },
     },
     { scope: 'level', priority: 12 },
   );

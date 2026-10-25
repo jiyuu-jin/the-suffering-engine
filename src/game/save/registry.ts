@@ -22,7 +22,9 @@
 //                 only exists if the level was visited before (player position must NOT be
 //                 restored then - the spawn point applies).
 // Providers run in ascending `priority` (default 50): world logic 0, actors 10, player 20.
-// A provider whose key is missing from the save is not called (keep the fresh-level state).
+// A provider whose key is missing from the save is not loaded (keep the fresh-level state); its
+// absent(info) runs instead, in the same order: the record was written before the provider
+// existed, and what it would hold can sometimes be rebuilt from the rest (fx.bodyParts).
 // Exceptions are caught and logged per provider, so one broken provider can't break a load.
 //
 // Vetoes: addVeto(() => reason | null) blocks manual saving (pause "Save Game" disabled)
@@ -42,6 +44,11 @@ export interface SaveProvider<T = unknown> {
   /** Current state as plain JSON (no class instances, functions or cycles). */
   save(): T;
   load(data: T, info: LoadInfo): void;
+  /**
+   * A save is being applied whose record of this scope has no entry for this provider (written
+   * by a build before the provider existed). Called in priority order, where load would run.
+   */
+  absent?(info: LoadInfo): void;
   /** New Game: back to the initial state (game-scope providers that outlive a level). */
   reset?(): void;
 }
@@ -119,12 +126,22 @@ export class SaveRegistry {
     return out;
   }
 
-  /** Give each provider of a scope its state (providers without an entry are skipped). */
+  /**
+   * Give each provider of a scope its state. Providers without an entry are not loaded; their
+   * absent() runs instead (a record older than the provider).
+   */
   apply(states: Record<string, unknown> | undefined, scope: SaveScope, info: LoadInfo): string[] {
     const done: string[] = [];
     if (!states) return done;
     for (const e of this.sorted(scope)) {
-      if (!(e.key in states)) continue;
+      if (!(e.key in states)) {
+        try {
+          e.provider.absent?.(info);
+        } catch (err) {
+          console.error(`[save] provider "${e.key}" failed to rebuild an older save:`, err);
+        }
+        continue;
+      }
       try {
         e.provider.load(states[e.key], info);
         done.push(e.key);

@@ -337,7 +337,9 @@ export function parseXduString(v: DataView): string {
 //              messages, never at load (src/game/world/music.ts, docs/game-logic.md §11.6).
 //   0xe6ec6c84 Ambient Sound: a crossfade zone, p1..p4 / p5..p8 ambient beds (kind 'loop'
 //              here). Run by src/game/fx/ambient.ts in a level, not as positional loops.
-//   0x86a01249 Animating Static (kind 'zone' here): p23/p24/p39 one-shots, p37/p40 sounds.
+//   0x86a01249 Animating Static (kind 'zone' here): p23/p24/p39 one-shots [guess]. Its p37 / p40
+//              are animation clips, not sounds (Suffering.rfl 0x10093d10 / 0x100935b0); a level
+//              leaves 'zone' emitters out (src/game/world/world.ts).
 //   0xbd83621b Flying Sound: p3 list of sounds moved along a path (kind 'ambient-set' here;
 //              run by src/game/fx/flying.ts). See docs/game-logic.md §17.4.
 
@@ -458,7 +460,8 @@ export function levelSoundEmitters(objects: LevelObject[], packages: PackageSet,
         break;
       case CLASS_ZONE:
         kind = 'zone';
-        props = [37, 40, 23, 24, 39];
+        // Not p37 / p40: animation clips (see above).
+        props = [23, 24, 39];
         break;
       case CLASS_AMBIENT_SET:
         kind = 'ambient-set';

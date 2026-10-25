@@ -14,7 +14,7 @@ import { BLEND_ALPHA_REF, modelCullsBackFaces, translucentPassState } from '../s
 import type { PackageSet } from '../src/formats/model';
 import { buildSkinnedMesh, characterAlphaTest, characterSurfaceBlend, decodeCharacterTextures } from '../src/app/character';
 import { CUTOUT_ALPHA_TEST } from '../src/app/surface-material';
-import { beamHidden, beamTriangles, projectorOpacity, projectorParams, ProjectorState, skinnedVertexFor } from '../src/game/actors/specials/projector';
+import { beamHidden, beamTriangles, guessProjectorRunning, projectorOpacity, projectorParams, ProjectorState, skinnedVertexFor } from '../src/game/actors/specials/projector';
 import { nodeFS, readSrsc, skip } from './helpers';
 
 test('Projector Effect inputs: On shows the target on the next update, Off hides it', () => {
@@ -98,6 +98,35 @@ test('1b: Killjoy is a hidden, projected figure; his model carries five light co
   // Every pass of those is decoded (the additive second pass 10:428 drew the placeholder).
   const tex = decodeCharacterTextures(sk, pkgs as unknown as PackageSet);
   for (const k of ['10:256', '10:232', '10:233', '10:234', '10:428']) assert.ok(tex.has(k), k);
+});
+
+test('Projector Effect save / load (0x1008b870 / 0x1008c3a0): a running effect runs again and shows its target', () => {
+  // 1b #7edb after "Camera" #247: On, updated (the target shown).
+  const st = new ProjectorState({ strobe: 0, inputs: [1, 2, 2, 1], onAtStart: false });
+  st.message(1);
+  st.tick();
+  const saved = st.save();
+  assert.deepEqual(saved, { counter: 0, disabled: false, updating: true });
+  // The restored level: a new effect (off), then its load.
+  const back = new ProjectorState({ strobe: 0, inputs: [1, 2, 2, 1], onAtStart: false });
+  assert.deepEqual(back.tick(), { run: false }, 'without the load the effect stays stopped (the bug)');
+  back.load(saved);
+  assert.deepEqual(back.tick(), { show: true, run: true }, 'the load arms the counter with 1: shown, tips at the lens');
+  assert.deepEqual(back.tick(), { run: true });
+  // Updating clears a saved disable; a stopped effect keeps its fields.
+  const off = new ProjectorState({ strobe: 3, inputs: [1, 2, 2, 1], onAtStart: false });
+  off.load({ counter: 2, disabled: true, updating: false });
+  assert.deepEqual(off.save(), { counter: 2, disabled: true, updating: false });
+  assert.deepEqual(off.tick(), { run: false });
+  off.load({ counter: 2, disabled: true, updating: true });
+  assert.deepEqual(off.save(), { counter: 1, disabled: false, updating: true });
+});
+
+test('a save from before the effect state was saved: a placed-hidden target shown and alive is projected', () => {
+  assert.equal(guessProjectorRunning({ placedShown: false, shown: true, alive: true }), true, "1b's Killjoy after #247");
+  assert.equal(guessProjectorRunning({ placedShown: false, shown: false, alive: true }), false, 'still hidden: off');
+  assert.equal(guessProjectorRunning({ placedShown: false, shown: true, alive: false }), false, 'dead: off');
+  assert.equal(guessProjectorRunning({ placedShown: true, shown: true, alive: true }), false, "10's Killjoy, shown at placement");
 });
 
 test('beam visibility per update: gone hides, standing shows a hidden beam or hides at p8 %', () => {

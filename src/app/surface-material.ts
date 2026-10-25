@@ -64,9 +64,11 @@ import {
 } from '../formats/model';
 import { coverageMipmaps, decodeTexture, punchThroughBlack } from '../formats/texture';
 import type { DecodedTexture } from '../formats/types';
-import { glowMarkAlphaRef, glowMarked, passAlphaRef, passDepthWrite, tintFactor } from '../formats/render-data';
+import { glowMarkAlphaRef, glowMarked, passAlphaRef, passDepthWrite, passTakesVertexAlpha, tintFactor, translucentPassBlend } from '../formats/render-data';
 import { glowMark, setGlowMark } from './glow-mark';
 import { singlePassIfOrderFree } from './single-pass';
+import { ENHANCED } from './enhanced/config';
+import { isLightVolume, lightVolumeFade } from './enhanced/light-volume';
 import { ENGINE_SHADOW_TEXTURES, LEGACY_LIGHTING, MAX_FRAGMENT_TEXTURES, additiveEffectColor, engineAlbedo, engineLightFactor, engineLightMaterial, engineStages, engineSurfaceFinish, enhancedShading, fitEnhancedMaps, type EnhancedMaps } from './engine-light';
 
 /** Legacy look only (`?lighting=legacy`): gain applied to baked per-vertex lighting. */
@@ -100,6 +102,18 @@ export interface SurfaceMaterialOptions {
   textureKey?: string;
   /** Mesh has a `color` attribute (baked lighting). */
   vertexColors: boolean;
+  /**
+   * The `color` attribute's alpha (the .ldu vertex alpha) is not all 1: untinted passes multiply
+   * their alpha by it, as stage 0 does with oD0.a (docs/re/renderer.md §5.3). Only with
+   * `vertexColors`; left out where every vertex alpha is 255, so those graphs are unchanged.
+   */
+  vertexAlpha?: boolean;
+  /**
+   * The object's .ldu colours carry the engine's translucent flag (render-data.ts
+   * lduColorsTranslucent): opaque and cut-out passes draw as alpha blends (translucentPassBlend),
+   * the first pass still writing depth by its own mode.
+   */
+  translucent?: boolean;
   /** Mesh has a `uv` attribute. */
   hasUvs?: boolean;
   /** Floor-layer splats (mesh has `splat0`/`splat1` weight attributes). */
@@ -116,6 +130,11 @@ export interface SurfaceMaterialOptions {
    * the plain character skin is lit) instead of every light per vertex; no baked colours.
    */
   lightSet?: boolean;
+  /**
+   * Level geometry (the renderer's merged parts). Enhanced mode softens its light sheets there
+   * (enhanced/light-volume.ts); Original ignores it.
+   */
+  levelGeometry?: boolean;
 }
 
 /**
@@ -329,16 +348,35 @@ interface LayerSample {
  * Texture stage 1 then doubles the result, saturated (engineStages, render-data.ts
  * WORLD_STAGE_GAIN): a white-tinted layer shows its texture as is.
  */
-function shadePass(l: MaterialLayer, s: LayerSample, light: N, S: SurfaceGraph): LayerSample {
+function shadePass(l: MaterialLayer, s: LayerSample, light: N, S: SurfaceGraph, diffuseAlpha: DiffuseAlpha | null = null): LayerSample {
   const g: N = toSrgb(s.rgb);
   const tf = tintFactor(l.tint);
   if (tf) {
+    // ALPHAARG2 = TFACTOR: the tint's alpha (1) replaces the vertex alpha.
     S.tok('tint');
     return { rgb: toLinear(engineStages(g.mul(S.v3(tf[0], tf[1], tf[2])))), a: s.a };
   }
   S.tok('lit');
-  return { rgb: toLinear(engineStages(engineAlbedo(g).mul(light))), a: s.a };
+  // ALPHAARG2 = DIFFUSE: texture alpha x oD0.a (render-data.ts passTakesVertexAlpha).
+  const da = diffuseAlpha && passTakesVertexAlpha(l.tint) ? diffuseAlpha : null;
+  if (da) S.tok(da.tok);
+  return { rgb: toLinear(engineStages(engineAlbedo(g).mul(light))), a: da ? s.a.mul(da.node) : s.a };
 }
+
+/**
+ * What oD0.a adds to an untinted pass's alpha beyond the object opacity three.js applies once
+ * (material.opacity, docs/re/renderer.md §5.4): the baked vertex alpha (oD0.a = vertex alpha x
+ * opacity), or for an object without colours (characters, dynamic-lit objects: xvsLightHeader
+ * starts r2 = c80, the footer multiplies by c80.w again) the opacity a second time, so its
+ * untinted passes fade as opacity². `tok` keys the shared graph.
+ */
+interface DiffuseAlpha {
+  node: N;
+  tok: string;
+}
+
+/** The `color` attribute's alpha: the .ldu vertex alpha that oD0.a carries (xvsLightPrecomputed). */
+const bakedVertexAlpha = (): N => (vertexColor() as N).a;
 
 function sampleLayer(l: MaterialLayer, src: SurfaceTextureSource, missing: string[], S: SurfaceGraph): LayerSample | null {
   const coords = layerUv(l, S);
@@ -433,13 +471,14 @@ function blendOverLinear(acc: N, c: LayerSample, blend: number): N {
   }
 }
 
-function applyBlendState(m: THREE.Material, blend: number, glowMark: boolean | undefined) {
+function applyBlendState(m: THREE.Material, blend: number, glowMark: boolean | undefined, ownBlend = blend) {
   if (!isBlended(blend)) return;
   m.transparent = true;
-  // Only an opaque or cut-out first pass writes depth (0x48fc56): the layer flag decoded as
-  // `depthWrite` (Advanced p5 / Animating p7) is the glow pass's stencil mark instead
-  // (render-data.ts passDepthWrite). `?lighting=legacy` keeps the old reading.
-  m.depthWrite = LEGACY_LIGHTING ? !!glowMark : passDepthWrite(blend);
+  // Only an opaque or cut-out first pass writes depth (0x48fc56), by its own mode even when a
+  // translucent object blends it (`ownBlend`): the layer flag decoded as `depthWrite` (Advanced
+  // p5 / Animating p7) is the glow pass's stencil mark instead (render-data.ts passDepthWrite).
+  // `?lighting=legacy` keeps the old reading.
+  m.depthWrite = LEGACY_LIGHTING ? !!glowMark : passDepthWrite(ownBlend);
   m.blending = THREE.CustomBlending;
   m.blendEquation = THREE.AddEquation;
   switch (blend) {
@@ -514,6 +553,13 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
     layers = [{ texture: opts.textureKey, blend: surfaceBaseBlend(undefined, src.hasAlpha?.(opts.textureKey) ?? false) }];
   }
   if (opts.hasUvs === false) layers = layers.filter((l) => l.texGen);
+  // The first pass's own mode decides the depth write, also on a translucent object (0x48fc70).
+  const ownBaseBlend = layers[0]?.blend;
+  // A translucent object (its .ldu colours' flag): opaque and cut-out passes blend as mode 1.
+  if (opts.translucent && !LEGACY_LIGHTING) layers = layers.map((l) => (translucentPassBlend(l.blend) === l.blend ? l : { ...l, blend: translucentPassBlend(l.blend) }));
+  const vertexAlpha: N | null = opts.vertexAlpha && opts.vertexColors && !LEGACY_LIGHTING ? bakedVertexAlpha() : null;
+  // oD0.a of the untinted passes (DiffuseAlpha): the vertex alpha, or the opacity again without colours.
+  const diffuseAlpha: DiffuseAlpha | null = LEGACY_LIGHTING ? null : vertexAlpha ? { node: vertexAlpha, tok: 'va' } : !opts.vertexColors ? { node: materialOpacity, tok: 'o2' } : null;
 
   if (!layers.length) {
     const m = new THREE.MeshStandardNodeMaterial({ color: 0x6a6a66, vertexColors: opts.vertexColors, roughness: 0.9, metalness: 0, side });
@@ -561,7 +607,7 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
   const light: N | null = LEGACY_LIGHTING ? null : surface ? engineLightFactor({ precomputed: opts.vertexColors, lightSet, surface }) : lightFactor(opts.vertexColors, lightSet);
   const samples = layers.map((l) => {
     const s = sampleLayer(l, src, missing, S);
-    return s && light ? shadePass(l, s, light, S) : s;
+    return s && light ? shadePass(l, s, light, S, diffuseAlpha) : s;
   });
   let rgb: N = samples[0]!.rgb;
   const alpha: N = samples[0]!.a;
@@ -575,13 +621,16 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
   // Enhanced mode: glow-marked surfaces (the scene glow's sources) are emitters in the HDR frame.
   const glow = !LEGACY_LIGHTING && !!enhancedShading.glow && glowMarked(layers);
   if (glow) S.tok('glow');
+  // Enhanced: the level's light shafts and pools fade with the view angle (enhanced/light-volume.ts).
+  const softVolume = ENHANCED && gammaAdd && !!opts.levelGeometry && isLightVolume(layers);
+  if (softVolume) S.tok('vol');
   const key = S.key.join(',');
   let node = sharedGraphs.get(key);
   if (!node) {
     // The object's opacity (material.opacity) scales the pass alpha like the engine's TFACTOR
     // alpha x object opacity (SUFFERING.EXE 0x48fcdf): here also the premultiplied colour (ONE,
     // ONE); 1 for everything but faded characters (fx/body-parts.ts).
-    if (unlit) node = gammaAdd ? vec4(additiveEffectColor(rgb, alpha.mul(materialOpacity)), alpha) : colour;
+    if (unlit) node = gammaAdd ? vec4(additiveEffectColor(rgb, softVolume ? alpha.mul(materialOpacity).mul(lightVolumeFade()) : alpha.mul(materialOpacity)), alpha) : colour;
     // Lit: already shaded per pass; the projected-shadow receiver pass darkens the result.
     else if (!LEGACY_LIGHTING) node = vec4(engineSurfaceFinish(rgb, { precomputed: opts.vertexColors, lightSet, surface }), colour.a);
     else node = colour;
@@ -622,7 +671,7 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
     material.alphaTest = alphaTest;
     material.alphaToCoverage = true;
   } else if (!LEGACY_LIGHTING && alphaTest) material.alphaTest = alphaTest;
-  applyBlendState(material, blend, base.depthWrite);
+  applyBlendState(material, blend, base.depthWrite, ownBaseBlend);
   if (gammaAdd) {
     // The colour is already premultiplied (additiveEffectColor).
     material.blendSrc = material.blendSrcAlpha = THREE.OneFactor;
@@ -632,7 +681,7 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
   singlePassIfOrderFree(material);
   material.name = opts.material?.key ?? opts.textureKey ?? 'untextured';
   // Pixels this surface marks for the scene glow (src/app/scene-glow.ts, render-data.ts glowMarked).
-  if (!LEGACY_LIGHTING && glowMarked(layers)) setGlowMark(material, glowMarkMaterial(layers, side, src, missing));
+  if (!LEGACY_LIGHTING && glowMarked(layers)) setGlowMark(material, glowMarkMaterial(layers, side, src, missing, diffuseAlpha));
   return { material, missing, blend };
 }
 
@@ -646,9 +695,11 @@ const plainMarks = new Map<THREE.Side, THREE.Material>();
  * The first flagged layer's alpha test applies (additive > 32 / 255, cut-out > 200 / 255,
  * other blends > 2 / 255; opaque: none).
  */
-function glowMarkMaterial(layers: MaterialLayer[], side: THREE.Side, src: SurfaceTextureSource, missing: string[]): THREE.Material {
+function glowMarkMaterial(layers: MaterialLayer[], side: THREE.Side, src: SurfaceTextureSource, missing: string[], diffuseAlpha: DiffuseAlpha | null = null): THREE.Material {
   const fl = layers.find((l) => l.depthWrite) ?? layers[0];
   const ref = glowMarkAlphaRef(fl.blend);
+  // The flagged pass's alpha test also sees its oD0.a when untinted (shadePass, DiffuseAlpha).
+  const va = diffuseAlpha && passTakesVertexAlpha(fl.tint) ? diffuseAlpha : null;
   let m: SurfaceBasicMaterial | undefined;
   if (ref === null) {
     const hit = plainMarks.get(side);
@@ -658,12 +709,15 @@ function glowMarkMaterial(layers: MaterialLayer[], side: THREE.Side, src: Surfac
     plainMarks.set(side, m);
   } else {
     const S = new SurfaceGraph();
-    S.tok(`mark|${ref}`);
+    S.tok(`mark|${ref}${va ? `|${va.tok}` : ''}`);
     const s = sampleLayer(fl, src, missing, S);
     const key = S.key.join(',');
     let node = sharedGraphs.get(key);
     if (!node) {
-      const a: N = s ? s.a : float(1);
+      // The pass's alpha test sees texture alpha x TFACTOR alpha, which carries the object's
+      // opacity on a faded object (renderer.md §5.1): a faded figure marks only while its
+      // pass clears the test (scene-glow.ts glowMarkOf gives it a mark of its own opacity).
+      const a: N = (s ? (va ? s.a.mul(va.node) : s.a) : float(1)).mul(materialOpacity);
       node = Fn(() => {
         Discard(a.lessThanEqual(ref));
         return vec4(0, 0, 0, 1);
@@ -780,13 +834,14 @@ export class SurfaceMaterialCache {
   }
 
   /** Material for a model submesh (shared between identical surfaces). */
-  get(sm: { textureKey?: string; material?: SurfaceMaterial }, opts: { vertexColors?: boolean; side?: THREE.Side } = {}): THREE.Material {
+  get(sm: { textureKey?: string; material?: SurfaceMaterial }, opts: { vertexColors?: boolean; side?: THREE.Side; vertexAlpha?: boolean; translucent?: boolean } = {}): THREE.Material {
     const vertexColors = opts.vertexColors ?? this.defaults.vertexColors ?? true;
     const side = opts.side ?? this.defaults.side ?? THREE.DoubleSide;
-    const key = `${sm.textureKey ?? ''}|${materialSignature(sm.material)}|${vertexColors}|${side}`;
+    const vertexAlpha = vertexColors && !!opts.vertexAlpha, translucent = !!opts.translucent;
+    const key = `${sm.textureKey ?? ''}|${materialSignature(sm.material)}|${vertexColors}|${side}${vertexAlpha ? '|va' : ''}${translucent ? '|tr' : ''}`;
     let m = this.materials.get(key);
     if (!m) {
-      m = createSurfaceMaterial({ material: sm.material, textureKey: sm.textureKey, vertexColors, side }, this.source).material;
+      m = createSurfaceMaterial({ material: sm.material, textureKey: sm.textureKey, vertexColors, side, vertexAlpha, translucent }, this.source).material;
       this.materials.set(key, m);
     }
     return m;

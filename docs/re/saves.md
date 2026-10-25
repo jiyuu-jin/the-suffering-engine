@@ -352,7 +352,10 @@ There is **no enemy-proximity rule**, and saving while transformed (state 20) is
     inventory, health, music and the player transform.
 
   A save without a game-scope provider's entry (an imported original save, §8.2) gets that
-  provider's new-game state. The inventory is restored as saved, not through the systems'
+  provider's new-game state. A provider missing from a record is not loaded; its optional
+  `absent` runs instead (`save/registry.ts`), for a record older than the provider: the
+  `fx.bodyParts` one rebuilds what saves from before it lack, Characters shown by a sequence's
+  take and their fades and gas, from the sequences the level has played (game-logic.md §15.7.12). The inventory is restored as saved, not through the systems'
   pickup rules (before the fix, every load and transition added a gun pickup's ammo).
 
   The player controller outlives the systems. Every level start therefore releases what the

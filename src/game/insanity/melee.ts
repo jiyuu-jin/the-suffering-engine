@@ -12,8 +12,11 @@
 //                  4:155 on bone 31 is a segment from x -0.023 to x 1.177 (model 4:36),
 //                  4:832 on bone 22 a sphere of radius 0.65 at the origin (model 4:135)
 //                  [verified data; model units taken as metres, inferred].
-//   Targets        the target's leaf hit spheres (skeleton sphere tree, 0x100c9680) [verified];
-//                  the port uses the actor's capsule (radius, bottom..top) [inferred stand-in].
+//   Targets        the target's leaf hit spheres (skeleton sphere tree, 0x100c9680), walked in
+//                  node index order: the first one the swept shape meets is struck and its bone
+//                  goes with the blow (the Part Cap test cuts by it) [verified]; the actor's
+//                  capsule is only a broad phase, or the stand-in for a body without a sphere
+//                  tree (strikeTarget) [port].
 //                  Each target once per Arm window, several targets per swing; the wielder never
 //                  [verified]. A ray from the wielder (its x / z at the hit's height) to the hit
 //                  point that is blocked cancels that hit (0x100c9490) [verified].
@@ -124,21 +127,66 @@ export function sweepCapsule(prevA: Vec3, prevB: Vec3, curA: Vec3, curB: Vec3, r
 }
 
 /**
- * Sweep test against leaf hit spheres (0x100c9680 tests the skeleton sphere tree's leaves): the
- * centre of the sphere the weapon comes deepest into, or null. Used for bodies on the floor,
- * where the standing capsule stand-in does not fit.
+ * Sweep of a weapon shape that moved from (prevA, prevB) to (curA, curB) this frame against hit
+ * spheres: the swept quad (or the sphere's path) is sampled in `steps` slices. Returns the struck
+ * sphere and the contact point on the weapon, or null.
+ *
+ * Which sphere is struck [verified, Suffering.rfl 0x100c9de0 -> 0x100c9680]: the swept quad is
+ * two triangles over its four corners (0x1000e300), and the victim's sphere
+ * tree is walked by node index (0 .. model +0xc2, node = tree +0xbc + 24 x i, 0x100bcbc0),
+ * leaves only (first child 0); the first leaf whose posed sphere meets either triangle is the
+ * one the blow records (+0x20: the Part Cap's channel, dismember.ts). So `spheres` must come in
+ * node index order (fx/gas-system.ts modelHitSpheres). The port had taken the deepest overlap
+ * and then the sphere nearest the blade's point, which picks the head over the chest for a
+ * blade passing both at shoulder height.
  */
-export function sweepSpheres(prevA: Vec3, prevB: Vec3, curA: Vec3, curB: Vec3, r: number, spheres: readonly { c: Vec3; r: number }[], steps = 6): Vec3 | null {
-  let best: { d: number; p: Vec3 } | null = null;
-  for (let i = 0; i <= steps; i++) {
-    const k = i / steps;
-    const a = lerp3(prevA, curA, k), b = lerp3(prevB, curB, k);
-    for (const s of spheres) {
-      const d = segmentDistance(a, b, s.c, s.c).d - s.r;
-      if (d <= r && (!best || d < best.d)) best = { d, p: s.c };
+export function sweepHit(prevA: Vec3, prevB: Vec3, curA: Vec3, curB: Vec3, r: number, spheres: readonly { c: Vec3; r: number; bone?: number }[], steps = 6): { i: number; p: Vec3 } | null {
+  for (let j = 0; j < spheres.length; j++) {
+    const s = spheres[j];
+    let best: { d: number; p: Vec3 } | null = null;
+    for (let i = 0; i <= steps; i++) {
+      const k = i / steps;
+      const a = lerp3(prevA, curA, k), b = lerp3(prevB, curB, k);
+      const h = segmentDistance(a, b, s.c, s.c);
+      const over = h.d - (r + s.r);
+      if (over <= 0 && (!best || over < best.d)) best = { d: over, p: lerp3(a, b, h.s) };
     }
+    if (best) return { i: j, p: best.p };
   }
-  return best ? best.p : null;
+  return null;
+}
+
+/**
+ * Where a creature blow lands on one target this frame (the sweep 0x100caff0 -> 0x100c9680):
+ * the first of its leaf hit spheres (node index order, cut nodes already left out) that the
+ * swept shape meets, with that sphere's bone (damage record +0x20: the Part Cap test,
+ * actors/dismember.ts) and the contact point on the weapon. `cap`, grown by `slack`, is only a
+ * broad phase that skips bodies out of reach before `spheres` poses them [port]; a target without
+ * a sphere tree is struck by the capsule itself (no bone) [stand-in]; a dead one only through its
+ * spheres.
+ */
+export function strikeTarget(
+  prevA: Vec3,
+  prevB: Vec3,
+  curA: Vec3,
+  curB: Vec3,
+  r: number,
+  cap: Capsule,
+  leaves: readonly { c: Vec3; r: number; bone?: number }[] | (() => readonly { c: Vec3; r: number; bone?: number }[]),
+  alive: boolean,
+  slack = 1.2,
+): { p: Vec3; bone?: number } | null {
+  if (alive && !sweepCapsule(prevA, prevB, curA, curB, r, { ...cap, y0: cap.y0 - slack, y1: cap.y1 + slack, r: cap.r + slack })) return null;
+  const spheres = typeof leaves === 'function' ? leaves() : leaves;
+  if (spheres.length) {
+    const h = sweepHit(prevA, prevB, curA, curB, r, spheres);
+    if (!h) return null;
+    const bone = spheres[h.i].bone;
+    return bone !== undefined && bone >= 0 ? { p: h.p, bone } : { p: h.p };
+  }
+  if (!alive) return null;
+  const p = sweepCapsule(prevA, prevB, curA, curB, r, cap);
+  return p ? { p } : null;
 }
 
 /** Damage of one creature blow: Melee Weapon p68 x Attack p6 (x the reputation scale). */

@@ -1448,7 +1448,14 @@ export class World {
       const w = this.ents.get(uid);
       if (w && !w.destroyed && w.cls === 'Sound Effect') this.playSoundEffect(w);
     }
-    const quiet: StompSink = { send: () => {}, setVisible: () => {}, pose: (uid, key, track) => this.stompSink.pose(uid, key, track) };
+    // Takes are kept as held (a second take of a held character is not a new one), not acted on.
+    this.stompHeld.clear();
+    const quiet: StompSink = {
+      send: () => {},
+      setVisible: () => {},
+      pose: (uid, key, track) => this.stompSink.pose(uid, key, track),
+      control: (uid, release) => void (release ? this.stompHeld.delete(uid) : this.stompHeld.add(uid)),
+    };
     for (const st of s.stomps ?? []) {
       const w = this.ents.get(st.uid);
       const seq = w && !w.destroyed ? this.sequenceOf(w) : undefined;
@@ -1461,6 +1468,66 @@ export class World {
       run.skipping = false;
       if (done) this.stomps.delete(w.uid);
     }
+  }
+
+  /**
+   * Hands `sink` the message, visibility and control keys of the sequences this level has played,
+   * in key order per sequence, without acting on them: each STOMP Player marked played runs its
+   * sequence from 0 to where it got (the end, or the time of one still running). A save keeps a
+   * sequence's results (entity states), not its keys, so this is how a save written before the
+   * port acted on some kind of key gets what that key did (`showTakenCharacters`, fx.bodyParts).
+   * Call after loadRuntime. The order between sequences is not known (not saved).
+   */
+  replayPlayedSequences(sink: Partial<Pick<StompSink, 'send' | 'setVisible' | 'control'>>): void {
+    for (const w of this.of('STOMP Player')) {
+      if (!w.s.played) continue;
+      const seq = this.sequenceOf(w);
+      if (!seq) continue;
+      const upTo = this.stomps.get(w.uid)?.t ?? Infinity;
+      new StompRun(w.uid, seq).advance(upTo, {
+        send: (uid, msg, sender) => sink.send?.(uid, msg, sender),
+        setVisible: (uid, v) => sink.setVisible?.(uid, v),
+        control: (uid, release) => sink.control?.(uid, release),
+        pose: () => {},
+      });
+    }
+  }
+
+  /**
+   * A save written before a sequence's take showed a Character (before 45f4dd8) holds the
+   * characters it took still hidden, though the take had shown them (docs/game-logic.md §7
+   * "Control keys show a Character"): 1b's Hermes after "Camera" #247. Shows each Character
+   * (stompTakeShows) that a played sequence took and that nothing else could have hidden since:
+   * no visibility key for it in a played sequence (the order of those against the take is not
+   * known across sequences), no Visibility Toggler link and no Projector Effect (p0) aimed at it,
+   * not destroyed. Such a character was hidden only by its placement, which the take undoes.
+   * Returns the uids shown. On a save that has the take's result it changes nothing (they are
+   * shown already).
+   */
+  showTakenCharacters(): number[] {
+    const taken = new Set<number>();
+    const keyed = new Set<number>();
+    this.replayPlayedSequences({
+      control: (uid, release) => {
+        const w = this.ents.get(uid);
+        if (!release && w && stompTakeShows(w)) taken.add(uid);
+      },
+      setVisible: (uid) => void keyed.add(uid),
+    });
+    const switched = new Set<number>();
+    for (const t of this.of('Visibility Toggler')) for (const u of t.e.links) switched.add(u);
+    for (const p of this.of('Projector Effect')) {
+      const v = p.e.values[0];
+      switched.add(num(Array.isArray(v) ? v[0] : v));
+    }
+    const shown: number[] = [];
+    for (const uid of taken) {
+      const w = this.ents.get(uid);
+      if (!w || w.visible || w.destroyed || keyed.has(uid) || switched.has(uid)) continue;
+      this.setVisible(uid, true);
+      shown.push(uid);
+    }
+    return shown;
   }
 
   static messageName = messageName;

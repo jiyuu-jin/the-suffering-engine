@@ -106,7 +106,8 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
 
   const model = params ? new InsanityModel(params, carried) : null;
   const fx = new ScreenEffects(view);
-  const director = new EffectDirector(fx, (rate) => (view.timeScale = rate));
+  // The clock: the Time Scale runs' rate times the morph's slow-down (1 / p272 while morphing).
+  const director = new EffectDirector(fx, (rate) => (view.timeScale = rate * (model?.clockRate ?? 1)));
   const textures = new TextureCache(pkgs);
   const world = () => ctx.services.world as WorldLike | undefined;
   const actors = () => ctx.services.actors as ActorsLike | undefined;
@@ -154,6 +155,7 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
       playSound: (r) => play2D(r),
       playMovie,
       inCutscene,
+      clockRate: () => view.timeScale,
       log,
     });
     classes.start();
@@ -165,12 +167,22 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
 
   // --- Creature form. --------------------------------------------------------------------
   const body = params?.creature ? CreatureBody.create(pkgs, params.creature, params.human) : null;
+  if (body && model) {
+    // The morph's timing: each lead-in clip up to its MorphCharacter marker, then the morpher.
+    model.morphLead.morphIn = body.leadSeconds('in');
+    model.morphLead.morphOut = body.leadSeconds('out');
+    // The lead-in clips' sound cues (one of the clip's pool, as the player's own sounds).
+    body.onSound = (keys) => {
+      const ok = keys.filter((k) => audio.get(k));
+      if (ok.length) play2D(ok[Math.floor(Math.random() * ok.length)]);
+    };
+  }
   let humanModel: THREE.Object3D | null = null;
   let savedMode: 'fp' | 'tp' | null = null;
   let savedSpeeds: { walk: number; run: number } | null = null;
   let viewmodelHidden = false;
   let weaponsOff = false;
-  const formRuns: { blur?: BlurRun; tint?: FaderRun } = {};
+  const formRuns: { blur?: BlurRun; tint?: FaderRun; morphBlur?: BlurRun } = {};
 
   const setWeapons = (on: boolean) => {
     const w = ctx.services.weapons as { setEnabled?(on: boolean): void; enabled?: boolean } | undefined;
@@ -183,7 +195,11 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
     const p = view.player;
     if (!humanModel) humanModel = p.root.children.find((c) => c.name === 'player-body') ?? null;
     p.setModel(obj ?? humanModel);
+    // The forms' rigs stay under the player (hidden) while human: the reputation skin's scene
+    // scan keeps the morph's human rig in Torque's current skin before it is first shown.
+    if (!obj && body && body.group.parent !== p.root) p.root.add(body.group);
   };
+  if (body) view.player.root.add(body.group);
 
   const enterCreature = () => {
     const p = view.player;
@@ -219,9 +235,18 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
       enterCreature();
       view.player.setVirtualInput({ forward: 0, strafe: 0 });
       if (body) {
-        showModel(body.root);
-        // (A loaded save in creature form: the morph clip only runs to its end pose.)
-        body.startMorphIn(restoringForm ? 0.1 : (human.morph?.duration ?? 1));
+        showModel(body.group);
+        // (A loaded save in creature form: the creature at once, no morph.)
+        if (restoringForm) body.showCreature();
+        else body.startMorph('in', human.morph);
+      }
+      // The morph-in's Screen Blur (p273, 0x100441f5..0x1004426f; on the game clock, so it
+      // mostly runs once the morph has given the clock back).
+      const mb = restoringForm ? undefined : templateBlur(pkgs, human.morphBlur);
+      if (mb) {
+        formRuns.morphBlur = new BlurRun({ ...mb, destroyAtEnd: true });
+        director.blurs.add(formRuns.morphBlur);
+        formRuns.morphBlur.start();
       }
       // Transformation flash (p267) and the creature-form blur / tint (p265 / p266).
       const flash = restoringForm ? undefined : templateFader(pkgs, human.flash);
@@ -235,16 +260,24 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
       const tint = templateFader(pkgs, human.tint);
       if (tint && classes) formRuns.tint = classes.spawnFader({ ...tint, destroyAtEnd: true });
     } else if (form === 'creature') {
+      body?.endMorph();
+      view.player.viewOrbit = 0;
       view.player.setVirtualInput(null);
     } else if (form === 'morphOut') {
       view.player.setVirtualInput({ forward: 0, strafe: 0 });
-      if (body) showModel(body.startMorphOut(params!.creature?.morph?.duration ?? 1));
+      if (body) {
+        showModel(body.group);
+        body.startMorph('out', params!.creature?.morph);
+      }
       formRuns.blur?.stop();
       formRuns.tint?.stop();
     } else if (form === 'human') {
-      // Changing back: blood added while transformed fills the level (0x10033189 / 0x1002b3f0).
-      if (prev === 'morphOut') (ctx.services.repskin as { changedBack?(): void } | undefined)?.changedBack?.();
+      // Changing back: blood added while transformed fills the level (message 221 -> 0x100444c0,
+      // sent by the morpher's end; the instant change back of a cinematic runs it too, 0x10033346).
+      (ctx.services.repskin as { changedBack?(): void } | undefined)?.changedBack?.();
+      body?.endMorph();
       body?.hide();
+      view.player.viewOrbit = 0;
       showModel(null);
       formRuns.blur?.stop();
       formRuns.tint?.stop();
@@ -473,7 +506,11 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
   };
   const unsubFrame = view.player.onUpdate((f) => {
     if (!body || !model || model.form === 'human') return;
-    const hits = body.update(f, view.player, meleeWorld(), model.form === 'creature');
+    // The frame's real time: a morph runs on it while the clock is slowed (rules.ts clockRate).
+    const rate = view.timeScale;
+    const hits = body.update(f, view.player, meleeWorld(), model.form === 'creature', rate > 0 ? f.dt / rate : f.dt);
+    // The morph's camera orbit (Player +0x4aa).
+    view.player.viewOrbit = model.form === 'morphIn' || model.form === 'morphOut' ? body.orbit : 0;
     const ac = actors();
     if (!ac) return;
     const dmg = ctx.services.damage as { apply(e: Record<string, unknown>): unknown } | undefined;
@@ -487,7 +524,8 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
         const point = h.point ? { x: h.point[0], y: h.point[1], z: h.point[2] } : { x: a.position.x, y: a.position.y + 1, z: a.position.z };
         // Through the damage router when it runs (kill credit, resistances by type), like the weapons.
         const uid = (a as { uid?: number; entity?: { uid: number } }).uid ?? (a as { entity?: { uid: number } }).entity?.uid;
-        if (dmg) dmg.apply({ point, amount: h.damage, kind: h.kind, source: view.player.position.clone(), ...(uid !== undefined ? { targetUid: uid } : { actor: a }) });
+        // The struck leaf's bone and the impact force go with it (Part Caps, the hit reaction).
+        if (dmg) dmg.apply({ point, amount: h.damage, kind: h.kind, force: h.force, bone: h.bone, source: view.player.position.clone(), ...(uid !== undefined ? { targetUid: uid } : { actor: a }) });
         else ac.damage(a, h.damage, view.player.position);
       }
   });
@@ -662,7 +700,7 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
         // entry points that call the revert routine].
         const alive = combat()?.player.alive ?? true;
         if (model.transformed && (!alive || inCutscene())) model.revert(false, true);
-        model.update(dt);
+        model.update(dt, realDt);
         if (putAwayHidden && model.form === 'human' && model.putAwayLeft <= 0) {
           putAwayHidden = false;
           setWeapons(true);

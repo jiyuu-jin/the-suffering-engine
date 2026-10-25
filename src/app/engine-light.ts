@@ -509,12 +509,24 @@ export function engineLightInternals() {
  * (TFACTOR, docs/re/renderer.md §3.5). Call once per material.
  */
 export function engineLightFactor(opts: EngineLightOptions): N {
-  const P = positionWorld;
-  const Nrm = normalWorld;
   const set = !opts.precomputed && !!opts.lightSet;
-  const base = opts.precomputed ? bakedBase(P, Nrm) : set ? objectBase(P, Nrm) : dynamicBase(P, Nrm);
-  const points = Fn(() => (set ? chosenPointLights(P, Nrm) : pointLights(P, Nrm, opts.precomputed ? u.bakedPoints : u.points)))();
-  const light: N = varying(base.add(points).add(spotLights(P, Nrm)), 'v_engineLight');
+  const light: N = varying(
+    Fn(() => {
+      // The vertex position and normal are taken here, before any light loop. TSL emits a
+      // node's first use where it is built: when that is inside a Loop (the Ambient Light
+      // regions of dynamicBase, the directional lights of bakedBase / objectBase), the
+      // `positionLocal = position` / `normalLocal = normal` assignments land in the loop body,
+      // and with a count of 0 (a level without Ambient Light regions; no directional light
+      // uploaded) the vertex keeps (0, 0, 0): every vertex collapses onto the object's origin
+      // and the mesh draws no pixels (docs/re/renderer.md §1.11).
+      const P = positionWorld.toVar();
+      const Nrm = normalWorld.toVar();
+      const base = opts.precomputed ? bakedBase(P, Nrm) : set ? objectBase(P, Nrm) : dynamicBase(P, Nrm);
+      const points = set ? chosenPointLights(P, Nrm) : pointLights(P, Nrm, opts.precomputed ? u.bakedPoints : u.points);
+      return base.add(points).add(spotLights(P, Nrm));
+    })(),
+    'v_engineLight',
+  );
   // Enhanced mode (docs/enhanced.md): per-pixel factor with the flashlight, lamp shadows, HDR.
   if (enhancedShading.lightFactor) return enhancedShading.lightFactor(light, opts);
   return clamp(light.min(LIGHT_CLAMP).mul(0.5), 0, 1);

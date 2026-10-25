@@ -3,6 +3,7 @@
 //   node tools/playthrough.mjs [--url http://localhost:5173] [--tmp <dir>] [--shots <dir>]
 //        [--out report.json] [--from <step id>] [--to <step id>] [--keep] [--ctl 9333]
 //        [--watch <s>] [--invulnerable] [--ignore-player] [--level 1b|1c] [--difficulty 0..3]
+//        [--window W,H[,device scale]]
 //
 // --tmp holds the browser profile and the dev server's config / cache (deleted at exit);
 // --level starts that level through the developer deep link (no menus, no carried inventory)
@@ -1843,7 +1844,8 @@ try {
       `--user-data-dir=${profile}`,
       '--enable-unsafe-webgpu',
       '--autoplay-policy=no-user-gesture-required',
-      '--window-size=1280,720',
+      // --window 1728,1117[,2]: the window size (and device scale factor) of the reference display.
+      ...(opt('--window') ? [`--window-size=${opt('--window').split(',').slice(0, 2).join(',')}`, `--force-device-scale-factor=${opt('--window').split(',')[2] ?? 1}`] : ['--window-size=1280,720']),
       '--no-first-run',
       'about:blank',
     ],
@@ -1915,12 +1917,13 @@ try {
   const click = async (x, y) => {
     for (const type of ['mousePressed', 'mouseReleased']) await send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1 });
   };
-  const shot = async (name) => {
+  // png: a lossless frame at the full device resolution (GET /shot?name=&png=1, for tools/image-metrics.ts).
+  const shot = async (name, png = false) => {
     if (!shotsDir) return null;
     const vp = (await send('Page.getLayoutMetrics')).result?.cssVisualViewport ?? { clientWidth: 1280, clientHeight: 720 };
-    const r = await send('Page.captureScreenshot', { format: 'jpeg', quality: 60, clip: { x: 0, y: 0, width: vp.clientWidth, height: vp.clientHeight, scale: 0.5 } });
+    const r = await send('Page.captureScreenshot', png ? { format: 'png' } : { format: 'jpeg', quality: 60, clip: { x: 0, y: 0, width: vp.clientWidth, height: vp.clientHeight, scale: 0.5 } });
     if (!r.result?.data) return null;
-    const p = join(shotsDir, `${name.replace(/[^\w.-]+/g, '_')}.jpg`);
+    const p = join(shotsDir, `${name.replace(/[^\w.-]+/g, '_')}.${png ? 'png' : 'jpg'}`);
     writeFileSync(p, Buffer.from(r.result.data, 'base64'));
     return p;
   };
@@ -3856,7 +3859,7 @@ try {
         } else if (u.pathname === '/key') {
           const k = JSON.parse(body);
           out = await send('Input.dispatchKeyEvent', { type: k.type, code: k.code, key: k.key ?? k.code, windowsVirtualKeyCode: k.vk ?? VK[k.code] ?? 0 });
-        } else if (u.pathname === '/shot') out = await shot(u.searchParams.get('name') ?? 'shot');
+        } else if (u.pathname === '/shot') out = await shot(u.searchParams.get('name') ?? 'shot', u.searchParams.has('png'));
         else if (u.pathname === '/logs') out = { n: logs.length, logs: logs.slice(Number(u.searchParams.get('since') ?? 0)) };
         else if (u.pathname === '/inject') out = await ensurePage();
         else if (u.pathname === '/abort') out = abortRun = true;

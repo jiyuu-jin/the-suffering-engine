@@ -167,6 +167,11 @@ export class SubtitleOverlay {
     this.show('', 0, 0);
   }
 
+  /** The text on screen ('' when none). */
+  get showing(): string {
+    return this.text;
+  }
+
   set hintVisible(v: boolean) {
     this.hint.style.display = v ? '' : 'none';
   }

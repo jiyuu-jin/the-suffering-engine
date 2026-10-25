@@ -91,8 +91,8 @@ export interface ActorsService {
   wake(uid: number): boolean;
   setBehavior(uid: number, behaviorUid: number): boolean;
   raycast(origin: Vec3Like, dir: Vec3Like, maxDist: number, includeDead?: boolean | 'cuttable'): ActorHit | null;
-  /** An actor's leaf hit spheres as posed now (world space): what creature blows test on bodies. */
-  hitSpheres(a: Actor): { c: [number, number, number]; r: number }[];
+  /** An actor's leaf hit spheres as posed now (world space, node order, with their bones): what creature blows are swept against. */
+  hitSpheres(a: Actor): { c: [number, number, number]; r: number; bone: number }[];
   /** The player's body: play(clip, opts) / release() for interaction clips (player-body.ts). */
   readonly playerBody: PlayerBody | null;
   /**
@@ -222,9 +222,20 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
     const info = audio.get(k)!;
     const dialog = info.category === SoundCategory.Dialog;
     const h = audio.play(k, { position: [at.x, at.y, at.z], bus: dialog ? 'voice' : undefined });
-    if (speaker) lipSyncService(ctx)?.speak(h, speaker.uid, speaker.ch);
+    if (speaker) {
+      lipSyncService(ctx)?.speak(h, speaker.uid, speaker.ch);
+      speaker.speech = h;
+    }
     const text = info.subtitle ? readXduString(pkgs, info.subtitle) : undefined;
-    if (text && loadSettings().subtitles) subs.show(text, clock, Math.max(1.5, info.duration));
+    if (text && loadSettings().subtitles) {
+      subs.show(text, clock, Math.max(1.5, info.duration));
+      // A line cut short (its speaker removed or killed, the conversation replaced) takes its
+      // subtitle with it.
+      const t0 = performance.now();
+      void h.ended.then(() => {
+        if (subs.showing === text && performance.now() - t0 < (info.duration - 0.25) * 1000) subs.clear();
+      });
+    }
     speakLog.push({ t: +clock.toFixed(2), key: k, who: speaker?.ch.root.name ?? '-', subtitle: text });
     if (speakLog.length > 100) speakLog.shift();
     return info.duration || 2;
@@ -743,7 +754,7 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
       return true;
     },
     raycast: (o, d, max, includeDead) => manager.raycast(o, d, max, includeDead),
-    hitSpheres: (a) => (env.hitSpheres?.(a) ?? []).map((h) => ({ c: [h.c[0], h.c[1], h.c[2]] as [number, number, number], r: h.r })),
+    hitSpheres: (a) => (env.hitSpheres?.(a) ?? []).map((h) => ({ c: [h.c[0], h.c[1], h.c[2]] as [number, number, number], r: h.r, bone: h.bone ?? -1 })),
     playerBody: body,
     on: (ev, fn) => manager.on(ev, fn),
   };

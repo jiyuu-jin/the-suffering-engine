@@ -916,6 +916,8 @@ export class LevelRenderer {
         part.uvs ? 'u' : '',
         part.uvs2 ? 'l' : '',
         part.colors ? 'c' : '',
+        part.vertexAlpha ? 'va' : '',
+        part.translucent ? 'tr' : '',
         part.splat?.map((x) => `${x.texture}/${x.tiling}/${x.fade}`).join(',') ?? '',
       ].join('|');
       const zone = LEGACY_MERGE ? -1 : (part.zone ?? -1);
@@ -974,9 +976,12 @@ export class LevelRenderer {
           material: first.material,
           textureKey: first.textureKey,
           vertexColors: !!first.colors,
+          vertexAlpha: !!first.vertexAlpha,
+          translucent: !!first.translucent,
           hasUvs: !!first.uvs,
           splat: first.splatWeights ? first.splat : undefined,
           side: this.cullBackfaces ? THREE.FrontSide : THREE.DoubleSide,
+          levelGeometry: true,
         },
         textureSource,
       );

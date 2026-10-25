@@ -19,6 +19,9 @@
 //   actor      the actor object itself (an entry of services.actors.list()) for hits on actors
 //              without a level uid (spawned creatures); wins like targetUid
 //   dir        attack direction (unit), used for debris when no attacker position is known
+//   bone       the struck hit sphere's bone (damage record +0x20), when the blow knows it (a
+//              blade swept against the target's leaf spheres): Part Caps cut by it
+//              (actors/dismember.ts); without it the leaf nearest the point stands in
 //   force / minForce   impact force (damage record +0x1c: Missile p28..p31, Melee Weapon p69 x
 //              Attack p7, Radius Damage p2 at the centre to p3 at the edge, falling off as the
 //              amount does): what a character's hit reaction is picked by (actors/hit-react.ts);
@@ -55,6 +58,7 @@ export interface DamageEvent {
   dir?: { x: number; y: number; z: number };
   force?: number;
   minForce?: number;
+  bone?: number;
 }
 
 /** Damage at distance `d` of a radius event: Radius Damage falloff (inner / min) or linear. */
@@ -124,7 +128,7 @@ interface ActorLike {
 interface ActorsLike {
   list(): readonly ActorLike[];
   get(uid: number): ActorLike | undefined;
-  damage(actor: ActorLike, amount: number, from?: { x: number; y: number; z: number }, by?: unknown, hit?: { point?: { x: number; y: number; z: number }; type?: number; force?: number }): boolean;
+  damage(actor: ActorLike, amount: number, from?: { x: number; y: number; z: number }, by?: unknown, hit?: { point?: { x: number; y: number; z: number }; type?: number; force?: number; bone?: number }): boolean;
 }
 
 export function createDamageService(props: DamageablePropSet, actors: () => ActorsLike | undefined): DamageService {
@@ -150,7 +154,7 @@ export function createDamageService(props: DamageablePropSet, actors: () => Acto
         // The hit point and damage type let specials route blows (heads, weak spots: actors/specials).
         // A blast throws a corpse away from its centre (actors/gibs.ts).
         const from = e.radius && (a.dead || a.alive === false) ? e.point : (fromOf(e) ?? (by && typeof by === 'object' ? by.position : undefined));
-        const killed = svc.damage(a, amount, from, by, { point: e.radius ? undefined : e.point, type, force });
+        const killed = svc.damage(a, amount, from, by, { point: e.radius ? undefined : e.point, type, force, ...(e.bone !== undefined && !e.radius ? { bone: e.bone } : {}) });
         hits.push({ uid: a.entity?.uid ?? 0, kind: 'actor', damage: amount, killed });
       };
 

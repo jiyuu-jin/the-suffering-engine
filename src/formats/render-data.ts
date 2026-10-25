@@ -330,6 +330,19 @@ export function glowMarkAlphaRef(blend: number): number | null {
 }
 
 /**
+ * Whether a texel of a marking pass writes the glow mark: its alpha is texture alpha x TFACTOR
+ * alpha, and TFACTOR alpha carries the object's opacity (a tinted layer always, any layer of an
+ * object below 0.99: SUFFERING.EXE 0x498a5c, 0x48fcd7), so a faded object marks only where
+ * texture alpha x opacity clears the pass's alpha test [verified]. 1b's Killjoy (Projector Effect
+ * 7edb: 0.4 +- 0.5 opacity, his glow-flagged additive layer 10:428 at alpha 1) marks nothing in
+ * the updates that draw him at 32 / 255 or less, about a fifth of them.
+ */
+export function glowMarkWritten(blend: number, textureAlpha: number, opacity: number): boolean {
+  const ref = glowMarkAlphaRef(blend);
+  return ref === null || textureAlpha * opacity > ref;
+}
+
+/**
  * CPU reference of the glow chain (0x48d0a0) on one 256² image of the masked frame: `src` holds
  * gamma rgb per texel (0..1, already masked: 0 where the mask fails). Returns the accumulation
  * target C (gamma rgb, 256²) that the composite adds to the back buffer (× colour × alpha).
@@ -654,6 +667,51 @@ export function translucentPassState(
 }
 
 /**
+ * The blend mode a pass of a translucent object is drawn with [verified, 0x48fb08..0x48fb1d]: an
+ * opaque (0) or cut-out (8) pass becomes mode 1 (SRCALPHA, INVSRCALPHA, alpha > 2 / 255); every
+ * other mode keeps its own. Depth is still written by the first pass's own mode (passDepthWrite).
+ */
+export function translucentPassBlend(blend: number): number {
+  return blend === 0 || blend === 8 ? 1 : blend;
+}
+
+/**
+ * Does a pass take the vertex alpha [verified, docs/re/renderer.md §5.3]? Texture stage 0 alpha is
+ * MODULATE(texture, ALPHAARG2) for every object pass (state bit 12 of DEFAULT_PASS_STATE, never
+ * cleared by the object draw 0x4986f0 or the pass builder), and ALPHAARG2 is DIFFUSE (oD0.a)
+ * unless the layer is tinted (layer +0x14, 0x48fc9b..0x48fd0e: TFACTOR replaces it). For a
+ * precomputed draw oD0.a = the .ldu vertex alpha x the object's opacity (xvsLightPrecomputed keeps
+ * v10.w, c51.x = 1; the light footer multiplies by c80.w = opacity, 0x436c54).
+ */
+export function passTakesVertexAlpha(tint: number | undefined): boolean {
+  return tintFactor(tint) === null;
+}
+
+/**
+ * The colour resource's translucent flag [verified, .ldu loader 0x487610 at 0x487722..0x48777e]:
+ * set when any colour of the record has alpha below 0xfe and is not the zero dword (black with
+ * alpha 0 does not count). The object draw (0x498861..0x498873) then draws the object as
+ * translucent: every pass blends and an opaque or cut-out pass becomes mode 1
+ * (translucentPassBlend). `bgra`: the record's colours, 4 bytes each (B, G, R, A).
+ */
+export function lduColorsTranslucent(bgra: ArrayLike<number>): boolean {
+  for (let i = 0; i + 3 < bgra.length; i += 4) {
+    const a = bgra[i + 3];
+    if (a < 0xfe && (bgra[i] | bgra[i + 1] | bgra[i + 2] | a) !== 0) return true;
+  }
+  return false;
+}
+
+/**
+ * Does any of the corners `vertices` (indices into the record's colours) have a vertex alpha
+ * below 255? Surfaces without one draw exactly as before (no vertex-alpha term in the shader).
+ */
+export function lduVertexAlphaBelowOne(bgra: ArrayLike<number>, vertices: Iterable<number>): boolean {
+  for (const v of vertices) if (bgra[4 * v + 3] < 255) return true;
+  return false;
+}
+
+/**
  * Alpha test of a pass [verified, 0x48fb08..0x48fb4e]: modes 0 and 7 test ALWAYS (none), mode
  * 8 keeps alpha > 200 / 255, the other modes > 2 / 255, except an additive (mode 2) pass with
  * the glow mark (p5 / p7), which keeps alpha > 32 / 255. Returns the reference (0..1), or null
@@ -700,8 +758,10 @@ export function backBufferBlend(blend: number, src: number, a: number, dst: numb
  * (Advanced builder 0x490046 stores (c >> 1) & 0x7f7f7f | 0xff000000), and as alpha the layer
  * alpha (+0x48, 1 from the builders) × the object's opacity (+0xd0) when that product is not 1.
  * Before the passes the object draw (0x498a5c..0x498aa9) also sets TFACTOR alpha = opacity with
- * white colour and ALPHAARG2 = TFACTOR for an object below 0.99 opacity, so untinted passes of
- * a fading object take its opacity as well.
+ * white colour and ALPHAARG2 = TFACTOR for an object below 0.99 opacity, but the pass builder
+ * clears ALPHAARG2 = TFACTOR again for an untinted layer (0x48fd0e): untinted passes of a fading
+ * object take its opacity through the vertex alpha instead (c80.w in the light footer,
+ * passTakesVertexAlpha).
  */
 export function tintFactorWord(tint: number, layerAlpha: number, opacity: number): number {
   const half = (((tint >>> 0) >> 1) & 0x7f7f7f) >>> 0;

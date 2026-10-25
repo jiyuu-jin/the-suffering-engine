@@ -399,14 +399,17 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
       const tp = buildHeldModel(pkgs, def.model);
       if (tp) {
         b.body.root.add(tp.root);
-        attach.attacher.attach(tp.root, b.body, { bone });
+        // Kept while the creature form takes the body out of the player's root: released then,
+        // the gun stayed at that frame's pose in the body's frame for good (docs/game-logic.md
+        // §13.10).
+        attach.attacher.attach(tp.root, b.body, { bone }, undefined, { keep: true });
         h.tp.push(tp);
       }
       if (b.arms) {
         const fp = buildHeldModel(pkgs, def.model);
         if (fp) {
           b.armsPivot.add(fp.root);
-          attach.attacher.attach(fp.root, b.arms, { bone });
+          attach.attacher.attach(fp.root, b.arms, { bone }, undefined, { keep: true });
           h.fp.push(fp);
         }
       }

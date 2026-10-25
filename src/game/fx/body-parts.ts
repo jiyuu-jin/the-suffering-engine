@@ -264,6 +264,35 @@ export class BodyParts {
     return true;
   }
 
+  /**
+   * What a message a sequence sent long ago left on the carrier, for a save that did not hold
+   * the carrier's fader and parts (fx/system.ts, the fx.bodyParts provider's `absent`): 154
+   * spawns the set, a fade start or stop leaves the fade's end. Nothing fires (206's output p34
+   * went out when the key played; the save holds what it did). 151 / 152 need a bone, which a
+   * sequence's key does not carry. Returns true when the message is one of these.
+   */
+  replay(c: BodyPartCarrier, msg: number): boolean {
+    const st = this.state(c);
+    switch (msg) {
+      case SPAWN_ATTACHMENTS:
+        this.env.parts.spawnParts(c.uid, c.values);
+        return true;
+      case START_FADE_IN:
+      case START_FADE_OUT:
+        st.fader.start(msg, 1);
+        st.fader.stop();
+        break;
+      case STOP_FADE_IN:
+      case STOP_FADE_OUT:
+        st.fader.stop();
+        break;
+      default:
+        return false;
+    }
+    this.applyOpacity(c, st);
+    return true;
+  }
+
   /** Per frame: the carriers' clip events, fades and opacity. */
   update(dt: number, carriers: Iterable<BodyPartCarrier>) {
     const seen = new Set<number>();

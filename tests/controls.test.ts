@@ -15,7 +15,7 @@ import { PLAYER_TEAM } from '../src/game/actors/behaviors';
 import type { EntityPackage } from '../src/formats/entities';
 import { readAnimEvents } from '../src/formats/animation';
 import { readInsanityParams } from '../src/game/insanity/params';
-import { CREATURE_WEAPON_SHAPES, armWindows, creatureBlowOutcome, meleeDamage, reputationDamageScale, segmentDistance, sweepCapsule, sweepSpheres, type Vec3 } from '../src/game/insanity/melee';
+import { CREATURE_WEAPON_SHAPES, armWindows, creatureBlowOutcome, meleeDamage, reputationDamageScale, segmentDistance, strikeTarget, sweepCapsule, type Vec3 } from '../src/game/insanity/melee';
 
 const gate = { alive: true, health: 50, maxHealth: 100, transformed: false, scripted: false, bottles: 1 };
 
@@ -185,12 +185,13 @@ test('creature blow targets: own team skipped, p167 = 2 visions reflect, the dea
   assert.equal(creatureBlowOutcome({ ...t, decor: true }, PLAYER_TEAM), 'skip');
 });
 
-test('creature blows on a body on the floor: the leaf hit sphere the claw comes deepest into', () => {
-  const head = { c: [0, 0.1, 1] as Vec3, r: 0.15 }, chest = { c: [0, 0.15, 0.4] as Vec3, r: 0.25 };
+test('creature blows on a body on the floor: the first leaf hit sphere (node order) the claw meets', () => {
+  const head = { c: [0, 0.1, 1] as Vec3, r: 0.15, bone: 48 }, chest = { c: [0, 0.15, 0.4] as Vec3, r: 0.25, bone: 6 };
+  const cap = { x: 0, z: 0.7, y0: 0, y1: 0.4, r: 0.4 };
   // A claw sweeping across at 0.2 m over the head.
-  assert.deepEqual(sweepSpheres([-1, 0.2, 1], [-0.5, 0.2, 1], [0.5, 0.2, 1], [1, 0.2, 1], 0.05, [chest, head]), head.c);
-  assert.equal(sweepSpheres([-1, 1.5, 1], [-0.5, 1.5, 1], [0.5, 1.5, 1], [1, 1.5, 1], 0.05, [chest, head]), null, 'passing 1.5 m over it: no blow');
-  assert.equal(sweepSpheres([-1, 0.2, 1], [-0.5, 0.2, 1], [0.5, 0.2, 1], [1, 0.2, 1], 0.05, []), null);
+  assert.equal(strikeTarget([-1, 0.2, 1], [-0.5, 0.2, 1], [0.5, 0.2, 1], [1, 0.2, 1], 0.05, cap, [chest, head], false)?.bone, 48);
+  assert.equal(strikeTarget([-1, 1.5, 1], [-0.5, 1.5, 1], [0.5, 1.5, 1], [1, 1.5, 1], 0.05, cap, [chest, head], false), null, 'passing 1.5 m over it: no blow');
+  assert.equal(strikeTarget([-1, 0.2, 1], [-0.5, 0.2, 1], [0.5, 0.2, 1], [1, 0.2, 1], 0.05, cap, [], false), null);
 });
 
 function packages() {

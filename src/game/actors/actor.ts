@@ -332,6 +332,8 @@ export interface PropTargetInfo {
 const SIGHT_DROPS = [0, 0.5, 0.9];
 const GIVE_UP_AFTER = 8;
 const TURN_RATE = 6;
+/** Seconds past a line's length after which a sound that never ended (audio not running) no longer holds the talk. */
+const LINE_STUCK = 5;
 /** Placed feet more than this above the ground (m) count as airborne (not snapped down). */
 const AIRBORNE_GAP = 0.6;
 /** Feet released by a sequence up to this above a surface stand on it (the motor's teleport snap). */
@@ -522,6 +524,20 @@ export class Actor {
   profile: ActorProfile = { team: '' };
   /** Current root behaviour (undefined = the kind's plain hostile/neutral default). */
   behavior?: Behavior;
+  /**
+   * The line this character is saying (Character +0x40e, one speech channel; set by the
+   * actors system's speak). Stopped when the character dies (Character update 0x100e59de ->
+   * 0x1012cf00) [verified].
+   */
+  speech?: { stop(fade?: number): void; readonly playing: boolean };
+  /**
+   * The line a SimpleConversationBehavior is saying (its PlayDialog child, vtable 0x10156fc0):
+   * its exit (vt +0x4c 0x100ffc70) stops the line when the conversation's p3 is set, and that
+   * exit runs whenever the child goes: the line's end, a Behavior Changer replacing the
+   * conversation (0x10098e50), the character's removal (behaviour stack teardown 0x10098f50 ->
+   * 0x10098dd0 -> 0x10097930) [verified].
+   */
+  private talkLine?: { h: { stop(fade?: number): void; readonly playing: boolean }; stop: boolean };
   /** Culling / LOD (managed by ActorManager). */
   inView = true;
   occluded = false;
@@ -582,6 +598,8 @@ export class Actor {
     i: number;
     wp: number;
     until: number;
+    /** SimpleConversation: the line's p1 pause, run once its sound is over. */
+    pause?: number;
     line?: DialogLine;
     done?: boolean;
     clip: number;
@@ -1280,6 +1298,7 @@ export class Actor {
    */
   setBehavior(b: Behavior | undefined, env?: ActorEnv, chained = false) {
     if (!this.alive || this.kind.decor || this.template) return;
+    this.endTalkLine();
     if (!chained) (this.onChainDone = undefined), (this.chainOf = undefined);
     this.behavior = b;
     this.b = { phase: 0, t: 0, i: 0, wp: 0, until: 0, clip: -1 };
@@ -1664,6 +1683,7 @@ export class Actor {
     if (this.state === 'dead') return;
     this.health = 0;
     this.enterState('dead');
+    this.stopSpeech();
     const own = (b ?? this.deathFor(from))?.clips.map((r) => env.clip(this, r)).filter((i) => i >= 0) ?? [];
     const d = own.length ? own : this.kind.deaths;
     if (d.length) {
@@ -2132,6 +2152,19 @@ export class Actor {
       this.b.until = env.time;
     }
     if (!alone) this.faceTowards(dx, dz, dt, TURN_RATE * 0.5);
+    // A line is over when its sound is (the speech component's done test 0x1012cf40 asks the
+    // sound manager whether the handle still plays) [verified]: on real time, so a line is not
+    // held over by a slowed clock (the morph's 1 / 128). Its p1 pause follows on the game
+    // clock. Without a sound handle (none loaded, a restored talk) the line's length decides.
+    const tl = this.talkLine;
+    if (tl) {
+      if (tl.h.playing && env.time < this.b.until + LINE_STUCK) {
+        if (this.state === 'act' && this.actionDone()) this.enterState('idle');
+        return;
+      }
+      this.talkLine = undefined;
+      this.b.until = Math.min(this.b.until, env.time + (this.b.pause ?? 0));
+    }
     if (env.time < this.b.until) {
       if (this.state === 'act' && this.actionDone()) this.enterState('idle');
       return;
@@ -2152,7 +2185,11 @@ export class Actor {
   }
 
   private speak(line: DialogLine, env: ActorEnv) {
+    this.endTalkLine();
+    this.speech = undefined;
     const len = env.say(this, line);
+    const b = this.behavior;
+    if (this.speech) this.talkLine = { h: this.speech, stop: b?.kind !== 'talk' || b.stopOnExit !== false };
     if (line.message) this.fireLinks(env, line.message);
     const c = line.anims.length ? env.clip(this, line.anims[Math.floor(Math.random() * line.anims.length)]) : -1;
     if (c >= 0) {
@@ -2160,6 +2197,7 @@ export class Actor {
       this.enterState('act');
     } else this.setStateIf('idle');
     this.b.until = env.time + Math.max(0.6, len) + Math.max(0, line.pause);
+    this.b.pause = Math.max(0, line.pause);
   }
 
   private fireLinks(env: ActorEnv, msg: number) {
@@ -3948,7 +3986,23 @@ export class Actor {
     };
   }
 
+  /** The conversation's line ends with its PlayDialog child: stopped when the conversation's p3 is set. */
+  private endTalkLine() {
+    const tl = this.talkLine;
+    this.talkLine = undefined;
+    if (tl?.stop && tl.h.playing) tl.h.stop(0);
+  }
+
+  /** Stop whatever line the character is saying (its death; StopSpeech 0x100e1b30). */
+  stopSpeech() {
+    this.talkLine = undefined;
+    if (this.speech?.playing) this.speech.stop(0);
+    this.speech = undefined;
+  }
+
   dispose() {
+    // Removed (Destroy, a cloner's clean-up): the behaviour stack's teardown ends the talk.
+    this.endTalkLine();
     this.ch.dispose();
   }
 }

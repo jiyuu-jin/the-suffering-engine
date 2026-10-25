@@ -66,10 +66,29 @@ export function defaultPersist(): InsanityPersist {
   return { meter: 0, reputation: 0, adrenaline: 0, noTransform: false, noGain: false, attackIndex: -1, attackPoints: 0, events: 0 };
 }
 
+/**
+ * The Character Morpher's cross-fade (update 0x10010510) at `elapsed` of its p4 `duration`:
+ * u = elapsed / p4, eased by 1 - (cos(pi u) + 1) / 2 when p5 = 1. Up to e = 0.5 the new form
+ * fades in to e over the old one (drawn at 1); past it the new form is at 1 and the old one fades
+ * out at 1 - e. Opacities of the old form (`from`, the player's model) and the new (`to`).
+ */
+export function morpherFade(elapsed: number, duration: number, cosine = true): { from: number; to: number; e: number } {
+  const u = duration > 0 ? clamp01(elapsed / duration) : 1;
+  const e = cosine ? 1 - (Math.cos(Math.PI * u) + 1) * 0.5 : u;
+  return e <= 0.5 ? { from: 1, to: clamp01(e), e } : { from: clamp01(1 - e), to: 1, e };
+}
+
 export class InsanityModel {
   form: Form = 'human';
-  /** Seconds left of the morph animation (morphIn / morphOut). */
+  /** Seconds left of the morph animation (morphIn / morphOut), real time (the clock is slowed). */
   morphLeft = 0;
+  /** Real seconds since the morph started. */
+  morphElapsed = 0;
+  /**
+   * Seconds of the lead-in (the current form's p254 clip up to its MorphCharacter event) before
+   * the Character Morpher starts, per direction; set by the system from the clips' events.
+   */
+  readonly morphLead = { morphIn: 0, morphOut: 0 };
   /** Kill-combo window and count ([0x45c] / [0x464]). */
   comboTimer = 0;
   comboCount = 0;
@@ -234,9 +253,32 @@ export class InsanityModel {
     if (this.form === 'creature' || this.form === 'morphIn') this.begin('morphOut');
   }
 
+  /** The Character Morpher of a morph (p255 of the form it starts from). */
+  morpher(form: 'morphIn' | 'morphOut') {
+    return (form === 'morphIn' ? this.params.human : (this.params.creature ?? this.params.human)).morph;
+  }
+
+  /**
+   * Length of a morph (real seconds): the lead-in clip up to its MorphCharacter event, then the
+   * morpher's p4 (its end swaps the model; the Morph state then leaves, 0x100448a0).
+   */
+  morphSeconds(form: 'morphIn' | 'morphOut') {
+    return Math.max(0.1, this.morphLead[form] + (this.morpher(form)?.duration ?? 1));
+  }
+
+  /**
+   * Game clock rate (the morph's slow-down): while morphing the clock runs at 1 / p272 of the form
+   * that started it (0x100440f0 sets it, 0x10044280 at the Morph leave sets 1 again).
+   */
+  get clockRate() {
+    if (this.form !== 'morphIn' && this.form !== 'morphOut') return 1;
+    const from = this.form === 'morphIn' ? this.params.human : (this.params.creature ?? this.params.human);
+    return from.morphClockDiv > 0 ? 1 / from.morphClockDiv : 1;
+  }
+
   private begin(form: 'morphIn' | 'morphOut') {
-    const morph = (form === 'morphIn' ? this.params.human : this.params.creature ?? this.params.human).morph;
-    this.morphLeft = Math.max(0.1, morph?.duration ?? 1);
+    this.morphLeft = this.morphSeconds(form);
+    this.morphElapsed = 0;
     this.setForm(form);
   }
 
@@ -259,8 +301,9 @@ export class InsanityModel {
     this.s.adrenaline = a;
   }
 
-  update(dt: number) {
-    if (dt <= 0) return;
+  /** `realDt`: the frame's unscaled time (the morph runs on it while the game clock is slowed). */
+  update(dt: number, realDt = dt) {
+    if (dt <= 0 && realDt <= 0) return;
     // Kill-combo window.
     if (this.comboTimer > 0) {
       this.comboTimer -= dt;
@@ -276,9 +319,11 @@ export class InsanityModel {
     }
     // Morph animation.
     if (this.form === 'morphIn' || this.form === 'morphOut') {
-      this.morphLeft -= dt;
+      this.morphLeft -= realDt;
+      this.morphElapsed += realDt;
       if (this.morphLeft <= 0) this.setForm(this.form === 'morphIn' ? 'creature' : 'human');
     }
+    if (dt <= 0) return;
     const f = this.current;
     // Drain while transformed (not while morphing), warning, health drain at empty.
     if (this.form === 'creature') {

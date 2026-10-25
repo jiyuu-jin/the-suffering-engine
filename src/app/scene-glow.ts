@@ -42,10 +42,34 @@ export const GLOW_LAYER = 30;
 /** The mark material of a mesh's current material (surface-material.ts), if it has one. */
 export function glowMarkOf(m: THREE.Material | THREE.Material[] | undefined): THREE.Material | THREE.Material[] | null {
   if (!m) return null;
-  if (!Array.isArray(m)) return glowMark(m) ?? null;
+  if (!Array.isArray(m)) return markFor(m) ?? null;
   if (!m.some((x) => glowMark(x))) return null;
-  return m.map((x) => glowMark(x) ?? noMark);
+  return m.map((x) => markFor(x) ?? noMark);
 }
+
+/**
+ * The mark of one material. A faded object (material opacity below 1: Killjoy under his
+ * Projector Effect, a fading Hermes) marks only where its pass's alpha, texture alpha x the
+ * object's opacity (TFACTOR alpha, SUFFERING.EXE 0x498a5c / 0x48fcd7), clears the pass's alpha
+ * test, > 32 / 255 for a glow-flagged additive pass (renderer.md §5.1, §5.2) [verified]. Marks
+ * are shared by every material of a surface, so a faded material gets a clone of its own that
+ * carries its opacity (the mark graph multiplies the alpha by it). Before this, the mark used
+ * the texture alpha alone: Killjoy's silhouette glowed at full strength while the projector's
+ * flicker had him at 0..12 % (the engine draws no mark then), a white blob over the wall.
+ */
+function markFor(x: THREE.Material): THREE.Material | undefined {
+  const mark = glowMark(x);
+  if (!mark || !(x.opacity < 1)) return mark;
+  let c = fadedMarks.get(x);
+  if (!c || c.base !== mark) {
+    const m = mark.clone();
+    m.name = `${mark.name}:faded`;
+    fadedMarks.set(x, (c = { base: mark, m }));
+  }
+  c.m.opacity = x.opacity;
+  return c.m;
+}
+const fadedMarks = new WeakMap<THREE.Material, { base: THREE.Material; m: THREE.Material }>();
 
 /** Group slots of a multi-material mesh that do not mark: drawn without touching anything. */
 const noMark = (() => {

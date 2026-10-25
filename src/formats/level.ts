@@ -64,6 +64,7 @@ import { faceMaterialIndex, moverCollisionMesh, rayOnlyCollisionMesh, readModelC
 import { hasSkeleton } from './skeleton';
 import type { LevelData, MeshPart } from './types';
 import type { LoadTimeSet, StaticLighting } from './static-light';
+import { lduColorsTranslucent, lduVertexAlphaBelowOne } from './render-data';
 import {
   type PackageSet,
   type ResRef,
@@ -568,6 +569,8 @@ interface VisGroup {
 // Start small: a level has a few thousand buckets once split per zone / cell.
 const BUCKET_START = 256;
 
+const NO_VERTEX_ALPHA = { vertex: false, translucent: false };
+
 /** Collision triangles of one surface / layer set (LevelData.collision), unindexed. */
 class CollisionBucket {
   pos: number[] = [];
@@ -602,6 +605,9 @@ class Bucket {
   ni = 0;
   /** Splat weights (8 per vertex), only for floor-layer buckets with splats. */
   sw?: Float32Array;
+  /** MeshPart.vertexAlpha / translucent of every object emitted here (part of the bucket key). */
+  vertexAlpha = false;
+  translucent = false;
   constructor(
     readonly textureKey: string | undefined,
     readonly material: SurfaceMaterial | undefined,
@@ -627,7 +633,7 @@ class Bucket {
     this.idx = grow(this.idx, this.ni + addI);
   }
   build(): MeshPart {
-    return {
+    const part: MeshPart = {
       positions: this.pos.slice(0, 3 * this.nv),
       normals: this.nrm.slice(0, 3 * this.nv),
       uvs: this.uv.slice(0, 2 * this.nv),
@@ -640,6 +646,9 @@ class Bucket {
       zone: this.group.zone >= 0 ? this.group.zone : undefined,
       cell: this.group.cell || undefined,
     };
+    if (this.vertexAlpha) part.vertexAlpha = true;
+    if (this.translucent) part.translucent = true;
+    return part;
   }
 }
 
@@ -761,10 +770,16 @@ export function parseLevel(lvl: SrscFile, name: string, extras: LevelExtras = {}
   // group (zone + cell, see groupOf).
   const nonSolid = new Set<Bucket>();
   const moverPass = new Set<Bucket>();
-  const bucket = (key: string | undefined, material: SurfaceMaterial | undefined, splat: LandscapeSplat[] | undefined, group: VisGroup, solid = true, pass = false) => {
-    const k = `${key ?? ''}|${materialSignature(material)}|${splat?.map((s) => `${s.texture}/${s.tiling}/${s.fade}`).join(',') ?? ''}|${group.zone}|${group.cell}${solid ? '' : '|ns'}${pass ? '|mp' : ''}`;
+  // `alpha`: the object's .ldu vertex alpha (docs/re/renderer.md §5.3): 1 = some corner of the
+  // submesh below 255, 2 = also the record's translucent flag. Objects without stay together.
+  const bucket = (key: string | undefined, material: SurfaceMaterial | undefined, splat: LandscapeSplat[] | undefined, group: VisGroup, solid = true, pass = false, alpha: { vertex: boolean; translucent: boolean } = NO_VERTEX_ALPHA) => {
+    const k = `${key ?? ''}|${materialSignature(material)}|${splat?.map((s) => `${s.texture}/${s.tiling}/${s.fade}`).join(',') ?? ''}|${group.zone}|${group.cell}${solid ? '' : '|ns'}${pass ? '|mp' : ''}${alpha.vertex ? '|va' : ''}${alpha.translucent ? '|tr' : ''}`;
     let b = buckets.get(k);
-    if (!b) buckets.set(k, (b = new Bucket(key, material, splat, group)));
+    if (!b) {
+      buckets.set(k, (b = new Bucket(key, material, splat, group)));
+      b.vertexAlpha = alpha.vertex;
+      b.translucent = alpha.translucent;
+    }
     if (!solid) nonSolid.add(b);
     if (pass) moverPass.add(b);
     return b;
@@ -833,6 +848,8 @@ export function parseLevel(lvl: SrscFile, name: string, extras: LevelExtras = {}
     const m = getModel(modelRef);
     if (!m) continue;
     if (colors && colors.length !== 4 * m.vertexCount) colors = undefined;
+    // The record's translucent flag (render-data.ts lduColorsTranslucent, SUFFERING.EXE 0x487722).
+    const translucent = !!colors && lduColorsTranslucent(colors);
 
     const s = o.scale ?? [1, 1, 1];
     const R = instanceRotation(o.rotation);
@@ -861,11 +878,12 @@ export function parseLevel(lvl: SrscFile, name: string, extras: LevelExtras = {}
 
     for (const sm of m.submeshes) {
       if (!sm.indices.length) continue;
-      const b = bucket(sm.textureKey, sm.material, undefined, group, solid, pass);
       // Only emit the corners this submesh uses.
       const remap = new Map<number, number>();
       const used: number[] = [];
       for (const ci of sm.indices) if (!remap.has(ci)) (remap.set(ci, used.length), used.push(ci));
+      const vertex = !!colors && lduVertexAlphaBelowOne(colors, used.map((ci) => m.source[ci]));
+      const b = bucket(sm.textureKey, sm.material, undefined, group, solid, pass, vertex || translucent ? { vertex, translucent } : NO_VERTEX_ALPHA);
       b.reserve(used.length, sm.indices.length);
       const base = b.nv;
       for (let j = 0; j < used.length; j++) {

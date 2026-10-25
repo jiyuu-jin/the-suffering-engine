@@ -126,6 +126,74 @@ const BATCH_PROBE = `(() => {
   return { n, pickups, bad };
 })()`;
 
+// Page-side check that every engine-lit material draws pixels (docs/re/renderer.md §1.11): a
+// box with each lighting kind (dynamic per-vertex, precomputed, light set; the shared factor and
+// the surface-material graph) rendered alone into a small target, once with the frame's light
+// counts and once with every light loop at 0 (no Ambient Light region, no directional, point or
+// spot light). The vertex position used to be first built inside the Ambient Light region
+// loop: with no region (1b, 6b, 7) every vertex collapsed to the origin and the dynamic
+// objects drew nothing. Returns { results, bad } (bad: kinds with no covered pixel).
+const ENGINE_LIT_PROBE = `(async () => {
+  const src = await (await fetch('/src/app/engine-light.ts')).text();
+  const dep = (n) => src.match(new RegExp('"([^"]*deps/' + n + '\\\\.js[^"]*)"'))[1];
+  const T = await import(dep('three_webgpu'));
+  const EL = await import('/src/app/engine-light.ts');
+  const SM = await import('/src/app/surface-material.ts');
+  const R = window.__view.renderer, u = EL.engineLightInternals().u;
+  const geo = new T.BoxGeometry(1, 1, 1);
+  const n = geo.attributes.position.count;
+  geo.setAttribute('color', new T.BufferAttribute(new Float32Array(4 * n).fill(0.5).map((x, i) => (i % 4 === 3 ? 1 : x)), 4));
+  const white = new T.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+  white.needsUpdate = true;
+  const texSrc = { texture: () => white, missing: () => white, hasAlpha: () => false };
+  const layer = { key: 'smoke', cls: 0, layers: [{ texture: 'smoke:1', blend: 0 }] };
+  const kinds = {
+    dynamic: EL.engineLightMaterial(new T.MeshStandardNodeMaterial({ color: 0xffffff }), { precomputed: false }),
+    precomputed: EL.engineLightMaterial(new T.MeshStandardNodeMaterial({ color: 0xffffff }), { precomputed: true }),
+    lightSet: EL.engineLightMaterial(new T.MeshStandardNodeMaterial({ color: 0xffffff }), { precomputed: false, lightSet: true }),
+    surfaceDynamic: SM.createSurfaceMaterial({ material: layer, textureKey: 'smoke:1', vertexColors: false }, texSrc).material,
+    surfacePrecomputed: SM.createSurfaceMaterial({ material: layer, textureKey: 'smoke:1', vertexColors: true }, texSrc).material,
+    surfaceLightSet: SM.createSurfaceMaterial({ material: layer, textureKey: 'smoke:1', vertexColors: false, lightSet: true }, texSrc).material,
+  };
+  const at = window.__view.camera.position.clone();
+  const cam = new T.PerspectiveCamera(50, 1, 0.05, 50);
+  cam.position.copy(at).add(new T.Vector3(1.5, 1, 2.5));
+  cam.lookAt(at);
+  cam.updateMatrixWorld(true);
+  const rt = new T.RenderTarget(32, 32, { depthBuffer: true });
+  const counts = ['ambBoxes', 'dirs', 'points', 'bakedPoints', 'spots'];
+  const results = {}, bad = [];
+  for (const zero of [false, true]) {
+    for (const [k, mat] of Object.entries(kinds)) {
+      const sc = new T.Scene();
+      const mesh = new T.Mesh(geo, mat);
+      mesh.position.copy(at);
+      mesh.frustumCulled = false;
+      sc.add(mesh);
+      const saved = counts.map((c) => u[c].value);
+      if (zero) for (const c of counts) u[c].value = 0;
+      const prev = R.getRenderTarget();
+      R.setRenderTarget(rt);
+      R.setClearColor(0x000000, 0);
+      R.clear();
+      R.render(sc, cam);
+      R.setRenderTarget(prev);
+      counts.forEach((c, i) => (u[c].value = saved[i]));
+      const px = await R.readRenderTargetPixelsAsync(rt, 0, 0, 32, 32);
+      let covered = 0;
+      for (let i = 3; i < px.length; i += 4) if (px[i] > 0) covered++;
+      const key = k + (zero ? ' (no lights)' : '');
+      results[key] = covered;
+      if (covered < 20) bad.push(key + ': ' + covered + ' px');
+    }
+  }
+  rt.dispose();
+  geo.dispose();
+  white.dispose();
+  for (const m of Object.values(kinds)) m.dispose();
+  return { results, bad };
+})()`;
+
 // Page-side per-frame draw probe for the culling checks: drawProbe(fn, sight) calls fn with one
 // entry per character (actors, the player's sequence puppet, skinned sequence props) right
 // after each frame is drawn: key, on (skinned bones of its true pose inside the view; the pose
@@ -367,6 +435,26 @@ async function main() {
             if (r.bad.length && !st.reported) console.error(r.bad.length + ' of ' + r.n + ' batched props wrong: ' + r.bad.slice(0, 6).join(', '));
             st.reported = true;
             return r.n > 500 && r.pickups > 50;
+          })()`,
+        );
+      }
+      // Engine-lit materials draw (ENGINE_LIT_PROBE): 1b has no Ambient Light region, the case
+      // in which gibs, debris, thrown weapons and every other dynamic-lit object drew nothing;
+      // the probe also zeroes every light loop. Original and Enhanced.
+      for (const [name, q] of [['', ''], [' enhanced', '&gfx=enhanced&tier=low']]) {
+        await check(
+          `engine-lit materials draw pixels with and without lights: 1b${name}`,
+          `/?skipintro&level=LEVELS/1%20PrisonDeathRow/1b%20PrisonDeathRow.lvl${q}`,
+          90_000,
+          `(async () => {
+            const v = window.__view;
+            if (!v || !(v.renderer.info.render.triangles > 10000) || !window.__world?.batch?.()) return false;
+            const st = (window.__smokeLit ??= { at: performance.now() });
+            if (performance.now() - st.at < 2000) return false;
+            if (st.r) return true;
+            st.r = await ${ENGINE_LIT_PROBE};
+            if (st.r.bad.length) console.error('engine-lit materials drew nothing: ' + st.r.bad.join(', ') + ' ' + JSON.stringify(st.r.results));
+            return true;
           })()`,
         );
       }

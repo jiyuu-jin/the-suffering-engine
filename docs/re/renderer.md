@@ -302,8 +302,10 @@ Port:
   start or not (its first draw comes after every light exists, §1.9); the sum is
   stored clamped, not halved, and the object is then drawn as precomputed (2 × colour +
   switchable lights per frame, no rim). See §1.9.
-- Spawned models (broken remains, debris, effect models) and the Instance Rendered Object
-  scatter are still lit as dynamic objects (ambient + every light, per frame) [port].
+- Spawned models (broken remains, debris, gibs, effect models) take the same pass at the spawn
+  since 8340318, as the engine runs it at their first draw (§1.11). The Instance Rendered Object
+  scatter and the morphing drips are still lit as dynamic objects (ambient + every light, per
+  frame) [port].
 - `?lighting=legacy` keeps the old behaviour throughout.
 
 Measured (headless, 1280×720, 40 renders per view): frame cost unchanged within noise (1a
@@ -651,6 +653,101 @@ sits near k = 0.5, i.e. about 2.1, with short flashes); the blue lamps 7:237 run
 lerp their colour 0x728b88 -> 0x7b7d91 on 4:107. The port had read p6 / p7 as flicker colours
 with a p9 period, which replaced every effect light's colour with white and left strength alone.
 Port: `game/world/lights.ts`, `formats/model.ts` parseWaveform / waveformSample.
+
+### 1.11 Port: the dynamic lighting path drew nothing in 1b, 6b and 7 [verified in the browser]
+
+Found after 8340318 (docs/playthrough.md row 91). The gib chunks of a creature-form kill were
+spawned and counted as draw calls, but frames with them shown and hidden were the same. That
+commit gave spawned models the load-time pass, which hid the fault without finding it.
+
+**Cause.** This was a TSL code-generation hazard, not a lighting value. `engineLightFactor`
+passed `positionWorld` / `normalWorld` straight into the light builders. TSL emits a node's
+property assignments (`positionLocal = position`, `v_positionWorld = ...`, `normalLocal`,
+`VERTEX_normalWorld`) where the node is first built. In the dynamic per-vertex graph
+(`dynamicBase`), that first use is inside the Loop over the Ambient Light regions. With
+`u.ambBoxes` = 0 the loop body never runs. `positionLocal` keeps its zero value, the clip
+position becomes `modelViewProjection × (0, 0, 0, 1)`, every vertex lands on the object's
+origin, and every triangle is degenerate. So the draw call ran and drew no pixels.
+
+The generated WGSL showed this, and the WGSL compiled without errors. The other suspects were
+ruled out:
+- the colour and alpha were not zero: even `vec4(1)` as the colour drew nothing;
+- no uniform was left unbound;
+- there was no NaN;
+- the alpha test did not cause it;
+- a missing colour attribute was not the cause.
+
+**Where it applied.**
+- It depends on the level, not on what changed recently. The graph has been built like this
+  since b61cb37 (4 October), and three.js is the same version throughout.
+- Census of Ambient Light regions per level: none in 1b, 6b and 7. Every other retail level
+  has 1 to 6. In those three levels every lit surface on the dynamic path drew nothing.
+- The same hazard sat in the other two graphs. In `bakedBase` (all precomputed geometry: level
+  parts, .ldu props, objects lit at load) the position was first built inside the directional
+  light loop. In `objectBase` (characters) it was the normal. So the level and its props would
+  have vanished in any frame with no directional light uploaded, and characters would have lost
+  their point lights. No retail start has 0, so it was not seen.
+
+**Users of the dynamic path** (not precomputed, no light set; invisible in 1b / 6b / 7 before
+the fix):
+- `weapons/models.ts buildStaticModel`, lit:
+  - thrown objects in flight (Molotov 4:249, TNT, grenades, flares; `weapons/system.ts launch`
+    and the NPC throws);
+  - the throwable carried on the back (`ThrowableCarry`);
+  - spent casings;
+  - hardpoint attachments (`weapons/attach.ts`);
+  - rigid (unskinned) held models (`buildHeldModel`);
+  - the Black One's objects;
+  - skinned-prop stand-ins.
+- `weapons/system.ts matBrass` and `player.ts`'s placeholder body.
+- `world/dynamic.ts` meshes built without colours and without the load-time pass:
+  - the DripMorphingModel frames (`props.ts`, 1b: 30 drips; their lit 3:2539 frames drew
+    nothing, while the additive 3:2535 cards were unaffected);
+  - the Instance Rendered Object scatter;
+  - placed objects whose .ldu record names the model but holds no colours. The only ones in
+    retail are 1b's Switches 7ea0, 7ea2..7ea5 and 81cc (0 colours for the 228 vertices of
+    7:1007).
+- Character surfaces built through `createSurfaceMaterial` without a light set: the effect
+  passes with an untinted layer (`character.ts`).
+
+Not affected:
+- Skinned characters, guns and pickups (light set);
+- precomputed and load-time-lit objects: doors, lockers, pickups, weapons dropped by NPCs (a
+  dropped pickup is a placed object, `world.ts placeDrop`), breakable debris, gibs, Part Cap
+  pieces and other spawned models since 8340318;
+- decals (unlit basic materials).
+
+**Fix.** `engineLightFactor` builds the light inside one `Fn` whose first statements are
+`positionWorld.toVar()` and `normalWorld.toVar()`. That emits the position and normal at the top
+of the vertex stage, before any loop, for all three kinds (dynamic, precomputed, light set). The
+light values are unchanged where the loops ran before.
+- Tests:
+  - `tests/engine-lit-draw.test.ts` checks the order in the source;
+  - `tools/smoke.mjs ENGINE_LIT_PROBE` renders a box with each kind into a 32² target in 1b,
+    with the frame's light counts and with every loop count at 0, Original and Enhanced, and
+    fails on a kind that covers no pixel. At HEAD it failed for the dynamic and surface-dynamic
+    kinds (0 px) and, at 0 counts, for the precomputed ones; it passes after the fix.
+- Measured in headless Brave, 1b, scenarios in scratch. Each figure is offscreen pixels of the
+  object's own meshes, or the change between shown / hidden frames:
+  - thrown Molotov 4:71: 0 px at HEAD, 194 px fixed, Original and Enhanced;
+  - drips: 146 / 150 meshes drawing at HEAD, 150 / 150 fixed;
+  - unchanged, and drawing in both modes: gib 3:2834 (33 meshes), the debris of Breakable 6aab
+    (15), door 79b2, a dropped Tommy Gun pickup (4:260 → 4:1403).
+
+**Objects without colours and the load-time pass.**
+- The static draw 0x4930f0 is always an object's first draw. The object list sends an object to
+  the dynamic draw 0x492b40 only once its +0x10 bit 8 is set (with setting 6 off, 0x4a15d1).
+- The only writer of that bit is the static draw itself, after it has drawn (0x4937ae). It sets
+  it only for an object with no skin instance and with +0xc bits 5 and 14 clear.
+- So a spawned, dropped or broken-off object also meets 0x4ca6c0 (vtable +0x84, from 0x493525)
+  at its first draw and gets the CPU pass. spawnModel's `lightAtLoad` is that rule, with the
+  load-time light set standing for the lights on at that draw [port, as §1.9].
+- The draw that follows (0x492b40) does not call +0x84 again. Which colours or lights it uses
+  is not traced.
+- The DripMorphingModel frames and the Instance Rendered Object scatter are still lit per frame
+  as dynamic objects [port]. Their frames are built at the origin and placed by a parent, so a
+  pass at load would light the wrong place. The engine forces the pass for the scatter's model
+  copy itself (0x100ba060, §1.9).
 
 ## 2. Spot lights [verified]
 
@@ -1105,11 +1202,13 @@ Both object draws start from the word 0x63a08 (static initialisers 0x586290 → 
 dynamic draw 0x492b40, 0x586a80 → 0x6dd8d4 for the static draw 0x4930f0). It has fog, alpha-op
 MODULATE, z test and z write on, and culling off.
 
-- **Alpha.** Stage 0 alpha is texture alpha × DIFFUSE alpha. For a tinted layer, or any layer of
-  an object below 0.99 opacity, it is texture alpha × TFACTOR alpha. TFACTOR alpha is the layer
-  alpha (1) × the object's opacity. For an object below 0.99 opacity, the object draw first sets
-  TFACTOR = opacity << 24 | 0xffffff (0x498a5c..0x498aa9). For a tinted pass it then becomes the
-  halved tint with that alpha (0x48fcd7).
+- **Alpha.** Stage 0 alpha is texture alpha × DIFFUSE alpha. For a tinted layer it is texture
+  alpha × TFACTOR alpha. TFACTOR alpha is the layer alpha (1) × the object's opacity. For an
+  object below 0.99 opacity, the object draw first sets TFACTOR = opacity << 24 | 0xffffff and
+  ALPHAARG2 = TFACTOR (0x498a5c..0x498aa9). For a tinted pass it then becomes the halved tint
+  with that alpha (0x48fcd7). For an untinted pass the pass builder sets ALPHAARG2 back to
+  DIFFUSE, so the opacity arrives through oD0.a instead (c80.w), together with the baked
+  vertex alpha (§5.4).
 - **Colour.** Untinted passes are texture × the vertex lighting, effect passes included.
   Tinted passes are texture × tint / 2, unlit. Stage 1 doubles both.
 - **Alpha test.**
@@ -1244,6 +1343,167 @@ punch-through texture its black texels for every pass but a cut-out (`texture.ts
 punchThroughBlack`); cut-out passes keep the colours bled from the neighbours, so their edges
 filter without dark fringes. Census and renders: game-logic.md §11.4 "Torn-off doors",
 follow-up; test `tests/surface-alpha.test.ts`.
+
+### 5.3 Light shafts and pools [verified unless marked]
+
+Read for the user report "the light beams in the insanity tutorial room are sharp and too
+unnatural" (1b arena after "Camera" #247; docs/playthrough.md row 88). Census and ray-cast
+scripts were scratch tools; tests `tests/light-volume.test.ts`.
+
+**What draws the shaft [verified data].** Decoration `86c7` (template 9:5840, model 9:4284) at
+the centre of the arena's floor grate (468.0, 73.58, 486.0): one Advanced pass 9:5841, mode 2,
+tint 0x414530, texture 7:584 (128² DXT5, white; alpha about 133 / 255 at the floor end, v 0.96,
+down to 0 from v 0.2 up, the same in every column). The model is four open boxes over the four
+quarters of the grate, 2.048 m tall (outer walls leaning out from 5.1 to 6.2 m off the centre,
+inner walls along the grate's cross), 88 triangles, header 0xc0000 (two-sided), baked colours
+(.ldu 30:2391) with alpha 255. Over it hang Decoration `86b7` (9:4275: the ceiling grate pattern
+9:1720 × 0x323524, additive, alpha 1: about +20 luma on the ceiling) and the black crack decal
+`86b8`. Under the grate: Static Object `87cd` (model 12:560), Advanced 9:5897, mode 0, texture
+7:596 × 0xf0ee99, **flag p5: the lit pit is glow-marked**; the grate itself is `87ce` (12:635,
+cut-out 7:1012); Point Light `87d0` sits 0.28 m under it.
+
+**How the engine draws it.**
+- A tinted pass: colour = texture × tint (halved TFACTOR, doubled by stage 1), alpha = texture
+  alpha × TFACTOR alpha (1); SRCALPHA, ONE on the gamma back buffer, test > 2 / 255, no depth
+  write, two-sided, fog to black (§5.1, §5.2). 1b's fog starts at 27 m [data], so nothing fades
+  at room distances.
+- No view-angle or distance term: of the shader fragments in `xvsh/`, only four write the alpha
+  register r2.w: the light footer (× c80.w, white for precomputed draws, §1.9), LandsplatAlpha
+  (floor-splat depth fade, ported), ShadowBackfaceCull (projected shadows) and LightSpecularAlpha
+  (alpha from the reflection vector, "for water"; its range c70 is uploaded by 0x4361b0, called
+  only from the draw at 0x4aaa51, which reads its own object's p10 / p11). A static Decoration
+  gets none of them [strong: the program choice for these draws was not traced bit by bit].
+- So every wall adds tint × alpha(v): about +35 luma per wall at the floor, nothing at its top,
+  constant across its width, so each wall ends in a hard edge, and a line of sight through two
+  boxes crosses four walls (+140 near the floor). The hard sides are in the data: every light
+  pool and shaft texture of 1a, 1b, 3a and 5b fades along v only (1a's cell-lamp pools 7:292 on
+  40 Decorations of 1a, 1b, 2, 3b, 6b; 4:1318; 9:5841); the Light Housing cone 7:1882 (9:4189) is
+  untinted, lit by its bake (about 10 / 255: dim); only the Sky / Sun cards fade both ways.
+- **The glow.** The pit's pixels seen through the grate holes are marked (stencil REPLACE), and
+  the shaft drawn over them keeps the mark: the pass builder sets STENCILPASS ZERO only for a
+  mode-0 first pass of an object that is not translucent (0x48fb55..0x48fb93; `edx` = mode ≠ 0 or
+  translucent, `ebx` = the pass index), KEEP for every other pass, cut-outs included. So the
+  scene glow (§3.2) takes the pit plus the shaft's light over it, about 3.4 times over, blurred:
+  the blown-out grate and the haze around the shaft of the report. Because a cut-out keeps the
+  mark too, whether the grate's bars glow depends on whether the pit is drawn before the grate
+  (the object list's model buckets, §5.1) [inferred]; the port hides the mark behind every
+  depth-writing surface, the dimmer of the two.
+
+**Port [verified in the browser].** Headless Brave at the user's pose (475, 73.7, 478, yaw 1.95,
+1728 × 980 CSS at 2 ×; `tools/playthrough.mjs --window 1728,1117,2`, `/shot?png=1`): the frame
+without the shaft, the decoded sum (ray cast through the model, alpha bilinear from 7:584, per
+pass saturated) and the port's frame agree: with the scene glow off, the added light per pixel
+is the prediction's (median ratio 1.000, p25 / p75 1.000 / 1.000, 1896 samples; the outliers are
+wall silhouettes shifted by the camera's sub-pixel sway), and with constant-alpha and ramp
+textures substituted (1.000 / 1.006). The glow then adds the rest (mean added luma over the
+shaft 36 → 51). The suspects change nothing here: 8fb255e (static modes 0 / 7 only), 50740bc
+(particles), 96cc5df (the grate's own lighting; the shaft is unlit), 5c3d208 (opacity below 1
+only), 0b009f4 (one draw of a two-sided additive pass: the same sum). The report's screenshot is
+Original (Enhanced has no scene glow; its grate does not blow out). Original is faithful and
+stays as it is; Enhanced softens the sheets (docs/enhanced.md "Light volumes").
+
+The arena shaft is tinted, and its bake's alpha is 255, so the vertex alpha does not reach it.
+Other light sheets of 1b and 1c are untinted, and their bakes fade them out: see §5.4.
+
+### 5.4 Baked vertex alpha [verified unless marked]
+
+Found while decoding §5.3 (docs/playthrough.md row 90). Census and frame scripts were scratch
+tools; tests `tests/vertex-alpha.test.ts`.
+
+**Stage 0 alpha of every object pass.**
+- The object draw 0x4986f0 (from the dynamic draw 0x492b40 and the static draw 0x4930f0) builds
+  each pass's state from 0x63a08, which has bit 12 set. Bit 12 is stage 0 ALPHAOP: 0x49aa60 sets
+  ALPHAOP MODULATE with ALPHAARG1 TEXTURE and ALPHAARG2 DIFFUSE when it is set, SELECTARG2
+  otherwise. Neither the object draw nor the pass builder 0x48fab0 clears it (its writers in the
+  renderer are special draws: 0x48d0a0, 0x4994f0, 0x4a1300 and the shadow code). So **every pass,
+  first or later, of any blend mode**, has alpha = texture alpha x ALPHAARG2.
+- ALPHAARG2 is bit 22 (applier 0x49ae7b..0x49aeb2: TFACTOR when set, DIFFUSE when clear). The
+  pass builder sets it for a tinted layer (layer +0x14, "tint on") or a layer with flag 2, and
+  clears it otherwise (0x48fc9b..0x48fd0e). No material builder sets layer flag 2 [strong: no
+  writer found]. The object draw sets bit 22 for an object below 0.99 opacity (0x498aa2), but
+  the pass builder runs after it and clears it again for an untinted layer.
+- So an **untinted pass takes DIFFUSE alpha (oD0.a)**. A **tinted pass takes TFACTOR alpha**,
+  which is the layer alpha x the object's opacity (0x48fcd7). The vertex alpha does not reach a
+  tinted pass at all.
+
+**What oD0.a holds.**
+- c51 = (1, 0.5, 0, 2). xvsLightPrecomputed: r2 = v10 x c51.wwwx, so rgb x 2 and alpha x 1. The
+  light fragments write only r2.xyz. The light footer: r2.w x c80.w, then oD0 = r2 x c51.yyyx,
+  so rgb x 0.5 and alpha x 1.
+- c80.w is the object's draw opacity: 0x436af0 writes ftol(arg x 255) into c80's alpha byte for
+  every draw (0x436c54..0x436c71), and the object draw passes its opacity (+0xd0, or less while
+  distance-faded, 0x4989ce) as that argument (0x498b18 / 0x498b27). For a precomputed draw the
+  rgb bytes are then set to white (0x436c7f).
+- Precomputed geometry (.ldu colours, and objects lit by the load-time pass): **oD0.a = vertex
+  alpha x opacity**.
+- Objects without colours (characters, held items, spawned models): xvsLightHeader starts r2 =
+  c80, so oD0.a = opacity x opacity [verified for the fragments; strong that every such program
+  starts with that header].
+  - Port: `surface-material.ts` multiplies an untinted pass of such an object by the opacity once
+    more (`DiffuseAlpha`, graph token `o2`). three.js applies it once, so the pass fades as
+    opacity². Tinted passes (TFACTOR) and precomputed ones keep a single factor.
+  - `engine-light.ts engineLightMaterial` (characters' plain skins, static models) already
+    carried opacity² (its alpha is colour alpha x opacity, and three.js multiplies again).
+  - Left open: an opaque or cut-out first pass keeps alpha 1 in the graph. When a faded object
+    blends it, that pass fades by the opacity once instead of texture alpha x opacity²
+    [port].
+
+**The alpha byte [verified].**
+- The .ldu record loader 0x487610 copies each colour dword as stored (BGRA). Nothing halves or
+  repacks the alpha byte. Only the rgb is the half-light bake (§1.6).
+- The load-time pass (0x4c0480) stores alpha 0xff, so objects lit at load carry no vertex alpha.
+- **The translucent flag.** While loading, 0x487610 sets bit 2 of the colour resource's flags
+  (+0x1c) when any colour has alpha below 0xfe and is not the zero dword (0x487722..0x48777e).
+  Black with alpha 0 does not count: 1b's pit panel 87cd, and 4a's shore sheets 814d..8155,
+  whose alpha-0 corners are all black.
+- The object draw reads that flag (0x498861..0x498873) and draws the object as **translucent**,
+  as if it were below 0.99 opacity:
+  - every pass blends;
+  - opaque and cut-out passes become mode 1 (SRCALPHA, INVSRCALPHA) with alpha > 2 / 255;
+  - the first pass still writes depth by its own mode (0x48fc70);
+  - no pass clears the glow mark (§5.3).
+  Draw order does not change: the flag is not object +0xc bit 7.
+
+**Which geometry.** Level geometry is placed objects drawn by the same object draw, merged or
+not; there is no separate world mesh. Floor layers are drawn by their own landscape path
+(0x4994f0, splat alpha from xvsLandsplatAlpha) and are not covered here [inferred]; their .ldu
+alpha is not changed by the port. Landscape water ("Landscape Water Material", the
+LightSpecularAlpha draw 0x4aa560 from 0x4a1300) has no retail use among the census surfaces.
+Water Volume is an RFL class with default virtuals, drawn as an ordinary object [strong].
+
+**Census** (all retail levels; level 7 has no .ldu): objects with an untinted pass over a vertex
+alpha below 255, and objects the flag turns into a blend.
+
+| Level | Untinted over alpha < 255 | Now blended | What |
+|---|---|---|---|
+| 0 | 33 | 49 | 30 harbour Water Volumes 7:1440 (alpha blend of alpha-less 7:744; vertex alpha 92..242, so 36..95 %); 3 shore sheets 7:1593 (7:396, 0..242); the 49 open-sea Water Volumes 7:1582 (tinted opaque base: blended, but texture alpha 255, so no visible change) |
+| 1b | 11 | 0 | Decoration 827a and ten other 3:3103 sheets (additive 3:376, 0..88 on 827a, 0..255 on the yard sheets 8737..888c) |
+| 1c | 1 | 0 | Decoration 8041 (additive 4:1940 with no alpha, vertex alpha 0..14: nearly invisible) |
+| 4a | 14 | 0 | shore sheets 7:2616 (9) and 7:1528 (5) on 7:396 |
+| 5a | 2 | 1 | shore 21c6 (7:2616, 0..165); Static Object 1e48 (opaque 6:210 / 23:785, 223..255: blended, its edges about 13 % see-through) |
+| 6a | 29 | 0 | stream and pond Water Volumes 25:165 (0..255), 7:1440 (113..229); banks 25:145 / 25:148 / 25:151 / 25:157, 7:1435, 7:2616; foam 7:1426 / 7:1427 |
+| 6b | 50 | 0 | The Beach: Water Volumes 7:1440 (0..220), skirts, banks 7:1467 / 7:2616, surf 7:1492 / 7:1497 / 7:1501 / 7:1511 |
+| 8a / 8b | 11 / 1 | 0 | shore sheets 7:1528 |
+| 9 | 9 | 0 | shore sheets 7:1593 |
+| 10 | 10 | 0 | shore sheets 7:1593 |
+
+Tinted surfaces with alpha-0 colours (1b 87cd, 1c's Sky / Sun 800b) take neither term.
+
+**Port.**
+- `formats/level.ts` and `world/dynamic.ts` keep the .ldu alpha in the colour attribute.
+  `dynamic.ts` wrote 1 before; level parts already carried it.
+- A submesh whose corners all have alpha 255 builds the same graph as before.
+- One with lower alpha goes into its own bucket (`MeshPart.vertexAlpha`), and so does a record
+  with the flag (`MeshPart.translucent`). Those flags reach `createSurfaceMaterial` through
+  `renderer.ts` and `SurfaceMaterialCache.get`.
+- `surface-material.ts shadePass` multiplies an untinted pass's alpha by the attribute's w
+  (`render-data.ts passTakesVertexAlpha`). It does this for the base pass (blend, alpha test,
+  the premultiplied additive colour) and for later passes (blendOver). The glow mark's test of an
+  untinted flagged pass takes it too.
+- `translucent` draws opaque and cut-out passes as mode 1 (`translucentPassBlend`). Depth
+  writes still follow the first pass's own mode.
+- Enhanced shares the pass graph, so its water and shore edges soften the same way. No extra
+  vertex attribute is added: the colour attribute already had four components.
 
 ## 6. Visibility leftovers
 

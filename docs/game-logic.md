@@ -926,7 +926,9 @@ Killjoy itself at 6.15 s ("Projector OFF", the projector's p15) and shows him ag
 hands control keys to its sink (also while skipping) and the world shows a Character other than
 the Player on its first take (`world/logic.ts stompTakeShows`; tests/sequence-take-shows.test.ts).
 Without it 1b's Hermes never drew in the scene that raises him out of the valve pipe, nor in the
-arena after it (docs/playthrough.md bug 79).
+arena after it (docs/playthrough.md bug 79). Saves written before the port did this hold such
+characters hidden; loading one shows them again from the sequences the level has played (§15.7.12
+"Saves from before 45f4dd8").
 
 **Transform keys.** The stored quaternion is the *inverse* of the object's engine rotation
 (world → object, the engine's row-vector convention), for every kind of object alike; the
@@ -2012,7 +2014,9 @@ whose own `p253` points back to `2:5`).
 | p264 | multiplier while the held item is a Melee Weapon (class `0x22e48520`) |
 | p257 | health lost per second while transformed with an empty meter (creature template: 5) |
 | p302 | low-meter warning threshold, % of p258 (fires a player event once) |
-| p255 | Character Morpher: model, p3 morph clip, p4 duration (human→creature 2.8 s on the creature rig, creature→human 1.2 s on the human rig) |
+| p254 | the morph's lead-in clip on this form's own rig (human 2:154, creature 2:157); its MorphCharacter marker starts p255 (§13.10) |
+| p255 | Character Morpher: model (the other form's), p3 morph clip, p4 cross-fade length, p5 = 1 cosine ease (human→creature 2.8 s on the creature rig, creature→human 1.2 s on the human rig; §13.10) |
+| p272 / p273 / p274 | morph clock divisor (128: the game clock runs at 1 / p272 while morphing), the morph-in's Screen Blur, the morph's Object Generator at the player (§13.10) |
 | p265 / p266 / p267 | Screen Blur, tint Screen Fader, flash Screen Fader used for the transformation [use inferred] |
 | p38 / p39 / p40 | adrenaline decay per second, maximum, minimum |
 | p60 / p61, p62 / p63, p64 / p65 | heartbeat period (s), volume (%), pitch at adrenaline 0 / 100 |
@@ -2037,17 +2041,18 @@ whose own `p253` points back to `2:5`).
   set; when not transformed it needs meter ≥ p258, takes 1 point off the meter and enters the
   morph state (with a weapon in hand, the put-away animation p256 first). Pressing it again while
   transformed starts the morph back (no meter check). Toggle Player Insanity Object transforms
-  without the meter check. In the port Q is the key, the morph lasts the morpher's p4, movement is
-  held during the morph [inferred], and the camera goes to third person (creature template p353 is
-  0 where the human's is 1) [inferred].
+  without the meter check. In the port Q is the key; the morph itself (lead-in, cross-fade, the
+  slowed clock, the camera orbit) is §13.10; the camera goes to third person (Morph ends First
+  Person, docs/re/player.md §7.1) [verified].
 - **While transformed** [verified]: the property set is the creature template's; the meter drains
   lerp(p82, p83, reputation) per second (2.25 evil … 4.25 good, 3.25 neutral: ~30 s from full), not
   during the morph; on crossing p302 % a warning event fires once; at 0 the player loses p257
   health per second until changing back (there is no automatic change back on an empty meter).
   Kills add to `+0x468` instead of the meter. Adrenaline is forced to (1 − meter / p258) × 100.
-- **Changing back**: the key [verified], Toggle object p5 (also empties the meter) [verified], and
-  the cinematic entry points (`0x10042650`, `0x10043a60` call the change-back routine)
-  [strong]; the port also changes back instantly on death and level change [inferred].
+- **Changing back**: the key and Toggle object p5 (also empties the meter) play the morph
+  (§13.10) [verified]; a sequence taking the player (`0x10042650`) and `0x10043a60` change back
+  at once, without it [verified: both call the instant routine 0x10033440]. The port also changes
+  back instantly on death and level change [inferred].
 - **Creature form in the port**: model 2:124 with anim set 379; locomotion clips and speeds from
   the creature Player Weapon Properties (forward run 9.28 m/s vs the human's 6.64: walk and run
   speeds × 1.40); left mouse = the p86 combo (5 swings), right mouse = the p89 alternates;
@@ -2110,11 +2115,11 @@ whose own `p253` points back to `2:5`).
 |---|---|
 | Allow Player Insanity Object | p3 clears `0x80` (may transform), p4 clears `0x100` (meter fills), p5 sets both. 1a: the intro Timer forbids both, Timer `89f4` allows both; 1b: Timer `82dc` (level start) forbids both, the basement scene (Relay `7ece`) allows both and shows the transform hint (an <Insanity> control placeholder) |
 | Toggle Player Insanity Object | p3 fills the meter (sets p258), p4 transforms if not transformed, p5 changes back and empties the meter. Not placed in chapter 1. |
-| Insanity Mode Message Filter | forwards any message when (p1 = 0 and transformed) or (p1 = 1 and not). 1b uses both to continue the basement scene only once the player has transformed. |
+| Insanity Mode Message Filter | forwards any message when (p1 = 0 and Player state 20 is set) or (p1 = 1 and it is not) [verified: 0x10015830]. State 20 is set from the end of the morph-in to the end of the morph-out, so a morph-in still counts as human and a morph-out as transformed (§15.7.12 "The arena's end"). 1b uses both to continue the basement scene only once the player has transformed. |
 | Insanity Meter Message Filter | forwards when meter % ≥ p2 (p1 = 0) or ≤ p2 (p1 ≠ 0). Not placed in chapter 1. |
 | Reputation Points Message Filter / Sender | see 13.2. |
 | Adrenaline Sender | on p1: applies the Adrenaline Template p3 to the player; p2 destroys. |
-| Insanity Screen Flash | p0 = on at start, p7 on, p8 off: registers itself with the player. While registered, the meter is ≥ p1 (99.99 = full), the player is not transformed and no cutscene runs, a timer counts down by dt / (p5 × k) and on expiry spawns one of the p6 Screen Fader templates (shuffled, no repeats): the hallucination images that tell the player the meter is full. k comes from p2…p3 and a random factor within p4 % (partly inferred). |
+| Insanity Screen Flash | p0 = on at start, p7 on, p8 off: registers itself with the player (+0x4a0). The player's frame code (0x10043b50) [verified]: while registered, no cutscene runs, the game clock runs at 0.95 or more (none during a morph or a Time Scale slow-down), the player is not in state 20 and the meter is ≥ p1 (chapter 1: 99.9999, full), a timer (+0x494, 1 at the start) loses dt / (p5 × k × f) each frame, k = p2 + (p3 − p2)(meter − p1) / (max − p1) and f a random 1..p4 inverted with chance 1/2, drawn every frame; at 0 it spawns one of the p6 Screen Fader templates (a shuffled bag, no repeat until all were shown) and goes back to 1: the hallucination images that tell the player the meter is full. Chapter 1 (p2 = p3 = 50, p4 = 10, p5 = 1.8): one every 31 s on average. The port had k = 1 and f within ±p4 %: one every 1.8 s, the "loop of hallucinations" of bug 89. With p1 = max the original divides 0 by 0 (no flash ever); no retail object does. |
 | Screen Blur | p0 on at start, p12 on, p13 off, p14 destroy. Phases k = 0 in, 1 hold, 2 out with duration p(4k+3) (-1 = until Off) and targets A = p(4k+4), B = p(4k+5) (out: 0) eased linearly; C = p(4k+6) goes to the sound mixer (two bus levels; not applied in the port). A × 0.01 and B × 0.01 go to the engine's screen blur together with the mode p2. At the end destroyed when p1. |
 | Screen Fader | p3 on at start, p15 on (the message varies), p14 destroy. On the first active frame it fires its output p17 (that is what starts the slow-motion / blur / adrenaline chains of the visions). Fade-in p0 s to alpha p8, hold p1 s, fade-out p2 s; colour p7, optional full-screen texture p6, sound p9 played at the start (p10 = 0), at the hold (1) or at the fade-out (2); destroyed at the end when p4. |
 | Time Scale | p3 on: game clock → p0 % over p1 s; p4 off: back to 1 over p2 s; p5 destroy (resets to 1). |
@@ -2395,14 +2400,64 @@ one-shot clips did). They take damage without fighting back (WaypointBehavior p3
 
 - Each strike clip's Arm windows come from its .adu events. Every frame of a window, the weapon
   shape on its bone (the bone's world matrix) is swept against the targets.
-- Targets are approximated by the actor's capsule (radius, bottom .. top) instead of skeleton
-  spheres [inferred stand-in]; a dead body (struck only while it has Part Caps left, §15.16) is
-  tested on its leaf hit spheres.
+- Targets, alive or dead, are swept against their leaf hit spheres in node index order, and the
+  first one met is struck (`melee.ts strikeTarget`, the rule of `sweepHit`, shared with the NPC
+  blades). The actor's capsule, grown by 1.2 m, only decides whether the spheres are posed at
+  all; a body without a sphere tree is struck by the capsule [stand-in]. A dead body is struck
+  only while it has Part Caps left or a p117 gib (§15.16).
 - The rules above apply: each target once per window, the wall check, p68 × p6 (× the NPC
   reputation scale), type p70, the player's team skipped, and p167 = 2 visions reflecting the
   blow.
-- The damage point is the contact on the claw, so head and weak-spot filters see where the
-  blow landed.
+- The blow goes through `services.damage` like a weapon strike, with the contact on the claw as
+  its point, the struck sphere's `bone` and the force p69 × p7 (`insanity/system.ts`). Head and
+  weak-spot filters see where it landed, the Part Cap test cuts by that bone, and the hit
+  reaction is picked by the force.
+
+**What a claw blow does to the body** [verified unless marked; decoded for the user report "no
+chunks or flying limbs when you slice enemies in insanity mode, just blood"]:
+
+- *The record.* The sweep (0x100caff0) asks 0x100c9680 for the struck leaf. That walks the
+  victim's sphere tree by node index (0 .. model +0xc2), leaves only, poses each sphere
+  (vt +0x8c) and tests it against the two triangles of the swept quad; the first leaf that meets
+  one is returned. Its bone is the damage record's +0x20, the Part Cap test's channel (§15.16).
+  Damage p68 × p6 (35 / 52.5, alternate 2:366: 70), force p69 × p7 (20 / 30, 2:366: 40), type
+  p70 = 8 (both weapons 4:155 / 4:832).
+- *Alternates (PWP p89).* 2:360 plays 2:366 (p6 = p7 = 2) and follows with 2:372; 2:367 plays
+  2:370, which has no Arm marker and deals nothing.
+- *Which part.* On the chapter-1 bodies the pelvis comes first in node order: a CartWheeler's
+  leaves are 20 (pelvis, 1.2 m up), 3 (chest), 9 / 14 (arms), 22 / 26 (legs), ...; a guard's
+  (model 10:22) 55 (pelvis), 6 (chest), 12 / 14 / 32 / 34 (arms), 48 (head), .... A claw that
+  passes the hips is a pelvis blow, and the pelvis caps take nothing from a blow (CartWheeler
+  10:801 p6 = 9999999, guard 10:870 p6 = 1e10, p13 0). Only a claw passing above the pelvis
+  sphere strikes the chest, arms or head: CartWheeler chest 10:800 (bone 3, its whole upper
+  body: health 50 % or less, 85 .. 100 %, 100 % at 35, not types 12 / 1 / 10 / 2 / 5), arms
+  10:94 / 10:108 (bones 13 / 9: 60 % or less, 90 .. 100 %); guard chest 10:866 (any health, 70 %
+  at 35), arms 10:904 / 10:903 (60 % or less, 70 %), head 10:865 (70 %).
+- *The kill.* A claw blow that kills a body with p117 bursts it (type 8, §15.16 "Gibs"): the
+  CartWheelers' 3:2966 (five blood fountains and six BouncingObject chunks 3:2968 / 2983 / 2985 /
+  2978 / 2979 / 2980) at bone 3, the guards' 3:2834 (twelve chunks) at bone 6, the prisoners'
+  3:2859 / 3:2845. The chunks are modelled where they sit in the body and leave along the spawn
+  matrix's -Z at their p2 (500 .. 3000 units/s: 0.24 .. 1.46 m/s) with half gravity, settle after
+  two bounces and go p54 = 1 s later: the body falls apart where it stood, it is not thrown.
+- *So, in the original* a creature-form fight mostly ends in gibs, with a cut only when a claw
+  passes above the hips [inferred from the rules: not compared with the original's frames].
+
+**Why the port showed only blood** (headless Brave, 1b arena, CartWheelers 10:24 and guards 10:3):
+
+1. The gib's chunks were spawned (six for a CartWheeler, logged with their launch) but drew
+   nothing: a spawned model was given the port's per-vertex "dynamic object" lighting, and that
+   material drew no pixel (draw calls counted, the crate behind showed through; the same chunk
+   with the precomputed or the light-set material draws) [cause in the shader not traced; open]. The
+   engine lights a model without colours by its CPU pass at its first draw and draws it as
+   precomputed afterwards (docs/re/renderer.md §1.6, §1.9). `world/dynamic.ts spawnModel` now
+   does that (the load-time set at the spawn: `lightAtLoad`), for debris, gibs, severed parts and
+   remains alike. Only the blood fountains had shown.
+2. Living targets were struck through a capsule and the part chosen as the leaf nearest the
+   contact (up to 1.7 m from any sphere), so cuts fell on arbitrary parts (a CartWheeler halved
+   at 13 health by a blow that crossed its hips); the force was not passed. Now as decoded above
+   (`insanity/creature.ts sweep`, `melee.ts strikeTarget`, `world/damage.ts` carries `bone`).
+
+Tests: `tests/creature-gore.test.ts`.
 - Melee auto-face: the shared `weapons/melee-face.ts` (§14.1). It replaces the earlier guess,
   which picked once the nearest target within 3.5 m ahead of the view and turned only the
   body.
@@ -2413,6 +2468,94 @@ one-shot clips did). They take damage without fighting back (WaypointBehavior p3
 (843cb31) the body can face up to a heading set's offset away from the view. Creatures standing
 at about 3 m, or a little to the side, were missed. The original's claw sweep reaches about
 1.2 m past the hand bone along the arm's arc.
+
+### 13.10 The morphs (Player state 19) and the change back
+
+Decoded in Suffering.rfl: the state table (Morph = 19: enter `0x10044e70`, per frame `0x100448a0`,
+leave `0x10044500`; Insanity = 20: `0x10032ea0` / `0x10032c60` / `0x10033020`), the lead-in
+`0x100440f0`, the Player message map (220 MorphCharacter → `0x10044970`, 221 → `0x100444c0`) and
+the Character Morpher (class `0x1f4cc2c6`, vtable `0x1014c118`: init `0x100101c0`, update
+`0x10010510`, end `0x10010360`). Both directions run the same code.
+
+**Sequence** [verified unless marked]:
+
+1. *Start.* The normal routine `0x100334b0` (the Insanity key, Toggle Player Insanity Object
+   p4 / p5, and two callers at `0x1008b4bc` / `0x1008cf2b` [classes not identified]) refuses a
+   dead player, leaves the other states and enters Morph. Morph enter takes the weapons out of the
+   hands on the way in (they come back at the leave) [strong], takes the carried throwable off
+   (`0x10038620`), and on the way back destroys the creature's arm objects on the p232 bones.
+2. *Lead-in.* The form being left plays its own p254 clip (`0x100440f0`): the human 2:154 or the
+   creature 2:157. The same call sets the game clock to 1 / p272 (p272 = 128) and the player's
+   animation rate to × p272, so the world all but stops while Torque animates at normal speed
+   (`[0x1017bf40]` vt +0x44 is the clock rate: the speed cheats call it with 1.3 / 0.7 / 1)
+   [strong for the meaning of the call]. It spawns p274 (Object Generator 4:1250, a white
+   Point Light 4:1248 pulsed by Lighting Effect 4:1246) at the player; only on the way in it also
+   spawns p273 (Screen Blur 4:1251: 0.3 s in, 3 s hold), which runs on the game clock, so it
+   mostly shows after the morph.
+3. *Camera orbit.* Player `+0x4aa` = 360° × (the lead-in's time / its length), negative on the
+   way back (`0x10044832..0x10044851`, `0x100443e0`); the third-person camera turns about the
+   player by it (`0x1000419a`). After the swap it reads 1, a full turn.
+4. *Morpher.* The lead-in's MorphCharacter marker (message 220; 2:154 at 0.57 s, 2:157 at 2.5 s)
+   spawns the Character Morpher p255 (`0x10044970`; when the player is dead the creature's p86 /
+   p87 morphers are used instead, by meter > 0). The morpher is a second object with the other
+   form's model at the player, playing its p3 (2:156 on the creature rig, 2:155 on the human
+   rig). Each frame it advances by the real time (dt / clock rate) and cross-fades: u = elapsed /
+   p4, e = 1 − (cos πu + 1) / 2 (p5 = 1); up to e = 0.5 the new form's opacity is e over the old
+   one at 1, then the new form is at 1 and the old one at 1 − e. The old form keeps playing its
+   lead-in underneath.
+5. *Swap.* At p4 the morpher gives the player its model and animation, sends 221 (the blood fill
+   of §13.6 when changing back) and destroys itself. In the data the marker plus p4 equals the
+   lead-in's length (0.57 + 2.8 = 3.37 s in, 2.5 + 1.2 = 3.7 s out) [verified, test].
+6. *Leave.* Once the morpher is gone and the clip is done the state leaves: the template swaps to
+   p253, Insanity (20) is entered or left, the weapon set and camera are rebuilt, p13 idle plays,
+   the clock rate goes back to 1 and the p274 light is destroyed (`0x10044280`).
+
+**What the player can do meanwhile**: nothing moves (the clock is at 1 / 128); Morph cannot be
+entered again while it runs (the state transition table 0x10175150 holds 0 at [19][19]), so a
+morph cannot be turned round; the meter does not drain (the drain runs in state 20 without 19);
+Xombium cannot be drunk (states 19 / 20 refuse it, docs/re/player.md §8.1) [verified]. The same
+row refuses Morph from Jump, Fall, Controlled, Interact, View Monitor and LadderClimb (0), and
+ends First Person (2) [verified; the port's key does not check the first two].
+
+**Triggers**:
+
+| Trigger | Change back |
+|---|---|
+| Insanity key while transformed, Toggle object p5 | the morph above (3.7 s real time) |
+| Meter at 0 | none: p257 health a second until the player changes back (`0x10032e40..0x10032e88`) |
+| A sequence taking the player (`0x10042650`), `0x10043a60` | at once (`0x10033440`: Morph entered, the morpher spawned and finished in the same call, Morph left; the blood fill runs too) |
+| Death | the routines refuse a dead player; a morpher that starts while dead uses p86 / p87 |
+
+The 1b arena has no change-back object (no Toggle Player Insanity Object is placed in chapter 1):
+the player changes back with the key, or scene 80a6, which takes the player, changes him back at
+once.
+
+**Port** (`insanity/rules.ts`, `creature.ts`, `system.ts`):
+
+- `InsanityModel`: a morph lasts the lead-in up to its marker plus p4 on real time
+  (`update(dt, realDt)`), `clockRate` is 1 / p272 while morphing and the system multiplies it
+  into `view.timeScale`; `morpherFade` is the cross-fade.
+- `CreatureBody.startMorph(dir)`: its own human rig (2:9 with 2:155 and 2:154) and the creature
+  rig, both under one group the player shows; the old rig plays p254, the new one appears at the
+  marker with the morpher's p3 and the two are cross-faded by material opacity; the lead-in's
+  kind-0 sound cue plays one of its pool. `orbit` gives the camera turn (`PlayerController.viewOrbit`,
+  third person only).
+- The p273 blur on the way in is spawned; the p274 light is not (a new light recompiles every lit
+  material; the port's light pool is for short flashes) [not ported].
+- The cinematic change back stays instant. Death and level change still change back at once
+  [inferred, as before].
+- Before this, the change back hid the creature and showed a human rig playing 2:155 stretched
+  over 1.2 s: Torque was human again at once, with no creature lead-in, no orbit, no clock stop.
+  The morph-in had no human lead-in (2:154) either and stretched 2:156 over p4.
+
+**Held weapon through the creature form.** The creature form replaces the player's body under
+the player root (`PlayerController.setModel`), so the human body is out of the scene graph while
+transformed. `HardpointAttacher.update()` releases every attachment whose carrier is not in the
+scene graph, so the third-person gun was let go on the first frame of the morph and stayed at
+that frame's pose in the body's frame after the change back: it no longer followed the hand
+(the first-person copy, on the arms, was not affected). The held models are now attached with
+`keep` (`weapons/hardpoints.ts`, `weapons/system.ts showHeld`): kept while the carrier is out,
+placed again from the hand once it is back. Tests: `tests/insanity-morph.test.ts`.
 
 ## 14. World props, effects and interactables (chapter 1)
 
@@ -3992,7 +4135,7 @@ Changers hand out the first one. When a chain ends the actor goes back to its p6
 |---|---|
 | WaypointBehavior | p2 first Waypoint; p8 escorted objects (the player) [verified, update 0x100f13d0 -> 0x100ea110 / 0x100ea2b0 / 0x100f0210]: each is flagged beyond p9 and beyond p10 (3D); a leg to the next waypoint starts only while all are within p9 and is walked to its end; one beyond p10 is looked up every 0.4..0.7 s (a FindPath to it: a search, no walk), and when the search returns the walker stops its leg (MoveTo and KillEnemies) and beckons it (BeckonBehavior: a LookAt on it over an Idle) until all are within p9 again (0x100ea110, FindPath result 0x100f12ee); it never walks back to it (port, before: it walked to the player, so 1c's companion followed the player into his fight; a found path ending off the walker's route clears the flags, 0x100f1378, not modelled); p3 whether the walker fights [verified, §15.12]: 0 runs a KillEnemies while walking, 1 starts one once attacked, 2 never; p7 0 = a hostile creature leaves the path when it spots an enemy [guess]. **Waypoint** p0 arrival message, p1 = 1 run, p2 x 2048 into the move request, p3 a MoveTo search value (not facing), p4 turn, p5 its time, p6 a behaviour run at the waypoint [verified, message handler 0x100f0f70]: on arrival with p4 != 0 a "Slerp" child (0x10104ad0, init 0x100ed3b0, step 0x100e8840 -> 0x100de0d0) blends the walker's transform to the Waypoint's placement over p5 s (rotation slerped, position moved by (waypoint - walker) x t, Idle playing); only then come p0, p6 or the next Waypoint, or the end of the behaviour. Port: `actor.ts waypointTurn / waypointSlerp` (yaw and x / z; the height is left to the mover). A MoveTo that fails (its code 2, the code KillEnemies also treats as failure at 0x100fbbdf) ends the WaypointBehavior the same way (handler 0x100f0f70 -> 0x100973e0 with 1) and the stack runs the next linked behaviour [verified]; when MoveTo fails is not decoded: the port fails a leg the body can neither walk straight nor path on the Move Node graph (`actor.ts waypointLegFails`), and a leg the body stays stuck on for 4.5 s (6a's Slayer 2337: its 3 m mover under a log 1.5 m up on the edge 1c5d -> c2a, §14.9) [inferred], tested once when the leg's MoveTo is issued (a new Waypoint, or an escort walking on after waiting / beckoning) and not again on the way; rising walkable floor (stairs) between the body and its start node does not count as blocking. Re-testing every second from wherever the body was ended 1a's guard 609e (7524 -> Waypoint 8316) on the stairs down to the gate, so gate 7f48 stayed shut. 3a's wall CartWheelers walk a strip behind the west yard's fence whose Move Nodes (3fdd / 3fde) join nothing; their walk ends at the fence (Waypoint 1fcc ...) and their JumpBehavior (3fd7 ...) leaps it into the yard, where Count Down 4367 waits for their deaths. Before, p5 was read as an arrival radius and nothing turned: 1c's CartWheelers 7e20 / 7e21 leapt (JumpBehavior launch clip 10:1310, 4.9 m forward) along their walking direction and stayed behind the fence |
 | Waypoint | p0 message sent to the waypoint's other links on arrival (12 = Destroy makes NPCs walk off and vanish); **p1 the gait** [verified: the go-to-waypoint code 0x100e9f90 turns p1 = 1 into movement mode 3, anything else into mode 1; the rig's locomotion table 0x100940d0 plays mode 1 = MovementAnimBehavior p3 (walk), 2 = p4, 3 = p5 (run)]: 1 runs (485 of the retail waypoints, among them every vision-creature waypoint 10:601), 0 walks; p2 x 2048 goes into the move request as a distance (+0x1c, default 2 m; read as the arrival distance [inferred]), p3 into +0x48; p5 the port's arrival radius [guess]; links: next waypoint. The port used to read p2 as a speed factor: the 1a / 1b vision creatures (p2 = 0.7) crept along at 70 % of the walk instead of sprinting past on the run clip 2:137 (9.3 m/s). A Waypoint run moves at the run clip's own root speed (actor.ts `WAYPOINT_RUN`); chases keep the capped run speed |
-| SimpleConversationBehavior | p0 talk to the player, else to the uid in p1 [verified]; p14 Line of Dialog templates said once in order; p16 lines repeated every p19..p20 s afterwards (the chain never completes then); [verified, start 0x10100600, ranges 0x100ff570] the talk starts when the listener is within p11 m (horizontal) and p12 m in height; with p5 the speaker first walks up to the listener however far it is (MoveTo stopping at p11); p9 / p10 range and height of the p8 wait mode; p21 message the NPC sends to **its own links** when done (NPC links are Relays listening for exactly that message); **no listener** (p0 = 0 and nothing at p1) is a monologue: the start finds the listener handle empty and talks at once (state 2, 0x10100a19), and so does the wait state (0x100023d0 → 0x10100c2d) [verified] |
+| SimpleConversationBehavior | p0 talk to the player, else to the uid in p1 [verified]; p14 Line of Dialog templates said once in order; p16 lines repeated every p19..p20 s afterwards (the chain never completes then); [verified, start 0x10100600, ranges 0x100ff570] the talk starts when the listener is within p11 m (horizontal) and p12 m in height; with p5 the speaker first walks up to the listener however far it is (MoveTo stopping at p11); p9 / p10 range and height of the p8 wait mode; p21 message the NPC sends to **its own links** when done (NPC links are Relays listening for exactly that message); **no listener** (p0 = 0 and nothing at p1) is a monologue: the start finds the listener handle empty and talks at once (state 2, 0x10100a19), and so does the wait state (0x100023d0 → 0x10100c2d) [verified]; each line is a PlayDialog child that ends when its sound does (real time, 0x1012cf40) and, with **p3** set, stops the line when it goes: the line's end, a Behavior Changer, the speaker's removal (Destroy); death stops any line [verified, §15.7.12 "The arena's end"] |
 | Line of Dialog | p0 talk clips, p1 pause after the line, p2 sounds (dialog category, subtitle in the sound header), p3 message [guess] |
 | RootPlayAnimBehavior | p2 clips, p3 repeats, p5 hold time (s; 0 = clip length), p4 unknown (not "at the behaviour's placement": behaviour objects are parked near their Behavior Changer); root motion of the clip moves the actor |
 | IdleBehavior | p2 idle clip, p5 fidget clips |
@@ -4977,12 +5120,66 @@ p16 0x1008b820.
     #7eba and to the effect #7edb. The effect shows him and draws him at 0.4 ± 0.5 opacity,
     clamped, per frame.
   - At 6.15 s the scene has sent Off ("Projector OFF", #8713), which keeps him hidden until then.
+  - What #247 shows of him [verified: keys of 12:247, entities 7eb5 / 7eba / 7edb, per-frame
+    record in the browser]. The take shows him at 0 s, parked at (473.9, 81.65, 501.0) behind
+    the booth, 3.8 m from where he appears. No camera key looks there before 6.15 s (the camera
+    is in the arrival room and the valve room), so he is drawn in no frame. His effect has not
+    run then, so his cones still have their bind tips. Nothing hides them by default: the only
+    channel hide / show requests (0x100010 / 0x200010) in Suffering.rfl are the projector's
+    three, the Part Caps' two and the gibs' one, none of them at creation. In SUFFERING.EXE a
+    channel is hidden by bit 0x10 of its animation node (tested by 0x4914d0 for the draw's
+    mask); the only writes of that bit are the request's set and clear (0x470bc6 / 0x470bd9), and
+    the type-8 channel record ({bone, LOD words}) has no visibility field [verified census]. The
+    tips are written only by the effect's update, which runs only between On and Off, so before
+    On (and in 10's Killjoy #81c, whose effect no message turns on) the cones fan from their bind
+    tips round him; the levels keep such a Killjoy hidden or parked off camera until his effect
+    runs (5b's #10 hides 13e3 with a visibility key until its projector's On at 9.88 s) [strong].
+  - From 59.09 s all five tips sit on bone 5 of projector #7eba (475.0, 82.82, 497.73 in the
+    world). At 60.73 s he steps into the booth (z 497.5) beside the projector, facing the booth
+    window. The camera is 0.6 m above the lens and looks out of the window at Torque (60.73 to
+    63.53 s): he fills the left edge, and his rays cross the lower left from the lens just out
+    of frame. Close-ups follow at 68.47 s and 71.91 s, then at 84.10 s a view through the booth
+    window: the rays fan from the lens beside him towards the glass.
+  - The effect redraws his opacity every update at 0.4 ± 0.5, clamped to 0..0.9. In about a
+    fifth of the updates (0.125 or less) his glow-flagged layer 10:428 fails its > 32 / 255 test
+    (alpha = texture alpha × opacity), so the scene glow (docs/re/renderer.md §3.2) gets no mark
+    from him. In the other updates his marked pixels come back about 3.4 times over, blurred.
 - **Killjoy's model 10:90** carries five additive light cones in submesh 0 (Advanced 10:781:
   10:256 tinted 0x2d2d2d). Their tips are skeleton vertices 0..4, each at full weight on one of
   bones 86..90.
   - Every Killjoy projector's p12 is [2, 0, 4, 3, 1] (6a / 5b's figures 10:162 / 10:196:
     [3, 1, 2, 4, 0]). Moving the tips to the lens stretches the cones from the projector onto
-    him. Each cone is a fan from its tip to his outline in his frontal plane.
+    him. Each cone is a fan of 103..148 thin triangles from the tip to short edges of his body
+    (0.6..18 cm, mean 4.7 cm). Each cone's 137..169 rim points span his whole front (x +-0.41 m,
+    y 0..1.83 m) in a plane through his body (z -0.03..0.06 m), so the rays end inside him and his
+    front faces (which write depth) cover their ends: what shows is the fan between the lens and
+    his outline [verified data; correction: an earlier reading had the edges scattered, not
+    spanning his outline].
+    - Each triangle maps the whole beam texture. The tip is at (0.5, 1), and the two rim
+      vertices are at u = 0 and u = 1, v = 0.008; welded copies give the alternating u
+      [verified data].
+    - 10:256 is white RGB with a streaked alpha: 212 / 255 at the apex, fading towards the wide
+      end. So every triangle is one ray, brightest at the lens and fading towards his body.
+      Seen from the side or close to the lens, the cones read as bundles of separate light
+      lines. That is how the data draws them, not a port error.
+    - In 1b all five p10 entries are the same projector, so the five cones lie on top of each
+      other and their sums saturate near the lens. They share most rim points (113..151 of
+      each cone's 137..169), so from the one lens they read as one fan, as in the original's
+      close-up at 70 s [verified data]. The original draws all five at once: nothing hides a cone
+      but a missing projector (init) or p8 (0 in retail). Where p10 lists different projectors
+      (5b's theatre #1501) each cone is a fan from its own lens.
+    - The engine never filters anisotropically. Its one filter setter, 0x49a620 (the Texture
+      Filtering option), sets the MAG / MIN / MIP sampler states 5 / 6 / 7 to point, bilinear or
+      trilinear. None of the ten SetSamplerState calls (device vtable +0x114) sets
+      MAXANISOTROPY [verified census]. The port's anisotropy 4 on character textures [port] does
+      not change the rays: a before / after with anisotropy 1 differed by 0.2 / 255 on average
+      in the 70 s close-up, and again unchanged in the 61 / 70 / 71.5 / 85 s frames of a second
+      capture (the sampler is rebuilt: three's sampler key holds the anisotropy).
+    - The look of the beam is the data's: an additive pass (mode 2) of the white 10:256 with its
+      streaked alpha, tinted 0x2d2d2d, times the object's opacity (0.4 +- 0.5 in 1b); the model
+      has no vertex colours. The softness of the original's footage is its capture (a 4:3 video
+      frame, blurred), not a different blend [inferred]. The rays in mid-air of the report (bug
+      87) were not the look but a stopped effect (below).
   - Material 10:781 has no UV scale or scroll waveform (p9 / p10 0): the beam is a still, dim
     additive texture; its flicker is the object's opacity (p4), which the tinted pass's TFACTOR
     alpha carries (§5.1 of docs/re/renderer.md).
@@ -5024,6 +5221,40 @@ p16 0x1008b820.
     rooms with an invisible projector, every 5b theatre projector once shot). The faded body
     was drawn two-sided without depth, so his back and inner faces showed through.
   - A projected actor casts no projected shadow (fx/system.ts).
+  - **Saved games** [verified: Projector Effect vtable 0x101541b0, save +0x30 0x1008b870, load
+    +0x2c 0x1008c3a0]. The effect saves the projectors found (+0x10), the strobe counter (+0xc),
+    disabled (+0x22), updating (+0x26), the target handle and the projector handles. Its load
+    reads them back; an effect that was updating turns its updates on again (engine vt +0x100),
+    sets the target's flags again (bit 0x10000000 at +0xc, the shadow bit cleared), clears
+    disabled and arms the counter with 1, so its next update shows the target and puts the tips on
+    the lenses. A checkpoint and a save game hold it like any class state (docs/re/saves.md §4.1).
+    - Port: provider `specials.projectors` (scope level, after the actors) with the counter,
+      disabled, updating and the found count; `ProjectorState.save / load`.
+    - Before this (bug 87), no effect state was saved. Every checkpoint restore, save load and
+      revisit of 1b after "Camera" #247 had Killjoy shown by the world's saved visibility, at
+      opacity 1, with the effect stopped: his five cones at their bind tips, up to a metre round
+      him in the booth, their rays crossing the booth window towards the arena from points in the
+      air. The same held for every Killjoy and figure whose effect was running when the save was
+      made (1c's broadcast, 5b's).
+    - A level record without the entry (saved by an earlier build) rebuilds it from the target
+      [inferred]: an effect whose target is placed hidden, is shown and alive runs; any other is
+      left stopped (`guessProjectorRunning`). In every retail level such a target is shown outside
+      a sequence only by its effect. 2's #30a0, 5b's theatre #1500, 9's #1b6c and 10's #81c are
+      placed shown and are left as they are: an old save made in 5b's theatre fight brings that
+      effect back stopped (open, old saves only).
+  - The glow mark of a faded figure follows his opacity (`scene-glow.ts glowMarkOf`,
+    `surface-material.ts glowMarkMaterial`, `render-data.ts glowMarkWritten`). A material below
+    opacity 1 gets a mark of its own. That mark tests texture alpha × the material's opacity
+    against the pass's reference, as the engine's TFACTOR alpha does.
+    - Before this (bug 86), the shared mark tested texture alpha alone. 1b's Killjoy marked
+      his whole silhouette in every update, even at 0..12 % opacity, where the engine marks
+      nothing. In the faint updates the glow drew a white blob of his shape, with no body
+      inside it, over the booth wall and across the window.
+    - Checked in the browser, same frames, opacity held by fixing the effect's random value:
+      - at 0.05 opacity the blob is gone, and the booth and the wall show (mean frame
+        brightness at 74 s: 94 before, 60 after);
+      - at 0.6 and 0.85 opacity, nothing changes (mean difference 0.2..0.7 / 255);
+      - 5b's lobby scene #9 (opacity 0.2..0.9) is unchanged.
   - Before this, nothing showed 1b's Killjoy, the cones stayed folded round him, and his body
     was drawn as an ordinary lit skin.
   - Prop targets: the 1a #8897 and 1c #808d / 5b single-vertex targets (skinned Breakable / Switch
@@ -5183,6 +5414,90 @@ sets up: gas emitters on his bones, a partial opacity, and fades.
   `Attachments.partBones`); a checkpoint in the 1b arena brought Hermes back at opacity 0 and
   without his plumes before. The set's own record was not traced: the port spawns each saved
   bone's pair again [inferred].
+- **Saves from before 45f4dd8 [port].** A save the port wrote before the take showed him holds
+  1b's Hermes hidden (world record `v` 0), at his creation fade and with no plumes, and has no
+  `fx.bodyParts` entry; in the original he would be shown, at 85 % and gassing, as the take and
+  the keys had run. A level record without that entry is such a save: the provider's `absent`
+  (save registry: run in priority order when a record has no entry for a provider) rebuilds
+  both from the sequences the level has played (`World.replayPlayedSequences`: each STOMP Player
+  marked played runs its sequence again to where it got, keys handed over without acting).
+  `World.showTakenCharacters` shows each Character a played sequence took, unless something
+  else could have hidden it since (a visibility key for it in a played sequence, a Visibility
+  Toggler link, a Projector Effect aimed at it) or it is destroyed; `BodyParts.replay` gives the
+  154 / 206..209 keys' lasting effect (the set; a fade's end) without firing 206's output.
+  Verified in the browser: 1b's checkpoint after #247 written on 8fb255e, loaded on e775a8e:
+  Hermes hidden, opacity 0, no set; with the repair: shown, 0.85, six generators (log "older
+  save: shown 7eb4; replayed 7eb4:154 7eb4:206 7eb4:207"). Only Hermes is affected in retail:
+  1b's Killjoy 7eb5 has his projector, 2's Hargrave is removed at the end of his scene, the
+  others are projector targets or keyed. Test: `tests/older-save-takes.test.ts`.
+- **After the scene [verified data].** He stays where #247 leaves him, in the valve box over
+  the arena (0.47 m under its top), and talks from there: #247's end gives him
+  SimpleConversationBehavior 7ebc (Behavior Changer 7ebb), and Timer 7f67 -> Relay 7f66 later
+  picks among him (Relay 7f51 -> 7ebd / 7f4b / 7f4d / 7f4f, monologues 7ebe / 7f4c / 7f4e /
+  7f50, p0 0) and the other speakers' sets (Relays 7f5c, 7f65: Horace's 7f5d..7f63). Nothing
+  hides or moves him. #247's finish also fires Autosave 8337: the checkpoint a player continues
+  from after the scene. Later Relay 7ece allows the insanity (82db), shows its help popup and
+  enables the arena's Detector 7ed4; when the player, transformed, is inside it, Insanity Mode
+  Message Filter 7ed5 -> Relay 7ed8 -> 7eda sends Destroy to Hermes, Horace and Timer 7f67:
+  after the first transformation in the arena he is gone. He is a faint figure at that distance: his skin is
+  the two tinted additive passes, texture x 0x4b4b4b / 2, doubled by stage 1 (docs/re/renderer.md
+  §1.8, every world pass) to texture x 0.29, times his 85 % (the port draws the same, `shadePass`
+  then `additiveEffectColor`), plus the gas.
+- **The arena's end: the first transformation (bug 89).** The order the data and the code give:
+  1. *Taunts* [verified data]. Relay 7ece (Killjoy's 7ec0 done) allows the insanity (82db p3 /
+     p4), shows Help Popup 82de, enables Detector 7ed4, starts Cloner 7f6b and, through 7ed0,
+     Relay 7f66. 7f66 picks one of 7f51 (Hermes), 7f5c (Killjoy), 7f65 (Horace), each picks one of
+     its Behavior Changers (pick mode 2, no repeat until all were used), whose monologue
+     (SimpleConversation, p0 0, one line) ends the chain: p17 On to Timer 7f67 (0.05 s), which
+     fires 7f66 again. So the three take turns, one line at a time, until 7f67 is destroyed.
+  2. *A line ends with its sound* [verified]: the conversation says a line through a PlayDialog
+     child (vtable 0x10156fc0, pushed by 0x100ff9a0 with the conversation's p3 at +0x3a); the
+     speech component's done test (0x1012cf40) asks the sound manager whether the handle still
+     plays. That is real time: the morph's 1 / 128 clock does not lengthen a line. The Timers
+     are on the game clock, so 7f67's 0.05 s take 6.4 s of real time during a morph: a line that
+     ends during the morph-in is followed by the next one only after it.
+  3. *Transformed in 7ed4* [verified]. Insanity Mode Message Filter 7ed5 (p1 0) tests Player
+     state 20 alone (0x10015830, bit 0x100000 of +0xa4). The morph start (0x100334b0) keeps
+     state 20 and enters 19; the morph's leave (0x10044625..0x10044646) enters 20 at the end of
+     the morph-in and leaves it at the end of the morph-out. So 7ed5 passes when the creature
+     stands (3.37 s after the key), not at the key; 8ba4 (p1 1) passes once the change back is
+     over (and during a morph-in). 7ed5 -> 7ed8: 7f6d (Cloner 7f6b and Screen Blur 802a
+     destroyed), 80a9 (Decrement 80a5), Cloner 7f6c (the last wave), 8b99 (Behavior Changer 7ed6:
+     Killjoy's line 12:284; Timer 8b9a, 6.5 s, Decrement 80a5 and Timer 8c2c, 60 s), Timer 8b9f
+     (the change-back hint) and 7eda: Destroy to Hermes, Horace and Timer 7f67.
+  4. *What Destroy and a Behavior Changer do to a line* [verified]. Removing a Character tears its
+     behaviour stack down (0x10098f50 -> 0x10098dd0 -> 0x10097930): every child's exit (vt
+     +0x4c) runs, and PlayDialog's (0x100ffc70) stops the speech when +0x3a (the conversation's
+     p3, 1 in every 1b conversation) is set. A Behavior Changer replacing the conversation runs
+     the same exits (0x10098e50). A dead character's line is stopped by its update (0x100e59de).
+     So Hermes and Horace vanish with whatever line they are saying cut off, and 7ed6 cuts a
+     Killjoy taunt in progress before 12:284. Nothing waits for a line to finish.
+  5. *The change back and 80a6* [verified data]. 80a5 at 0 (7ed8's 80a9 and 8b9a, or the last
+     wave's Count Down 7f6e, or 8c2c) enables 8ba5 and decrements 8c03. Human again in 7ed4: 8ba4
+     -> 8ba6 (the hint popups and timers, Detector 7ed4 destroyed) and 8c02 -> 8c03 -> Timer 8b9b
+     (2 s) -> STOMP 80a6 (12:249). Its finish gives Killjoy 80a8 (12:417), whose end (p17 =
+     Destroy) removes him and, through 8c01, switches off his projector 7eba and its hum 88ed.
+  6. *Music* [verified data]. Nothing in the arena plays music: 1b's only Combat Music 8050
+     (7:58, not active at the start) is made current by Detector 6721 past the arena door or by
+     Ambient Sound 8873; no sequence key, Relay or 80a6 touches music, and the insanity has no
+     music of its own (heartbeat / breathing p58 / p59 / p50 and the morph clips' cues). The
+     "intense music" the port played was the music track 7:17 read from the arena's Animating
+     Statics 6600 / 6676 (templates 7:1950 / 7:1952): their p37 / p40 name animation clip 7:17,
+     handed to the object's animation component (+0xec vt +0x34; p40 at creation when p41 is set,
+     0x100937a0 -> 0x100935b0; p37 when the player brushes it, at most every 0.2 s, 0x10093d10)
+     [strong for "clip"]. The level emitters (formats/sound.ts, Animating Static = kind 'zone')
+     took them for looping sounds: a Music-category loop is not positional, so it played at full
+     volume over the tutorial and after it, as long as the player was within the header's 40 m.
+     The same props are in 2, 3a, 4b, 5a, 5b, 8a and 9.
+  Port (before): 7ed5 passed on the first frame of the morph-in (the filter took any form but
+  human as transformed), so Hermes and Horace were removed and Killjoy's 12:206 began under the
+  slowed clock; their lines played on after they were gone (the port kept no speech handle) and
+  overlapped Killjoy's; a line held its speaker for its length in game time, 3.4 s too long
+  across a morph. Now: `insaneState` (insanity/classes.ts), `Actor.speech` / `talkLine` (the
+  line stopped on the conversation's exit with p3, on removal and on death; the talk waits for
+  the sound), the subtitle cleared with a line cut short (actors/system.ts), and no 'zone'
+  emitters (world/world.ts; formats/sound.ts no longer reads p37 / p40). Test:
+  `tests/tutorial-outro.test.ts`.
 - **What opacity does to his skin [verified].** The pass setup (0x48fab0) multiplies a tinted
   layer's TFACTOR alpha by the object's +0xd0 (0x48fcdf). Hermes' passes are tinted additive
   (SRCALPHA, ONE), so 85 % opacity scales the glow he adds to 85 % (§16).
@@ -5993,8 +6308,9 @@ the knockdown bleed-out), `player-body.ts` (killer death clips); tests `tests/di
   (hats, guns: `weapons/npc.ts` via `brokenParts`); the cap model rides the cut bone; the p17 generator is
   spawned at the cut bone thrown away from the attacker; the p16 spurt follows the bone. Shots
   stop at dead bodies with parts left (`raycast 'cuttable'`), and creature blows are swept
-  against a body's leaf hit spheres when it is dead (`melee.ts sweepSpheres`; the living keep
-  the standing capsule stand-in, §13.9), so corpses can be cut where a claw reaches them (the
+  against a body's leaf hit spheres, alive or dead, the first in node order struck and its bone
+  carried with the blow (`melee.ts strikeTarget`, §13.9 "What a claw blow does to the body"),
+  so corpses can be cut where a claw reaches them (the
   standing combo passes over a body on the floor: browser, 1a 7b36, five swings, no contact). Posed bodies (a DormantBehavior pose) do not bleed [port:
   their placed pose is kept]. NPC blows carry a hit point: the blade's contact from the sweep
   (`npc-melee.ts`, with the weapon's p70 type), a shot's point where the deflected round passes

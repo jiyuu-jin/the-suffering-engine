@@ -11,6 +11,7 @@ import { instanceRotation, LDU_COLORS, parseLevelObjects, staleLduRefs, WORLD_SC
 import { findEntry, readMaterial, readModel, singlePassTexture, templateModelRef, TDU_TEXTURE, type PackageSet, type ResRef, type RiotModel, type SurfaceMaterial } from '../../formats/model';
 import { SurfaceMaterialCache } from '../../app/surface-material';
 import { hasSkeleton } from '../../formats/skeleton';
+import { lduColorsTranslucent, lduVertexAlphaBelowOne } from '../../formats/render-data';
 import { decodeTexture } from '../../formats/texture';
 import { COLLISION_LAYER, type CollisionWorld, type DynamicParts } from '../../app/physics';
 import type { StaticLighting } from '../../formats/static-light';
@@ -169,6 +170,9 @@ export interface DynamicObject {
 const bakedGain = uniform(3.0);
 
 /** Builds meshes for dynamic objects, sharing textures/materials. */
+/** The .ldu vertex alpha of a mesh (surface-material.ts SurfaceMaterialOptions). */
+type VertexAlphaOpts = { vertexAlpha?: boolean; translucent?: boolean };
+
 export class DynamicObjects {
   readonly group = new THREE.Group();
   readonly objects = new Map<number, DynamicObject>();
@@ -284,9 +288,12 @@ export class DynamicObjects {
       scale: o.scale,
       colors: lit?.colors,
       how: skinned ? undefined : how,
-      // No .ldu colours: the engine's load-time pass (static-light.ts); the sky dome is drawn
-      // unlit by lights.ts.
-      lightAtLoad: !lit && e.className !== 'Sky / Sun',
+      // No usable .ldu colours (none, or a record that names the model but holds no colours or
+      // not one per vertex: 1b's Switches 7ea0..7ea5 / 81cc, 0 colours for 228 vertices): the
+      // engine's load-time pass (static-light.ts; buildModel takes it only without colours)
+      // [port: what the engine does with an empty record is not traced]. They were drawn by the
+      // dynamic path instead. The sky dome is drawn unlit by lights.ts.
+      lightAtLoad: e.className !== 'Sky / Sun',
       entity: e,
       collides,
       layers: skinned ? COLLISION_LAYER.projectile : undefined,
@@ -312,7 +319,8 @@ export class DynamicObjects {
     const stand = this.buildModel(uid, `${name}:base`, own, M, {
       scale: o.scale,
       colors,
-      lightAtLoad: !colors,
+      // (Only without usable colours: buildModel.)
+      lightAtLoad: true,
       entity: e,
       collides,
       how: collisionForClass(part.cls, 0, part.flags),
@@ -333,8 +341,8 @@ export class DynamicObjects {
    * load-time pass at the placement (formats/static-light.ts: every light on at load in the
    * object's groups, stored unhalved, then drawn as precomputed: 2 × colour + the switchable lights per frame,
    * docs/re/renderer.md §1.6); otherwise the mesh is lit like a dynamic object (the colour
-   * attribute, the level's median brightness, is read only by the legacy look) [port: spawned
-   * remains, debris and effect models, which the engine lights at their own load].
+   * attribute, the level's median brightness, is read only by the legacy look). Spawned models
+   * (spawnModel) take the load-time pass too, as the engine lights them at their first draw.
    */
   buildModel(
     uid: number,
@@ -361,6 +369,9 @@ export class DynamicObjects {
     if (!m) return undefined;
     const colors = opts.colors && opts.colors.length === 4 * m.vertexCount ? opts.colors : undefined;
     const load = !colors && opts.lightAtLoad && this.loadLighting && !LEGACY_LIGHTING ? this.loadTimeSet(m, base, opts.scale, opts.entity?.uid) : undefined;
+    // The .ldu colours' translucent flag (render-data.ts lduColorsTranslucent); the load-time
+    // colours have alpha 255 (0x4c0480), so only baked ones can carry it.
+    const translucent = !!colors && lduColorsTranslucent(colors);
 
     const root = new THREE.Group();
     root.name = name;
@@ -393,7 +404,8 @@ export class DynamicObjects {
           col[4 * j] = colors[sv + 2] / 255;
           col[4 * j + 1] = colors[sv + 1] / 255;
           col[4 * j + 2] = colors[sv] / 255;
-          col[4 * j + 3] = 1;
+          // The vertex alpha oD0.a that untinted passes multiply by (docs/re/renderer.md §5.3).
+          col[4 * j + 3] = colors[sv + 3] / 255;
         } else if (load) {
           load.shade(pos, nrm, j, col);
           col[4 * j + 3] = 1;
@@ -416,11 +428,13 @@ export class DynamicObjects {
       this.disposables.push(geo);
       // Without .ldu or load-time colours the object is lit like a dynamic one (ambient + every light).
       const pre = !!colors || !!load;
-      const mesh = new THREE.Mesh(geo, this.material(sm.textureKey, sm.material, pre));
+      const alpha = { vertexAlpha: !!colors && lduVertexAlphaBelowOne(colors, used.map((ci) => m.source[ci])), translucent };
+      const mesh = new THREE.Mesh(geo, this.material(sm.textureKey, sm.material, pre, alpha));
       // Moves only with root / pivot (their matrices).
       mesh.matrixAutoUpdate = false;
       mesh.userData.surface = sm.material;
       mesh.userData.baked = pre;
+      if (alpha.vertexAlpha || alpha.translucent) mesh.userData.lduAlpha = alpha;
       mesh.name = root.name;
       mesh.userData.uid = uid;
       mesh.userData.tex = sm.textureKey;
@@ -516,7 +530,12 @@ export class DynamicObjects {
   /** Object for a template spawned at runtime (broken remains, debris); registered under a new uid. */
   spawnModel(modelRef: ResRef, base: THREE.Matrix4, opts: { scale?: [number, number, number]; collides?: boolean; name?: string } = {}): DynamicObject | undefined {
     const uid = nextSpawnUid++;
-    const d = this.buildModel(uid, opts.name ?? `spawn:${modelRef.pkg}:${modelRef.id}`, modelRef, base, { scale: opts.scale, collides: opts.collides, spawned: true });
+    // A model without colours gets the engine's CPU light pass at its first draw (0x4ca6c0 ->
+    // 0x4ca3a0) and is drawn as precomputed from then on (docs/re/renderer.md §1.6, §1.9): debris,
+    // gibs, severed parts and remains are lit where they appear [verified code]. The lights are
+    // the load-time set of the groups holding it (static-light.ts) [inferred: the engine takes
+    // the lights on at that draw].
+    const d = this.buildModel(uid, opts.name ?? `spawn:${modelRef.pkg}:${modelRef.id}`, modelRef, base, { scale: opts.scale, collides: opts.collides, spawned: true, lightAtLoad: true });
     if (d) this.objects.set(uid, d);
     return d;
   }
@@ -580,7 +599,7 @@ export class DynamicObjects {
       if (!mesh.isMesh) return;
       const orig = mesh.userData.tex as string | undefined;
       const to = orig !== undefined ? (map.get(orig) ?? orig) : undefined;
-      mesh.material = this.material(to, to === orig ? (mesh.userData.surface as SurfaceMaterial | undefined) : undefined, mesh.userData.baked !== false);
+      mesh.material = this.material(to, to === orig ? (mesh.userData.surface as SurfaceMaterial | undefined) : undefined, mesh.userData.baked !== false, mesh.userData.lduAlpha as VertexAlphaOpts | undefined);
     });
   }
 
@@ -628,8 +647,9 @@ export class DynamicObjects {
     const i = mesh.userData.matIndex as number | undefined;
     const r = table && i !== undefined ? table[i] : undefined;
     const surface = r ? readMaterial(this.packages, r) : undefined;
-    if (surface) return this.material(singlePassTexture(surface), surface, baked);
-    return this.material(mesh.userData.tex as string | undefined, mesh.userData.surface as SurfaceMaterial | undefined, baked);
+    const alpha = mesh.userData.lduAlpha as VertexAlphaOpts | undefined;
+    if (surface) return this.material(singlePassTexture(surface), surface, baked, alpha);
+    return this.material(mesh.userData.tex as string | undefined, mesh.userData.surface as SurfaceMaterial | undefined, baked, alpha);
   }
 
   /** Shared (cached) texture for effects (particles, fog sprites). */
@@ -650,11 +670,12 @@ export class DynamicObjects {
    * time); otherwise it is lit like a dynamic object, from the ambient and every light
    * (docs/game-logic.md §19.1). The legacy look keeps the old precomputed path for all.
    */
-  private material(key: string | undefined, surface?: undefined, baked?: boolean): THREE.MeshStandardNodeMaterial;
-  private material(key: string | undefined, surface: SurfaceMaterial | undefined, baked?: boolean): THREE.Material;
-  private material(key: string | undefined, surface?: SurfaceMaterial, baked = true): THREE.Material {
+  private material(key: string | undefined, surface?: undefined, baked?: boolean, alpha?: VertexAlphaOpts): THREE.MeshStandardNodeMaterial;
+  private material(key: string | undefined, surface: SurfaceMaterial | undefined, baked?: boolean, alpha?: VertexAlphaOpts): THREE.Material;
+  private material(key: string | undefined, surface?: SurfaceMaterial, baked = true, alpha?: VertexAlphaOpts): THREE.Material {
     const pre = baked || LEGACY_LIGHTING;
-    if (surface) return (this.surfaces ??= new SurfaceMaterialCache(this.packages)).get({ textureKey: key, material: surface }, { vertexColors: pre });
+    // `alpha`: the .ldu vertex alpha of the mesh (surface-material.ts vertexAlpha / translucent).
+    if (surface) return (this.surfaces ??= new SurfaceMaterialCache(this.packages)).get({ textureKey: key, material: surface }, { vertexColors: pre, ...alpha });
     const k = `${key ?? ''}${pre ? '' : '|dyn'}`;
     let mat = this.materials.get(k);
     if (mat) return mat;

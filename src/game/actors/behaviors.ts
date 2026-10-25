@@ -88,6 +88,8 @@ export type Behavior = Base &
         nearDist: number;
         nearHeight: number;
         doneMessage: number;
+        /** p3 (default 1): the PlayDialog child stops its line when it goes (a Behavior Changer, Destroy) [verified: 0x100ff9a0 -> +0x3a, 0x100ffc70]. */
+        stopOnExit?: boolean;
       }
     | ({ kind: 'kill'; targets: number[]; enemies: string[]; allies: string[]; weights?: TargetWeights } & SightRules)
     | { kind: 'hostile'; retry?: [number, number] }
@@ -481,6 +483,7 @@ export class BehaviorLibrary {
           nearDist: num(v[11], 5),
           nearHeight: num(v[12], 2),
           doneMessage: num(v[21], 0),
+          stopOnExit: num(v[3], 1) !== 0,
         };
       case 'KillEnemiesBehavior':
         // p2 enemy teams, p3 explicit targets (uids), p4 allied teams; sight rules from

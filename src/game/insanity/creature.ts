@@ -9,6 +9,13 @@
 //   Attack                    p0 clip, p3 follow-up clip, p6 damage scale [inferred]
 //   Character Morpher         p3 morph clip, p4 duration (2:371 human -> creature on the
 //                             creature rig, 2:372 creature -> human on the human rig)
+//   Player p254               the morph's lead-in on the form's own rig (human 2:154, creature
+//                             2:157); its MorphCharacter event (220) starts the morpher
+//
+// A morph (Player state 19, docs/game-logic.md §13.10): the old form plays its p254 clip; at the
+// clip's MorphCharacter marker the new form appears at the player playing the morpher's p3 and
+// the two cross-fade over the morpher's p4 (rules.ts morpherFade); at its end the new form stays.
+// Both rigs run on real time (the game clock is slowed to 1 / p272 meanwhile).
 //   Player p275               insanity attack acquisition clip (state 30)
 //   Insanity Attack Template  p2 the attack clip (state 29)
 //
@@ -21,13 +28,15 @@ import { readSkinnedModel } from '../../formats/skeleton';
 import type { AnimClipData } from '../../formats/animation';
 import { Character, decodeCharacterTextures } from '../../app/character';
 import type { PlayerController, PlayerFrame } from '../../app/player';
-import { loadClip } from '../actors/clipmap';
+import { loadClip, readClipEvents } from '../actors/clipmap';
+import { morpherFade } from './rules';
 import { readAnimEvents } from '../../formats/animation';
 import { boneName } from '../../formats/skeleton';
 import type { AttackParams, FormParams } from './params';
 import { CREATURE_MELEE_FACE, MeleeAutoFace, readMeleeFaceParams, type FaceCandidate, type MeleeFaceParams } from '../weapons/melee-face';
 import { MeleeLunge, lungeToWorld, meleeRootScale } from '../weapons/melee-lunge';
-import { CREATURE_WEAPON_SHAPES, armWindows, creatureBlowOutcome, meleeDamage, reputationDamageScale, sweepCapsule, sweepSpheres, type ArmWindow, type MeleeShape, type Vec3 } from './melee';
+import { CREATURE_WEAPON_SHAPES, armWindows, creatureBlowOutcome, meleeDamage, reputationDamageScale, strikeTarget, type ArmWindow, type MeleeShape, type Vec3 } from './melee';
+import type { HitSphereLike } from '../actors/npc-melee';
 
 const key = (r: ResRef) => `${r.pkg}:${r.id}`;
 
@@ -57,6 +66,13 @@ export interface CreatureHit {
   kind?: number;
   /** Contact point on the weapon (world). */
   point?: Vec3;
+  /**
+   * The struck leaf hit sphere's bone (damage record +0x20): the Part Cap test cuts by it
+   * (actors/dismember.ts). Absent when the target has no sphere tree (capsule stand-in).
+   */
+  bone?: number;
+  /** Impact force: Melee Weapon p69 x the Attack's p7 (damage record +0x1c, 0x100caa7d). */
+  force?: number;
   /** A Torque vision (p167 = 2) struck while transformed: the blow lands on the player. */
   reflect?: boolean;
 }
@@ -70,8 +86,8 @@ export interface MeleeWorld {
   reputation?: number;
   /** The player's team template key. */
   playerTeam?: string;
-  /** Leaf hit spheres of a body as posed now: blows on the dead are tested on them. */
-  spheres?(a: ActorLike): readonly { c: Vec3; r: number }[];
+  /** Leaf hit spheres of a body as posed now, in node index order, with their bones: what blows are swept against. */
+  spheres?(a: ActorLike): readonly HitSphereLike[];
   /** Auto-target priority of an actor (its character template's p128; default 10). */
   priority?(a: ActorLike): number;
 }
@@ -104,11 +120,75 @@ class ClipSet {
 
 type Role = 'idle' | 'walk' | 'run' | 'back' | 'left' | 'right' | 'backRun' | 'leftRun' | 'rightRun';
 
+/** MorphCharacter (message 220): the lead-in clip's marker that spawns the Character Morpher. */
+export const MORPH_CHARACTER = 220;
+
+/** A lead-in clip (p254) on one rig: its index, length, morph marker time and sound cues. */
+interface LeadIn {
+  clip: number;
+  duration: number;
+  morphAt: number;
+  sounds: { time: number; keys: string[] }[];
+}
+
+/** The running morph (both directions). */
+interface MorphRun {
+  dir: 'in' | 'out';
+  /** Real seconds since the morph started. */
+  t: number;
+  from: Character;
+  to: Character;
+  lead?: LeadIn;
+  /** Seconds before the morpher starts (the lead-in's marker; 0 without a lead-in). */
+  morphAt: number;
+  /** The morpher's p3 clip on `to` (-1: none) and its p4 / p5. */
+  toClip: number;
+  fade: number;
+  cosine: boolean;
+  started: boolean;
+  played: number;
+}
+
+/** Per-material state kept while a rig is drawn translucent. */
+const opaqueState = new WeakMap<THREE.Material, { transparent: boolean; depthWrite: boolean; opacity: number }>();
+
+/** A rig's opacity (the engine object's +0xd0 the morpher writes): 1 restores its own materials. */
+export function setRigOpacity(ch: Character, op: number) {
+  const mats = Array.isArray(ch.mesh.material) ? ch.mesh.material : [ch.mesh.material];
+  for (const m of mats) {
+    let st = opaqueState.get(m);
+    if (op >= 1) {
+      if (!st) continue;
+      if (m.transparent !== st.transparent || m.depthWrite !== st.depthWrite) m.needsUpdate = true;
+      m.transparent = st.transparent;
+      m.depthWrite = st.depthWrite;
+      m.opacity = st.opacity;
+      opaqueState.delete(m);
+      continue;
+    }
+    if (!st) opaqueState.set(m, (st = { transparent: m.transparent, depthWrite: m.depthWrite, opacity: m.opacity }));
+    if (!m.transparent) {
+      m.transparent = true;
+      m.depthWrite = false;
+      m.needsUpdate = true;
+    }
+    m.opacity = st.opacity * Math.max(0, op);
+  }
+}
+
 export class CreatureBody {
   readonly ch: Character;
-  /** Human rig used only for the morph-back clip (the creature model is shown before). */
+  /** Human rig of the morphs (the human's lead-in and the morph back; the creature model is shown before). */
   private humanRig?: Character;
+  /** Both rigs: what PlayerController.setModel() shows while transformed or morphing. */
+  readonly group = new THREE.Group();
+  /** Morph clips: the morph-in's p3 on the creature, the morph-back's p3 on the human rig. */
   private humanMorph = -1;
+  private leadIn?: LeadIn;
+  private leadOut?: LeadIn;
+  private run: MorphRun | null = null;
+  /** Sound cues of the lead-in clips (keys "pkg:id", one picked at random), for the system to play. */
+  onSound?: (keys: string[]) => void;
   private roles = new Map<Role, number>();
   private speeds = new Map<Role, number>();
   private combo: { a: AttackParams; clip: number }[] = [];
@@ -126,6 +206,8 @@ export class CreatureBody {
   private swing: {
     clip: number;
     scale: number;
+    /** The Attack's p7 (x Melee Weapon p69: the blow's impact force). */
+    forceScale: number;
     windows: { w: ArmWindow; weapon: ArmWeapon; prev?: [Vec3, Vec3]; swept: boolean; hit: Set<ActorLike> }[];
   } | null = null;
   /** Melee auto-face (weapons/melee-face.ts: the human's pick and turn with 2:240's values). */
@@ -171,6 +253,7 @@ export class CreatureBody {
     this.alt = map(atk?.alt);
     this.jump = map(atk?.jump);
     this.morphIn = clips.add(human.morph?.clip);
+    const creatureLead = clips.add(creature.morphLead);
     for (const r of [creature.acquireClip, ...creature.insanityAttackDefs.map((a) => a.clip), ...human.insanityAttackDefs.map((a) => a.clip)]) {
       if (r && clips.add(r) >= 0) this.specials.set(key(r), clips.get(r));
     }
@@ -187,25 +270,32 @@ export class CreatureBody {
       const hash = skinned.skeleton.bones[w.bone]?.hash;
       const shape = CREATURE_WEAPON_SHAPES[`${w.template.pkg}:${w.template.id}`];
       const node = hash !== undefined ? this.ch.root.getObjectByName(boneName(hash)) : undefined;
-      if (hash !== undefined && shape && node) this.weapons.set(hash >>> 0, { node, shape, damage: w.damage, type: w.type ?? creature.hitDamageType });
+      if (hash !== undefined && shape && node) this.weapons.set(hash >>> 0, { node, shape, damage: w.damage, force: w.force, type: w.type ?? creature.hitDamageType });
     }
     this.ch.root.visible = false;
+    this.group.name = 'player-insanity-forms';
+    this.group.add(this.ch.root);
+    if (creatureLead >= 0) this.leadOut = leadIn(pkgs, creature.morphLead!, creatureLead, this.ch.clipData[creatureLead]);
     const humanRun = human.locomotion?.run?.speed ?? 6.6;
     const creatureRun = loc?.run?.speed ?? humanRun;
     this.speedScale = Math.min(2, Math.max(0.5, creatureRun / humanRun));
     this.faceParams = readMeleeFaceParams(creature.values, CREATURE_MELEE_FACE);
 
-    // Human rig for the morph-back clip (Character Morpher of the creature template).
+    // Human rig: the morph-back clip (the creature's Character Morpher p3) and the human's lead-in (p254).
     const back = creature.morph;
     const humanModel = human.model ?? back?.model;
-    if (back?.clip && humanModel) {
-      const hs = readSkinnedModel(pkgs, humanModel);
-      const c = hs ? loadClip(pkgs, back.clip) : undefined;
-      if (hs && c && c.animSet === hs.animSet) {
-        this.humanRig = new Character(hs, [c], decodeCharacterTextures(hs, pkgs));
+    const hs = humanModel ? readSkinnedModel(pkgs, humanModel) : undefined;
+    if (hs) {
+      const hClips = new ClipSet(pkgs, hs.animSet);
+      const backClip = hClips.add(back?.clip);
+      const lead = hClips.add(human.morphLead);
+      if (hClips.clips.length) {
+        this.humanRig = new Character(hs, hClips.clips, decodeCharacterTextures(hs, pkgs));
         this.humanRig.root.name = 'player-morph-back';
         this.humanRig.root.visible = false;
-        this.humanMorph = 0;
+        this.group.add(this.humanRig.root);
+        this.humanMorph = backClip;
+        if (lead >= 0) this.leadIn = leadIn(pkgs, human.morphLead!, lead, this.humanRig.clipData[lead]);
       }
     }
   }
@@ -223,7 +313,7 @@ export class CreatureBody {
     return { combo: this.combo.length, alt: this.alt.length, jump: this.jump.length };
   }
 
-  /** Root to hand to PlayerController.setModel(). */
+  /** The creature rig's root. */
   get root() {
     return this.ch.root;
   }
@@ -238,38 +328,140 @@ export class CreatureBody {
     this.current = i;
   }
 
-  /** Start of the transformation: the creature model plays the morph clip. */
-  startMorphIn(duration: number) {
-    this.ch.root.visible = true;
-    if (this.humanRig) this.humanRig.root.visible = false;
-    const i = this.morphIn;
-    if (i >= 0) {
-      const clip = this.ch.clipData[i];
-      // Stretch the clip over the morpher's duration (p4).
-      const scale = clip.duration > 0 ? clip.duration / Math.max(0.1, duration) : 1;
-      this.play(i, { loop: false, fade: 0, timeScale: scale });
-      this.oneShotUntil = this.time + duration;
-    } else this.play(this.roles.get('idle') ?? -1, { fade: 0 });
+  /** Real seconds of a morph's lead-in before its morpher starts (0: the morpher starts at once). */
+  leadSeconds(dir: 'in' | 'out'): number {
+    const lead = dir === 'in' ? (this.humanRig ? this.leadIn : undefined) : this.leadOut;
+    return lead ? lead.morphAt : 0;
   }
 
-  /** Change back: the human rig plays the morph-back clip. Returns the root to show. */
-  startMorphOut(duration: number): THREE.Object3D {
+  /**
+   * Start a morph (Morph state enter, 0x10044e70): the old form's rig plays its lead-in (p254);
+   * at its MorphCharacter marker the new form appears playing the morpher's p3 (0x10044970 ->
+   * Character Morpher init 0x100101c0) and the two cross-fade over p4 (update 0x10010510). Without
+   * the human rig (no 2:9) a morph-in shows the creature at once.
+   */
+  startMorph(dir: 'in' | 'out', morpher: { duration: number; cosine?: boolean } | undefined) {
     this.swing = null;
     this.stopLunge();
-    if (!this.humanRig || this.humanMorph < 0) return this.ch.root;
-    this.ch.root.visible = false;
-    this.humanRig.root.visible = true;
-    const clip = this.humanRig.clipData[0];
-    const scale = clip.duration > 0 ? clip.duration / Math.max(0.1, duration) : 1;
-    this.humanRig.play(0, { loop: false, fade: 0, timeScale: scale });
-    return this.humanRig.root;
+    if (this.autoFace.active) this.autoFace.stop();
+    const human = this.humanRig;
+    const fade = Math.max(0.05, morpher?.duration ?? 1);
+    const cosine = morpher?.cosine ?? true;
+    if (!human) {
+      // No human rig: the creature alone (its morph clip on the way in, nothing on the way out).
+      this.ch.root.visible = dir === 'in';
+      if (dir === 'in' && this.morphIn >= 0) this.play(this.morphIn, { loop: false, fade: 0 });
+      this.run = null;
+      return;
+    }
+    const from = dir === 'in' ? human : this.ch;
+    const to = dir === 'in' ? this.ch : human;
+    const lead = dir === 'in' ? this.leadIn : this.leadOut;
+    for (const r of [from, to]) setRigOpacity(r, 1);
+    from.root.visible = true;
+    to.root.visible = false;
+    if (lead) {
+      from.play(lead.clip, { loop: false, fade: dir === 'out' ? 0.2 : 0 });
+      if (from === this.ch) this.current = lead.clip;
+    }
+    this.run = {
+      dir,
+      t: 0,
+      from,
+      to,
+      lead,
+      morphAt: lead ? lead.morphAt : 0,
+      toClip: dir === 'in' ? this.morphIn : this.humanMorph,
+      fade,
+      cosine,
+      started: false,
+      played: 0,
+    };
+    this.oneShotUntil = Number.POSITIVE_INFINITY;
+    this.stepMorph(0);
+  }
+
+  /** The transformed form at once (a loaded save, a cancelled morph-in's end pose): the creature, opaque. */
+  showCreature() {
+    this.run = null;
+    if (this.humanRig) (this.humanRig.root.visible = false), setRigOpacity(this.humanRig, 1);
+    setRigOpacity(this.ch, 1);
+    this.ch.root.visible = true;
+    this.oneShotUntil = this.time;
+    this.current = -1;
+    this.play(this.roles.get('idle') ?? -1, { fade: 0 });
+  }
+
+  /** The morph ended (the form it went to is shown by the system). */
+  endMorph() {
+    const run = this.run;
+    this.run = null;
+    this.oneShotUntil = this.time;
+    if (!run) return;
+    setRigOpacity(run.from, 1);
+    setRigOpacity(run.to, 1);
+    if (run.dir === 'in') {
+      if (this.humanRig) this.humanRig.root.visible = false;
+      this.ch.root.visible = true;
+      // The creature goes on from the morpher's clip into its locomotion (Morph leave plays p13).
+      this.current = -1;
+    }
+  }
+
+  /** The running morph (debug / tests): direction, real time, opacities, the morpher started. */
+  get morphState() {
+    const r = this.run;
+    if (!r) return null;
+    const f = r.started ? morpherFade(r.t - r.morphAt, r.fade, r.cosine) : { from: 1, to: 0 };
+    return { dir: r.dir, t: r.t, morphAt: r.morphAt, started: r.started, from: f.from, to: f.to, orbit: this.orbit };
+  }
+
+  /**
+   * Camera orbit during a morph (radians): the Player's +0x4aa = 360 deg x the lead-in clip's
+   * played fraction while the old form plays it (1 otherwise; 0x100443e0), negative on the way
+   * back (0x10044832..0x10044851), turned about the player by the camera code (0x1000419a).
+   */
+  get orbit(): number {
+    const r = this.run;
+    if (!r || !r.lead) return 0;
+    const a = r.from.current;
+    const clip = r.from.clips[r.lead.clip];
+    const f = a && a.getClip() === clip ? Math.min(1, a.time / Math.max(1e-3, r.lead.duration)) : 1;
+    return (r.dir === 'out' ? -1 : 1) * 2 * Math.PI * f;
+  }
+
+  /** A morph step on real time: the morpher's start at the marker, the cross-fade, the lead-in's sounds. */
+  private stepMorph(dt: number) {
+    const r = this.run;
+    if (!r) return;
+    r.t += dt;
+    const sounds = r.lead?.sounds ?? [];
+    while (r.played < sounds.length && sounds[r.played].time <= r.t) this.onSound?.(sounds[r.played++].keys);
+    if (!r.started && r.t >= r.morphAt) {
+      r.started = true;
+      r.to.root.visible = true;
+      if (r.toClip >= 0) {
+        r.to.play(r.toClip, { loop: false, fade: 0 });
+        if (r.to === this.ch) this.current = r.toClip;
+      }
+    }
+    if (r.started) {
+      const f = morpherFade(r.t - r.morphAt, r.fade, r.cosine);
+      setRigOpacity(r.from, f.from);
+      setRigOpacity(r.to, f.to);
+    } else setRigOpacity(r.to, 0);
+    if (r.from.root.visible) r.from.update(dt);
+    if (r.to.root.visible) r.to.update(dt);
   }
 
   hide() {
+    this.run = null;
     this.ch.root.visible = false;
-    if (this.humanRig) this.humanRig.root.visible = false;
+    setRigOpacity(this.ch, 1);
+    if (this.humanRig) (this.humanRig.root.visible = false), setRigOpacity(this.humanRig, 1);
     this.swing = null;
     this.current = -1;
+    this.oneShotUntil = this.time;
     this.stopLunge();
   }
 
@@ -330,7 +522,7 @@ export class CreatureBody {
       const weapon = this.weapons.get(w.bone);
       return weapon ? [{ w, weapon, swept: false, hit: new Set<ActorLike>() }] : [];
     });
-    this.swing = { clip: pick.clip, scale: pick.a.scale, windows };
+    this.swing = { clip: pick.clip, scale: pick.a.scale, forceScale: pick.a.forceScale ?? 1, windows };
     if (player) this.autoFace.start(player, Math.hypot(player.velocity.x, player.velocity.z) > 0.2);
     // Root motion (melee-lunge.ts): the strike's root carries the form; MeleeAttack ends Move.
     if (player && player.mode === 'tp') {
@@ -360,10 +552,11 @@ export class CreatureBody {
   }
 
   /** Per frame (from PlayerController.onUpdate while shown). Returns hits that land now. */
-  update(f: PlayerFrame, player: PlayerController, world: MeleeWorld | readonly ActorLike[] | undefined, locomotion: boolean): CreatureHit[] {
+  update(f: PlayerFrame, player: PlayerController, world: MeleeWorld | readonly ActorLike[] | undefined, locomotion: boolean, realDt = f.dt): CreatureHit[] {
     const w: MeleeWorld = Array.isArray(world) ? { actors: world } : ((world as MeleeWorld | undefined) ?? { actors: [] });
     this.time += f.dt;
-    if (this.humanRig?.root.visible) this.humanRig.update(f.dt);
+    // A morph runs on real time (the clock is at 1 / p272; Torque's clips at x p272).
+    if (this.run) return this.stepMorph(realDt), [];
     if (!this.ch.root.visible) return [];
     if (locomotion && !this.busy) this.locomotion(f);
     if (this.swing && this.current !== this.swing.clip) this.swing = null;
@@ -423,16 +616,27 @@ export class CreatureBody {
         if (outcome === 'skip') continue;
         const r = a.radius ?? 0.4;
         const y0 = a.bottom ?? a.position.y;
-        // A body on the floor: its leaf hit spheres (the struck one names the part); the living
-        // keep the standing capsule stand-in.
-        const p = a.alive
-          ? sweepCapsule(prev[0], prev[1], cur[0], cur[1], win.weapon.shape.r, { x: a.position.x, z: a.position.z, y0, y1: y0 + (a.height ?? 1.8), r })
-          : sweepSpheres(prev[0], prev[1], cur[0], cur[1], win.weapon.shape.r, w.spheres?.(a) ?? []);
-        if (!p) continue;
+        const cap = { x: a.position.x, z: a.position.z, y0, y1: y0 + (a.height ?? 1.8), r };
+        // The target's leaf hit spheres, walked in node index order: the first one the swept
+        // shape meets is struck and its bone goes with the blow (0x100c9680; the Part Cap test
+        // cuts by it, actors/dismember.ts), alive or dead (melee.ts strikeTarget). The spheres
+        // are posed only for bodies within REACH_SLACK of the standing capsule.
+        const struck = strikeTarget(prev[0], prev[1], cur[0], cur[1], win.weapon.shape.r, cap, () => w.spheres?.(a) ?? [], a.alive, REACH_SLACK);
+        if (!struck) continue;
+        const p = struck.p;
         win.hit.add(a); // once per target per Arm window, whatever the outcome
         if (w.blocked?.([player.position.x, p[1], player.position.z], p)) continue;
         const npc = a.kind?.className === 'Unspeakable NPC' ? reputationDamageScale(w.reputation ?? 0, [this.human.reputationRange[0], this.human.reputationRange[1]], this.creature.npcDamageScale) : 1;
-        hits.push({ actors: [a], damage: meleeDamage(win.weapon.damage, sw.scale, npc), kind: win.weapon.type, point: p, reflect: outcome === 'reflect' });
+        const bone = struck.bone;
+        hits.push({
+          actors: [a],
+          damage: meleeDamage(win.weapon.damage, sw.scale, npc),
+          kind: win.weapon.type,
+          point: p,
+          ...(bone !== undefined && bone >= 0 ? { bone } : {}),
+          ...(win.weapon.force !== undefined ? { force: win.weapon.force * sw.forceScale } : {}),
+          reflect: outcome === 'reflect',
+        });
       }
     }
     return hits;
@@ -459,17 +663,37 @@ export class CreatureBody {
   }
 
   dispose() {
+    this.group.removeFromParent();
     this.ch.dispose();
     this.humanRig?.dispose();
   }
+}
+
+/** A lead-in clip's MorphCharacter marker (its end without one) and sound cues. */
+function leadIn(pkgs: PackageSet, r: ResRef, clip: number, data: AnimClipData): LeadIn {
+  const adu = pkgs.get(r.pkg)?.adu;
+  const ev = adu ? readAnimEvents(adu, r.id) : undefined;
+  const rate = data.rate || 1;
+  const duration = data.duration / rate;
+  const mark = ev?.events.find((e) => e.kind === 1 && e.param === MORPH_CHARACTER);
+  const sounds = adu ? readClipEvents(adu, r.id).sounds.map((x) => ({ time: x.time / rate, keys: x.keys })) : [];
+  return { clip, duration, morphAt: mark ? Math.min(duration, mark.time / rate) : duration, sounds: sounds.sort((a, b) => a.time - b.time) };
 }
 
 interface ArmWeapon {
   node: THREE.Object3D;
   shape: MeleeShape;
   damage: number;
+  /** Melee Weapon p69: the impact force (x the Attack's p7). */
+  force?: number;
   type?: number;
 }
+
+/**
+ * Broad phase of the sphere sweep (m): how far a leaf sphere may stand outside the actor's
+ * standing capsule (outstretched arms, a CartWheeler's blades) [port].
+ */
+const REACH_SLACK = 1.2;
 
 /** The weapon shape's two points (a sphere: twice its centre) through a bone's world matrix. */
 function shapePoints(shape: MeleeShape, m: ArrayLike<number>): [Vec3, Vec3] {

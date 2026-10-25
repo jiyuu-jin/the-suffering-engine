@@ -401,8 +401,9 @@ elsewhere [unknown].
   to be hidden.
 - Before this, monitor feeds in first person showed no Torque, so the 1a monitor 6dec scare
   (Horace walking up behind him) lost its point. The arms stayed shown.
-- Not ported: Interact, Play Anim, Document View and Morph do not switch the port's own camera
-  out of first person.
+- Not ported: Interact, Play Anim and Document View do not switch the port's own camera out
+  of first person. Morph does (the insanity system's third person while transformed; first person
+  comes back after the change back, docs/game-logic.md §13.10).
 
 ## 8. Health
 

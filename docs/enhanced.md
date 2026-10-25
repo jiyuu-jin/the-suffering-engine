@@ -187,6 +187,29 @@ air reads as a dark haze, not a grey veil: at 1.0 the moonlight alone added 11 /
 luminance to 3a's yard and removed every near-black pixel. The beam fades in over its first metre
 like the surface light.
 
+### Light volumes (`light-volume.ts`)
+
+The level's light shafts and pools are flat additive sheets (1b's arena grate shaft `86c7`: four
+boxes of 2 m walls; 1a's cell-lamp pools 7:292). Their textures fade only along the height and
+the engine has no view-angle term, so each wall ends in a hard edge and a wall seen edge-on is a
+pane of light (docs/re/renderer.md §5.3; Original keeps exactly that). Enhanced fades such a
+sheet per fragment by how squarely it faces the eye, `smoothstep(0.1, 0.85, |N·V|)` with the flat
+face normal (the models' own normals point anywhere), and over the first 0.3..1.5 m from the
+camera, multiplying the light it adds.
+
+Which surfaces (`isLightVolume`): level geometry (the renderer's merged parts, `levelGeometry`)
+whose single pass is additive, tinted and without the glow mark. That is the light pools and
+shafts (7:292, 4:1318, 9:5841, 9:5847, 3:4057), 1b's animated 7:1304 and 5b's 7:1308; fire and
+lamp cards (glow-marked), glass shards (untinted) and the Sky / Sun cards (prop cache) are
+untouched. `lightVolumeUniforms` (strength, ramps) can be set from the console for A/B shots.
+
+Evidence (Enhanced Medium, the report's pose in 1b, 2246 × 1274 at Auto 65 %; strength 0 / 1 in
+one session): shaft region mean luma 35.8 → 34.3, frame mean 28.0 → 27.1 (Original 41.0 with the
+glow), grazing inner walls and the near-camera band fade. It does not soften a box's outer
+silhouette, where two walls seen at ordinary angles stop together: that needs the light's path
+length through the volume, e.g. a pass that adds the back faces' depth and subtracts the front
+faces' into a thickness target and scales the sheets by it (next step).
+
 ### Post stack and horror grade (`post.ts`)
 
 - **GTAO** (three.js `GTAONode`, depth-reconstructed normals) multiplied at 50 % (`grade.ao`):

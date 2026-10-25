@@ -106,6 +106,8 @@ interface Attachment {
   /** Extra local transform in the bone frame (identity for engine attachments). */
   local: THREE.Matrix4;
   savedAuto: boolean;
+  /** Kept while the carrier is out of the scene graph (released only by detach / clear). */
+  keep: boolean;
 }
 
 const tmpM = new THREE.Matrix4();
@@ -126,15 +128,17 @@ export class HardpointAttacher {
    * Attach `obj` to hardpoint `hp` of `carrier` (a channel index as STOMP uses it, or
    * `{ bone }` for a bone index as the weapon templates use). Replaces whatever the
    * object was attached to. Returns false when the hardpoint does not exist.
+   * `keep`: the attachment survives its carrier leaving the scene graph for a while (the player's
+   * body while the creature form is shown); without it update() releases it then.
    */
-  attach(obj: THREE.Object3D, carrier: Character, hp: number | { bone: number }, local?: THREE.Matrix4): boolean {
+  attach(obj: THREE.Object3D, carrier: Character, hp: number | { bone: number }, local?: THREE.Matrix4, opts?: { keep?: boolean }): boolean {
     const bone = hardpointBone(this.pkgs, carrier, hp);
     if (!bone) return false;
     this.detach(obj);
     obj.updateMatrix();
     const scale = new THREE.Vector3();
     obj.matrix.decompose(new THREE.Vector3(), new THREE.Quaternion(), scale);
-    this.list.set(obj, { obj, bone, carrier, scale, local: local?.clone() ?? new THREE.Matrix4(), savedAuto: obj.matrixAutoUpdate });
+    this.list.set(obj, { obj, bone, carrier, scale, local: local?.clone() ?? new THREE.Matrix4(), savedAuto: obj.matrixAutoUpdate, keep: !!opts?.keep });
     obj.matrixAutoUpdate = false;
     this.place(this.list.get(obj)!);
     return true;
@@ -186,7 +190,7 @@ export class HardpointAttacher {
   update() {
     for (const a of this.list.values()) {
       if (!a.carrier.root.parent) {
-        this.detach(a.obj);
+        if (!a.keep) this.detach(a.obj);
         continue;
       }
       this.place(a);

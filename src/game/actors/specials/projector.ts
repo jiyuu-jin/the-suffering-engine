@@ -62,6 +62,9 @@
 // beam is the triangles that use vertex p12[i], drawn degenerate. A prop target takes the 10000
 // damage through the world's damage service (props.ts breaks it: p18 generator, p21, destroyed).
 // The figure's own passes (translucent object: render-data.ts translucentPassState).
+// Saves: save vt +0x30 0x1008b870 / load vt +0x2c 0x1008c3a0 keep the found count, counter,
+// disabled and updating; a loaded effect that was updating runs again and shows its target on its
+// next update (provider 'specials.projectors').
 
 import * as THREE from 'three/webgpu';
 import type { Character } from '../../../app/character';
@@ -70,6 +73,7 @@ import { translucentPassState } from '../../../formats/render-data';
 import type { Entity, PropValue } from '../../../formats/entities';
 import type { Actor, ActorEnv } from '../actor';
 import { num, nums, ref, type SpecialMove, type SpecialRuntime } from './runtime';
+import { registerSave } from '../../save/providers';
 
 /** The decoded properties of a Projector Effect. */
 export interface ProjectorParams {
@@ -172,6 +176,26 @@ export class ProjectorState {
     }
   }
 
+  /** The state the effect's save (vt +0x30, 0x1008b870) writes: +0xc, +0x22, +0x26. */
+  save(): { counter: number; disabled: boolean; updating: boolean } {
+    return { counter: this.counter, disabled: this.disabled, updating: this.updating };
+  }
+
+  /**
+   * The effect's load (vt +0x2c, 0x1008c3a0): the saved fields back; an effect that was
+   * updating turns its updates on again, is enabled and arms the counter with 1, so the next
+   * update shows the target (as On's p16 does).
+   */
+  load(s: { counter?: number; disabled?: boolean; updating?: boolean }): void {
+    this.counter = Math.max(0, Number(s.counter) || 0);
+    this.disabled = !!s.disabled;
+    this.updating = !!s.updating;
+    if (this.updating) {
+      this.disabled = false;
+      this.counter = 1;
+    }
+  }
+
   /** One update of the effect (0x1008c4c0 up to the strobe). */
   tick(): ProjectorStep {
     if (!this.updating || this.disabled) return { run: false };
@@ -240,8 +264,68 @@ export function installProjectors(rt: SpecialRuntime): () => void {
     const done = breakableSet(rt);
     for (const e of rt.entities) if (e.className === 'Animating Static' && num(e.values[21], 0) !== 0 && num(e.values[0], 0) > 0 && !done.has(e.uid)) makeBreakable(rt, e.uid, done);
   });
-  for (const e of rt.entities) if (e.className === 'Projector Effect') offs.push(projector(rt, e));
+  const effects = new Map<number, ProjectorHandle>();
+  for (const e of rt.entities) if (e.className === 'Projector Effect') {
+    const h = projector(rt, e);
+    offs.push(h.dispose);
+    effects.set(e.uid, h);
+  }
+  // Saves and checkpoints: each effect's own state (save 0x1008b870 / load 0x1008c3a0). Without
+  // it a restored level had every effect stopped: 1b's Killjoy, shown by the world's saved
+  // visibility after "Camera" #247, stood at full opacity with his five cones at their bind tips,
+  // rays fanning from points in the air round him (docs/game-logic.md §15.7.8 "Saved games").
+  // After the actors (11): the targets' characters exist again.
+  if (effects.size) {
+    offs.push(
+      registerSave<ProjectorSave>(
+        rt.ctx.services,
+        'specials.projectors',
+        {
+          save: () => [...effects].map(([uid, h]) => [uid, h.save()]),
+          load: (d) => {
+            const by = new Map(d ?? []);
+            for (const [uid, h] of effects) h.load(by.get(uid));
+          },
+          // A record from before this provider: rebuilt from the target [inferred].
+          absent: () => {
+            for (const h of effects.values()) h.load(h.guess());
+          },
+        },
+        { scope: 'level', priority: 11 },
+      ),
+    );
+  }
   return () => offs.forEach((f) => f());
+}
+
+/** One effect's saved state ('specials.projectors'). */
+export interface ProjectorSaveEntry {
+  counter: number;
+  disabled: boolean;
+  updating: boolean;
+  /** Projectors found when it started (+0x10), -1 before its first run. */
+  found: number;
+}
+type ProjectorSave = [number, ProjectorSaveEntry][];
+
+interface ProjectorHandle {
+  dispose(): void;
+  save(): ProjectorSaveEntry;
+  load(s: ProjectorSaveEntry | undefined): void;
+  /** For a save without the record: what the effect most likely was. */
+  guess(): ProjectorSaveEntry | undefined;
+}
+
+/**
+ * The state of an effect in a save written before its state was saved (the target's own state
+ * is in it): a target placed hidden (instance flag 0x1 clear) that is shown, standing and alive
+ * was shown by its effect, which runs [inferred: in every retail level the effect is what shows
+ * such a target outside a sequence: 1b's Killjoy after "Camera" #247, 1c's broadcast, 5b's].
+ * A target placed shown is left alone (2's, 5b's theatre, 9's and 10's Killjoys stand shown
+ * before their effect runs).
+ */
+export function guessProjectorRunning(t: { placedShown: boolean; shown: boolean; alive: boolean }): boolean {
+  return !t.placedShown && t.shown && t.alive;
 }
 
 /**
@@ -309,9 +393,9 @@ export interface ProjectorDebug {
   tips: THREE.Vector3[];
 }
 
-function projector(rt: SpecialRuntime, e: Entity): () => void {
+function projector(rt: SpecialRuntime, e: Entity): ProjectorHandle {
   const p = projectorParams(e.values);
-  if (!p.target) return () => {};
+  if (!p.target) return { dispose: () => {}, save: () => ({ counter: 0, disabled: false, updating: false, found: -1 }), load: () => {}, guess: () => undefined };
   const st = new ProjectorState(p);
   const dbg: ProjectorDebug = { uid: e.uid, target: p.target, state: st, share: 1, tips: [] };
   ((rt as unknown as { projectors?: ProjectorDebug[] }).projectors ??= []).push(dbg);
@@ -501,11 +585,29 @@ function projector(rt: SpecialRuntime, e: Entity): () => void {
     }
   });
 
-  return () => {
-    unsub?.();
-    if (owned) {
-      owned.geometry.dispose();
-      for (const m of owned.mats) m.dispose();
-    }
+  return {
+    dispose: () => {
+      unsub?.();
+      if (owned) {
+        owned.geometry.dispose();
+        for (const m of owned.mats) m.dispose();
+      }
+    },
+    save: () => ({ ...st.save(), found }),
+    load: (s) => {
+      if (!s) return;
+      st.load(s);
+      found = Number.isFinite(s.found) ? s.found : -1;
+      // Load sets the target's flags again when the effect runs (0x1008c48e): no projected shadow.
+      const t = target();
+      if (t) t.ch.root.userData.noShadow = st.updating;
+    },
+    guess: () => {
+      const t = target();
+      const placedShown = ((rt.byUid.get(p.target)?.flags ?? 1) & 1) !== 0;
+      const shown = (rt.world as { isVisible?(uid: number): boolean } | undefined)?.isVisible?.(p.target) ?? !!t?.ch.root.visible;
+      if (!t || !guessProjectorRunning({ placedShown, shown, alive: t.alive })) return undefined;
+      return { counter: 0, disabled: false, updating: true, found: -1 };
+    },
   };
 }

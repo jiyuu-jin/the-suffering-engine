@@ -137,6 +137,12 @@ export class PlayerController {
    */
   bodyYawLock: number | null = null;
   /**
+   * Third-person camera turned about the player by this angle (radians) on top of the view yaw;
+   * the body and the controls keep the view yaw (the insanity morph's camera orbit: Player
+   * +0x4aa read by the camera at 0x1000419a, src/game/insanity/creature.ts).
+   */
+  viewOrbit = 0;
+  /**
    * Root motion for the next update (world metres): the feet move by it through the motor, with
    * that step's own move, so walls stop it and the ground probe follows (the original adds a
    * clip's extracted root to the same pending move as the gait: weapons/melee-lunge.ts). Spent
@@ -513,14 +519,15 @@ export class PlayerController {
   private updateCamera(dt: number) {
     const cam = this.camera;
     cam.rotation.order = 'YXZ';
-    cam.rotation.set(this.pitch, this.yaw, 0);
+    const yaw = this.mode === 'fp' ? this.yaw : this.yaw + this.viewOrbit;
+    cam.rotation.set(this.pitch, yaw, 0);
     const eye = this.eyePosition(this.tmpEye);
     if (this.mode === 'fp') {
       cam.position.copy(eye);
       return;
     }
     // Third person: orbit behind an over-the-shoulder pivot, pulled in when blocked.
-    const s = Math.sin(this.yaw), c = Math.cos(this.yaw);
+    const s = Math.sin(yaw), c = Math.cos(yaw);
     const cp = Math.cos(this.pitch), sp = Math.sin(this.pitch);
     const fx = -s * cp, fy = sp, fz = -c * cp; // camera forward
     const rx = c, rz = -s; // camera right (horizontal)

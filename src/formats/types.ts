@@ -32,6 +32,16 @@ export interface MeshPart {
   uvs2?: Float32Array;
   /** RGBA per vertex, 0..1. */
   colors?: Float32Array;
+  /**
+   * Some vertex alpha (`colors` w) is below 1: untinted passes multiply their alpha by it
+   * (render-data.ts passTakesVertexAlpha, docs/re/renderer.md §5.3).
+   */
+  vertexAlpha?: true;
+  /**
+   * The .ldu colours of its objects carry the engine's translucent flag (render-data.ts
+   * lduColorsTranslucent): opaque and cut-out passes are drawn as alpha blends.
+   */
+  translucent?: true;
   indices: Uint32Array;
   /** DecodedTexture.key of the diffuse texture, if known. */
   textureKey?: string;
