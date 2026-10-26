@@ -201,7 +201,7 @@ class Fester implements SpecialMove {
         if (at) turnToward(a, yawTo(a.position, at), 4, dt);
         this.markersDue(() => {
           if (at && flat(a.position, at) - a.radius <= (this.p.strike?.reach ?? 2) + 0.5) {
-            if (who === 'player') this.rt.hurtPlayer(this.p.strikeDamage, a, env);
+            if (who === 'player') this.rt.hurtPlayer(this.p.strikeDamage, a, env, this.p.strike?.force);
             else if (who) this.rt.hurtActor(who, this.p.strikeDamage, a);
             this.dealt += this.p.strikeDamage;
             this.rt.log(a, `charge strike ${this.p.strikeDamage}`);

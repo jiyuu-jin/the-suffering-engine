@@ -44,6 +44,8 @@ import { saves } from '../../game/save/manager';
 import type { SaveData, SaveSummary } from '../../game/save/types';
 import { applySettings, loadSettings, saveSettings, type Settings } from './settings';
 import { ignorePlayerOverride } from '../../game/port-options';
+import { cheatsBridge } from '../../game/cheats/bridge';
+import { CHEATS_SCREEN, fillCheats } from './screens/cheats';
 import type { FrontEndVideos } from './videos';
 import { GRAPHICS_DEFAULTS, applyGraphics, resetGraphics, type GraphicsView } from './graphics';
 import { profile } from './profile';
@@ -460,6 +462,17 @@ export class MenuFlow {
         this.overlay = null;
         this.resumeFromOverlay();
         ov?.resolve?.(a.index);
+        break;
+      }
+      case 'openCheats':
+      case 'cheat': {
+        // Port page (screens/cheats.ts): the running level's cheats (src/game/cheats/bridge.ts).
+        const sc = this.model.screens[CHEATS_SCREEN];
+        if (!sc || !cheatsBridge.list) break;
+        if (a.kind === 'cheat') cheatsBridge.apply?.(a.index);
+        fillCheats(sc, cheatsBridge.list());
+        if (a.kind === 'openCheats') this.frontend.pushScreen(CHEATS_SCREEN);
+        else this.frontend.refresh();
         break;
       }
       case 'devViewer':

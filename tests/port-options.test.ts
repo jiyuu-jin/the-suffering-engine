@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { ignorePlayerOverride, portOptions, storedIgnorePlayer } from '../src/game/port-options';
 import { fightTarget, noTargetAim } from '../src/game/actors/specials/params';
 import { PlayerHold } from '../src/game/actors/specials/hold';
-import { IGNORE_PLAYER_SETTING, buildMenuModel } from '../src/app/menu/gui-adapter';
+import { CLOSE_HAND_SETTING, IGNORE_PLAYER_SETTING, buildMenuModel } from '../src/app/menu/gui-adapter';
 import { nodeFS, skip } from './helpers';
 
 test('ignore player: ?ignorePlayer= overrides (1 / empty / true on, 0 / false / off off), absent = none', () => {
@@ -89,5 +89,25 @@ test('ignore player: a row on both Gameplay pages (front end and pause menu), Of
     const accept = sc.items.find((it) => it.type === 'button' && it.action.kind === 'pageAccept');
     assert.ok(run?.place && row.place && accept?.place);
     assert.ok(row.place.rect.y > run.place.rect.y && row.place.rect.y + row.place.rect.h <= accept.place.rect.y + 1);
+  }
+});
+
+test('close hand on weapon: an Enhanced option row on both Gameplay pages, Off / On, labelled as not in the original, above Accept', { skip }, async () => {
+  const model = await buildMenuModel(nodeFS());
+  for (const id of ['page.gameplay', 'page.gameplayInGame']) {
+    const sc = model.screens[id];
+    const row = sc.items.find((it) => it.type === 'choice' && it.setting === CLOSE_HAND_SETTING);
+    assert.ok(row && row.type === 'choice', `${id}: row`);
+    assert.equal(row.label.text, 'Close Hand on Weapon');
+    assert.deepEqual(row.choices.map((c) => c.value), [false, true]);
+    assert.match(row.help?.label.text ?? '', /not in the original game/);
+    const ignore = sc.items.find((it) => it.type === 'choice' && it.setting === IGNORE_PLAYER_SETTING);
+    const accept = sc.items.find((it) => it.type === 'button' && it.action.kind === 'pageAccept');
+    assert.ok(ignore?.place && row.place && accept?.place);
+    assert.ok(row.place.rect.y > ignore.place.rect.y, 'below Enemies Ignore Player');
+    assert.ok(row.place.rect.y + row.place.rect.h <= accept.place.rect.y + 1, 'above Accept / Cancel');
+    // Every value row keeps its order, evenly closed up.
+    const ys = sc.items.filter((it) => (it.type === 'choice' || it.type === 'slider') && it.place).map((it) => it.place!.rect.y);
+    for (let i = 1; i < ys.length; i++) assert.ok(ys[i] > ys[i - 1]);
   }
 });

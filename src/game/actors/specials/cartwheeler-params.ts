@@ -148,6 +148,8 @@ export interface CwAttack {
   /** Attack p17: height limit (m); <= 0 none. */
   maxDy: number;
   damage: number;
+  /** Impact force: Melee Weapon p69 x Attack p7 (specials/params.ts meleeBlow). */
+  force?: number;
 }
 
 function attackOf(pkgs: EntityPackageSet, values: readonly PropValue[], r: ResRef | undefined): CwAttack | undefined {
@@ -162,6 +164,7 @@ function attackOf(pkgs: EntityPackageSet, values: readonly PropValue[], r: ResRe
     scaled: num(at.v[14], 0) !== 0,
     maxDy: num(at.v[17], -1),
     damage: blow?.damage ?? 10,
+    force: blow?.force,
   };
 }
 

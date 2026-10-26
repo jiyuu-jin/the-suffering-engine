@@ -304,8 +304,9 @@ Port:
   switchable lights per frame, no rim). See §1.9.
 - Spawned models (broken remains, debris, gibs, effect models) take the same pass at the spawn
   since 8340318, as the engine runs it at their first draw (§1.11). The Instance Rendered Object
-  scatter and the morphing drips are still lit as dynamic objects (ambient + every light, per
-  frame) [port].
+  scatter is still lit as dynamic objects (ambient + every light, per frame) [port]. The
+  placed (Drip)MorphingModels blend their own placed object since the §14.2 decode, so they keep
+  its .ldu or load-time colours; the drops and splats are spawned models.
 - `?lighting=legacy` keeps the old behaviour throughout.
 
 Measured (headless, 1280×720, 40 renders per view): frame cost unchanged within noise (1a
@@ -702,7 +703,8 @@ the fix):
 - `weapons/system.ts matBrass` and `player.ts`'s placeholder body.
 - `world/dynamic.ts` meshes built without colours and without the load-time pass:
   - the DripMorphingModel frames (`props.ts`, 1b: 30 drips; their lit 3:2539 frames drew
-    nothing, while the additive 3:2535 cards were unaffected);
+    nothing, while the additive 3:2535 cards were unaffected; since the §14.2 MorphingModel
+    decode the placed object itself is blended, with its own colours);
   - the Instance Rendered Object scatter;
   - placed objects whose .ldu record names the model but holds no colours. The only ones in
     retail are 1b's Switches 7ea0, 7ea2..7ea5 and 81cc (0 colours for the 228 vertices of
@@ -744,9 +746,9 @@ light values are unchanged where the loops ran before.
   load-time light set standing for the lights on at that draw [port, as §1.9].
 - The draw that follows (0x492b40) does not call +0x84 again. Which colours or lights it uses
   is not traced.
-- The DripMorphingModel frames and the Instance Rendered Object scatter are still lit per frame
-  as dynamic objects [port]. Their frames are built at the origin and placed by a parent, so a
-  pass at load would light the wrong place. The engine forces the pass for the scatter's model
+- The Instance Rendered Object scatter is still lit per frame as a dynamic object [port]. Its
+  copies are built at the origin and placed by a parent, so a pass at load would light the wrong
+  place. (The DripMorphingModels were in the same case until their decode: game-logic.md §14.2.) The engine forces the pass for the scatter's model
   copy itself (0x100ba060, §1.9).
 
 ## 2. Spot lights [verified]
@@ -1444,9 +1446,20 @@ tools; tests `tests/vertex-alpha.test.ts`.
     opacity². Tinted passes (TFACTOR) and precomputed ones keep a single factor.
   - `engine-light.ts engineLightMaterial` (characters' plain skins, static models) already
     carried opacity² (its alpha is colour alpha x opacity, and three.js multiplies again).
-  - Left open: an opaque or cut-out first pass keeps alpha 1 in the graph. When a faded object
-    blends it, that pass fades by the opacity once instead of texture alpha x opacity²
-    [port].
+  - **Faded objects' opaque and cut-out first passes** [verified 0x48fb08..0x48fb2e, 0x48fc70]:
+    below 0.99 opacity both draws pass "translucent" and the pass builder draws a mode 0 or 8
+    first pass as mode 1 with the > 2 / 255 test (a cut-out's > 200 test goes too); its depth
+    write still follows its own mode. Its alpha is then texture alpha x ALPHAARG2 like any
+    pass's: for an untinted pass of an object without colours texture alpha x opacity², with
+    baked colours texture alpha x vertex alpha x opacity, for a tinted one texture alpha x
+    opacity (TFACTOR). The port had an opaque first pass at alpha 1 (so it faded by the opacity
+    once, its texture alpha ignored), and the fades of fx/body-parts.ts (Hermes' set and the
+    other faded characters) turned an opaque pass's depth write off and kept a cut-out's
+    > 200 test from a fade of any depth below 1. Now `surface-material.ts` gives an opaque base
+    its pass alpha when the material's opacity is below 0.99 (a select on the opacity, so the
+    full-opacity output is unchanged), `render-data.ts translucentPassState` gives modes 0 and 8
+    the > 2 test, and body-parts.ts applies `translucentPassState` (0.99 threshold, depth write
+    kept, alpha-to-coverage off while blended). Test: `tests/faded-pass.test.ts`.
 
 **The alpha byte [verified].**
 - The .ldu record loader 0x487610 copies each colour dword as stored (BGRA). Nothing halves or

@@ -510,7 +510,7 @@ export class CartWheeler implements SpecialMove {
           // The blades' blow (Arm / Disarm of the launch Attack) [inferred: one blow on contact].
           if (!this.leapHit) {
             this.leapHit = true;
-            if (on === 'player') this.rt.hurtPlayer(j.launch!.damage, a, env);
+            if (on === 'player') this.rt.hurtPlayer(j.launch!.damage, a, env, j.launch!.force);
             else this.rt.hurtActor(on, j.launch!.damage, a);
             if (on !== 'player') this.rt.log(a, `leap sticks to ${on.ch.root.name}: ${j.launch!.damage.toFixed(1)}`);
           }
@@ -949,7 +949,7 @@ export class CartWheeler implements SpecialMove {
       // The slash lands on the target, the player or a character (KillMelee's target).
       const ft = fightTarget(a, env);
       if (ft && this.inReach(x, ft.pos, 0.6)) {
-        if (ft.player) this.rt.hurtPlayer(x.damage, a, env);
+        if (ft.player) this.rt.hurtPlayer(x.damage, a, env, x.force);
         else this.rt.hurtActor(ft.actor, x.damage, a);
         this.rt.log(a, `ceiling slash ${x.damage.toFixed(1)}${ft.player ? '' : ` on ${ft.actor.ch.root.name}`}`);
       }

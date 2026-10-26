@@ -5,7 +5,10 @@
 //
 // Weapon selection follows the global cycle order (Item p38) of the retail templates [data]:
 // shiv 1, fire axe 2, revolver 3, dual revolvers 4, tommy gun 5, shotgun 6, flamethrower 7;
-// throwables flare 11, flash/bang 12, TNT 13, molotov 14, shrapnel 15.
+// throwables flash/bang 12, TNT 13, molotov 14, shrapnel 15 (selected directly, as the original's
+// hotkeys 0x43b..0x43e select their Quick Weapon Properties item). The flare (order 11) is not
+// selectable: the Flare action throws one (weapons system, throwFlare).
+//
 //
 // Roll Left / Right (Player state 15 "Roll", input 0x432 / 0x433, enter RFL 0x1003aa00): the held
 // weapon's Player Weapon Properties p166 (left) / p167 (right) clip (unarmed: Player p143; every
@@ -31,7 +34,6 @@ export const ACTION_ORDER: Partial<Record<ActionId, number>> = {
   tommyGun: 5,
   shotgun: 6,
   flamethrower: 7,
-  flare: 11,
   flashBang: 12,
   tnt: 13,
   molotov: 14,
@@ -42,7 +44,8 @@ interface WeaponsLike {
   weapons?: readonly { id: string; order?: number; current?: boolean }[];
   throwable?: { id: string } | null;
   equip?(id: string): void;
-  nextThrowable?(): void;
+  nextThrowable?(dir?: 1 | -1): void;
+  selectThrowable?(id: string): void;
   def?(id: string): { kind?: string; order?: number } | undefined;
   /** Drink a Xombium bottle (weapons system): false when the original's rules refuse. */
   useHealthPack?(): boolean;
@@ -75,13 +78,10 @@ export function installActions(ctx: GameContext, opts: { dead(): boolean }): () 
   const weapons = () => ctx.services.weapons as WeaponsLike | undefined;
   const off: (() => void)[] = [];
 
-  /** Selects the owned throwable with `order` by cycling (the service has no direct select). */
+  /** Selects the owned throwable with `order`. */
   const selectThrowable = (order: number) => {
-    const w = weapons();
-    const list = ownedThrowables(ctx.services);
-    const target = list.find((t) => t.order === order);
-    if (!w?.nextThrowable || !target) return;
-    for (let i = 0; i < list.length + 1 && w.throwable?.id !== target.id; i++) w.nextThrowable();
+    const target = ownedThrowables(ctx.services).find((t) => t.order === order);
+    if (target) weapons()?.selectThrowable?.(target.id);
   };
 
   for (const [action, order] of Object.entries(ACTION_ORDER) as [ActionId, number][]) {
@@ -96,23 +96,18 @@ export function installActions(ctx: GameContext, opts: { dead(): boolean }): () 
     );
   }
   off.push(
-    input.onPress('prevThrown', () => {
-      const w = weapons();
-      const n = ownedThrowables(ctx.services).length;
-      if (!w?.nextThrowable || n < 2) return;
-      for (let i = 0; i < n - 1; i++) w.nextThrowable();
-    }),
+    input.onPress('prevThrown', () => weapons()?.nextThrowable?.(-1)),
   );
   // --- Roll -----------------------------------------------------------------------------
   let rolling: (() => void) | null = null;
-  const roll = (dir: -1 | 1) => {
+  const roll = (dir: -1 | 1): boolean => {
     const view = ctx.view;
     const p = view.player;
     const pkgs = ctx.loaded.packages as EntityPackageSet | undefined;
     const pb = (ctx.services.actors as { playerBody?: { play(c: ResRef, o?: { inPlace?: boolean; fade?: number }): number; unarmedProps?: ResRef } | null } | undefined)?.playerBody;
     const ins = ctx.services.insanity as { transformed?: boolean } | undefined;
     const world = ctx.services.world as { inCutscene?: boolean } | undefined;
-    if (rolling || opts.dead() || !pkgs || !pb || !view.walking || !p.enabled || !p.onGround || ins?.transformed || world?.inCutscene) return;
+    if (rolling || opts.dead() || !pkgs || !pb || !view.walking || !p.enabled || !p.onGround || ins?.transformed || world?.inCutscene || p.stateHold || p.actionsLocked) return false;
     // The held weapon's Player Weapon Properties (unarmed: Player p143).
     const w = weapons();
     const def = w?.current ? (w.def?.(w.current.id) as { pwp?: { ref: ResRef } } | undefined) : undefined;
@@ -122,9 +117,9 @@ export function installActions(ctx: GameContext, opts: { dead(): boolean }): () 
     const v = t && c?.name === 'Player Weapon Properties' ? decodeTemplateProps(c, t) : [];
     const clip = v[dir < 0 ? 166 : 167] as ResRef | null | undefined;
     const data = clip && typeof clip === 'object' ? loadClip(pkgs, clip) : undefined;
-    if (!clip || !data) return;
+    if (!clip || !data) return false;
     const seconds = pb.play(clip, { inPlace: true, fade: 0.08 });
-    if (seconds <= 0) return;
+    if (seconds <= 0) return false;
     const dist = Math.abs(rootMotion(data)[0]) || 3.9;
     const cfg = p.motor.cfg;
     const saved = { run: cfg.runSpeed, walk: cfg.walkSpeed };
@@ -142,10 +137,23 @@ export function installActions(ctx: GameContext, opts: { dead(): boolean }): () 
       p.setVirtualInput(null);
       rolling = null;
     };
+    return true;
   };
   off.push(input.onPress('rollLeft', () => roll(-1)));
   off.push(input.onPress('rollRight', () => roll(1)));
   off.push(() => rolling?.());
+  // Roll (state 15) for the player's other states: a third-person jump with the stick sideways
+  // turns into a roll toward it (Jump enter 0x1003af1a; actors/player-states.ts).
+  const rollSvc = {
+    roll: (dir: -1 | 1) => roll(dir),
+    get rolling() {
+      return !!rolling;
+    },
+  };
+  ctx.services.roll = rollSvc;
+  off.push(() => {
+    if (ctx.services.roll === rollSvc) delete ctx.services.roll;
+  });
 
   off.push(
     input.onPress('health', () => {

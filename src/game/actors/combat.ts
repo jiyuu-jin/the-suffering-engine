@@ -123,7 +123,8 @@ export class PlayerCombat {
     this.deathClipLength = this.body?.die(this.deathClip) ?? 0;
     this.deathClip = undefined;
     p.setVirtualInput({ forward: 0, strafe: 0 });
-    this.savedMode = p.mode;
+    // The view to give back: the chosen one, not a hit reaction's third person (stateTp).
+    this.savedMode = p.chosenMode();
     p.setMode('tp');
     this.hud?.setDead(true);
   }

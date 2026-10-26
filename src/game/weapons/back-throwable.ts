@@ -14,6 +14,12 @@
 //   taken out onto the back, or, at 0, the carried Missile Item with the highest p45 (> -1)
 //   (`throwableAfterEmpty`); none: the back stays empty. (Not while a Killjoy Rebirth effect
 //   holds the player: it tops the grenades up itself.)
+// - The Flare key (action 0x427, +0x9c bit 0x40000): AttachThrownWeapon spawns a fresh Player
+//   p243 item's p55 object on the marker's bone instead (`spawnHand`), counts one flare off and
+//   leaves the back alone (0x1002aeef). The run-out rule never picks the flare (p45 -1), and
+//   Next / Prev Thrown never reach it (Player p248 lists): with only flares left the back stays
+//   empty (`carriedThrowable`: no fallback). A flare given onto an empty back is carried, as any
+//   Missile Item (0x10039b10, no slot test).
 // - ThrowWeapon (230, 0x10029310) detaches the object from the marker's bone and launches it.
 //   Leaving the throw state (0x1002ac50) launches one still in the hand and puts the hidden gun
 //   back on its bone.
@@ -51,6 +57,28 @@ export function throwableAfterEmpty<T>(owned: readonly T[], priority: (d: T) => 
     }
   }
   return best;
+}
+
+/**
+ * What is on the back: the selected throwable while it is carried, else nothing. There is no
+ * fallback to another carried throwable: the original's back holds only what was taken out
+ * (docs/game-logic.md §4.5 "Flare key"); with only flares left after a throw it stays empty.
+ */
+export function carriedThrowable<T extends { key: string }>(owned: readonly T[], selected: string | null): T | null {
+  return (selected && owned.find((d) => d.key === selected)) || null;
+}
+
+/**
+ * Next / Previous Thrown (0x10048ae0 with the thrown flag): the step walks the Player's p248
+ * Quick Weapon Properties lists, starting from the entry that holds what is on the back. When the
+ * back holds an item no list names (the flare) or nothing, the step does nothing
+ * (0x10048c22). `cycle`: the keys the lists name; `owned`: carried throwables in order.
+ */
+export function stepThrowable<T extends { key: string }>(owned: readonly T[], selected: string | null, dir: 1 | -1, cycle: ReadonlySet<string>): T | null {
+  const list = owned.filter((d) => cycle.has(d.key));
+  const i = list.findIndex((d) => d.key === selected);
+  if (i < 0 || !list.length) return null;
+  return list[(i + dir + list.length) % list.length];
 }
 
 /** The player's rig the pieces hang on: the body (third person) and the arms (first person). */
@@ -131,6 +159,16 @@ export class ThrowableCarry {
     }
     this.hand = { key: p.key, rig: p.rig, meshes: kept };
     return kept.length > 0;
+  }
+
+  /**
+   * The Flare key's AttachThrownWeapon (0x1002aeef): a fresh object (`model`, the flare's p55)
+   * is spawned on `bone`; the back is left as it is. Returns false when nothing could be built.
+   */
+  spawnHand(rig: CarryRig, key: string, model: ResRef, bone: number): boolean {
+    this.releaseHand();
+    this.hand = this.make(rig, key, model, bone);
+    return !!this.hand;
   }
 
   /** ThrowWeapon: the hand's object leaves (the launched one stands in for it). */

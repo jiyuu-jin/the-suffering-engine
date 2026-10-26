@@ -334,12 +334,13 @@ export function noTargetAim(
 }
 
 /** Melee blow of a character: its Melee Weapon damage (p68..p69 mean) x an Attack's p6 multiplier. */
-export function meleeBlow(pkgs: EntityPackageSet, v: PropValue[], attack: ResRef | undefined): { clip?: ClipRef; reach: number; damage: number } | undefined {
+export function meleeBlow(pkgs: EntityPackageSet, v: PropValue[], attack: ResRef | undefined): { clip?: ClipRef; reach: number; damage: number; force: number } | undefined {
   const at = readTemplate(pkgs, attack);
   if (!at || at.cls !== 'Attack') return undefined;
   const w = refs(v[52]).map((r) => readTemplate(pkgs, r)).find((t) => t?.cls === 'Melee Weapon');
   const base = w ? (num(w.v[68], 10) + num(w.v[69], 10)) / 2 : 10;
-  return { clip: clip(at.v[0]), reach: num(at.v[16], 2), damage: base * num(at.v[6], 1) };
+  // Impact force: the weapon's p69 x the Attack's p7 (Melee Weapon 0x100caa61..0x100caa89) [verified].
+  return { clip: clip(at.v[0]), reach: num(at.v[16], 2), damage: base * num(at.v[6], 1), force: (w ? num(w.v[69], 0) : 0) * num(at.v[7], 1) };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -360,7 +361,7 @@ export interface FesterParams {
   windup?: ClipRef;
   run?: ClipRef;
   skid?: ClipRef;
-  strike?: { clip?: ClipRef; reach: number; damage: number };
+  strike?: { clip?: ClipRef; reach: number; damage: number; force?: number };
   strikeDamage: number;
   steerStop: number;
   sideLimit: number;

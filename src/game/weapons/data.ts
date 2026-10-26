@@ -147,6 +147,8 @@ export interface ExplosionDef {
   needsSight: boolean;
   /** p9: effect template attached to every victim (Molotov: burning). */
   victimEffect?: ResRef;
+  /** p4: the Special Hit Reaction it carries (2:736: the player's 2:835 reaction). */
+  special?: ResRef;
 }
 
 /**
@@ -166,6 +168,7 @@ export function radiusDamageDef(v: PropValue[], generator: ResRef): ExplosionDef
     hurtsOwner: num(v[7]) !== 0,
     needsSight: num(v[8]) !== 0,
     victimEffect: refs(v[9])[0],
+    special: refs(v[4])[0],
   };
 }
 

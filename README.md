@@ -114,6 +114,28 @@ Without that step the game runs without cutscenes and sound.
 - **Creature gore**: claw kills draw their chunks, and blows strike the first hit sphere as decoded.
 - **Engine-lit objects**: lighting graphs take position and normal before any light loop, so
   dynamic-lit objects draw in levels without Ambient Light regions; a smoke check covers it.
+- **Hit reactions, jump, landing and ladder**: the player flinches or is knocked down by a blow's
+  impact force as decoded, blasts hurt him, the third-person jump and landing follow their clips'
+  root motion, and ladders are climbed by whole rungs.
+- **Cheats**: a port of the original's cheat mechanism (key sequences typed while a chord is held,
+  all 25 effects). The keys and names are read from your own install at runtime and are not in
+  this repository; a "Cheats (port)" pause-menu page lists them as a convenience.
+- **Flare key**: the Flare key throws a fresh flare from the hand and leaves the back alone, with
+  the flare's own light; the binding carries through original profile import and export.
+- **Small faithfulness fixes**: the flare flame blends its key models and burns 10 s, footsteps
+  fall back to the level's default surface, speech lines are ranked by priority, brushing past
+  animated scenery plays its clips, and faded objects draw their opaque passes as the engine does.
+- **Placed MorphingModels and drips**: vertex blends start from the placed state with their inputs
+  and outputs, and drips drop, fall and splat as decoded.
+- **Performance**: higher Auto pixel budgets for Enhanced Medium and High, cheaper lamp halos,
+  merged trees in Enhanced, and dynamic resolution that tells GPU-bound from CPU-bound frames.
+- **Enhanced extras**: soft light volumes for light shafts, a soft projector beam fan, the light of
+  the creature morph (both modes), and an optional hand grip on the held weapon in third person.
+- **Campaign fixes**: sequence keys at the same time run in the engine's rank order, a hit
+  reaction no longer leaves the player stuck in third person, and a Waypoint walk the walker
+  cannot path to fails as in the original, so a 6b escort no longer stalls a door.
+- **Playthrough harness**: fight tactics (cover, crowding gunmen, bottles, reloads, the creature
+  form) and route fixes from a whole-campaign sweep.
 
 ## Getting started
 

@@ -348,6 +348,8 @@ export interface WaterEnv {
   speed(): number;
   /** Drown the player: damage of his maximum health with the drowning death clip. */
   drown(clip: number): void;
+  /** The ripple interval's random factor (0..1); Math.random when absent (tests pass a fixed one). */
+  random?(): number;
 }
 
 const refOf = (v: PropValue | undefined): ResRef | undefined => (v && typeof v === 'object' && !Array.isArray(v) && 'pkg' in v ? (v as ResRef) : undefined);
@@ -400,7 +402,7 @@ export class WaterRuntime implements WaterService {
     } else if (!inWater && was && on) this.log('leave', at, depth);
     if (!inWater) this.timer = 0;
     else if (this.env?.alive()) {
-      const r = rippleStep(this.timer, dt, depth, this.env.running(), this.rules);
+      const r = rippleStep(this.timer, dt, depth, this.env.running(), this.rules, this.env.random ?? Math.random);
       this.timer = r.timer;
       if (r.spawn) {
         this.log(r.spawn === 16 ? 'wake' : 'ripple', at, depth);

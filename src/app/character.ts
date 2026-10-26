@@ -700,6 +700,18 @@ export class Character {
   }
 
   /**
+   * Blend bone `i`'s local rotation towards `q` by `w` (0..1) on top of its animated pose, from a
+   * pose hook (restored before the next mixer update, as rotateBoneModel). Enhanced's "Close Hand
+   * on Weapon" (game/actors/hand-grip.ts).
+   */
+  blendBoneLocal(i: number, q: THREE.Quaternion, w: number) {
+    const bone = this.skeleton.bones[i];
+    if (!bone || !(w > 0)) return;
+    if (!this.hooked.has(i)) this.hooked.set(i, bone.quaternion.clone());
+    bone.quaternion.slerp(q, Math.min(1, w));
+  }
+
+  /**
    * Rotate bone `i` by `r`, given in model (mesh) space, about the bone's own pivot, on top of
    * its animated pose: the engine's per-bone model-space hook (bone node +0xc, applied after
    * the bone's model matrix is built, so children follow; SUFFERING.EXE 0x46f930). Call from

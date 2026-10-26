@@ -178,6 +178,10 @@ export async function createFxSystem(ctx: GameContext): Promise<GameSystem> {
   };
 
   const surfaces = new Surfaces(wfx.env.packages, ctx.loaded.level, collision, dyn);
+  // A surface without Game Material Properties takes the level's (Level Properties p17; 2:7 in
+  // every retail level: no Material Type, so the effect lists' default entry; surfaces.ts).
+  const lp17 = world.of('Level Properties')[0]?.e.values[17];
+  if (isRef(lp17)) surfaces.setLevelDefault(lp17 as ResRef);
   // Decals lie on the drawn triangles, not the collision models (docs/game-logic.md §14.10).
   const decals = new Decals(() => view.drawn ?? view.collision, (p, parts) => {
     const c = surfaces.lightAt(p, parts, bakedGain.value as number);

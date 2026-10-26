@@ -35,6 +35,97 @@ export interface NavNode {
    */
   types?: number;
   only?: boolean;
+  /** Full side of the node's square (m: the instance's scale x) and its yaw (radians) [strong, 0x100db756]. */
+  size?: number;
+  yaw?: number;
+}
+
+/**
+ * May a character of NPC Exclusion Type `t` walk the edge between nodes A and B? An edge's types
+ * come from its two nodes at load (0x100dac90..0x100dadbd) [verified]: both "only" -> the types
+ * both list, "only"; one "only" -> its types less the other's excluded ones, "only"; neither ->
+ * excluded when either node excludes. Type 31 (no type) passes no "only" edge.
+ */
+export function navEdgePasses(A: Pick<NavNode, 'types' | 'only'>, B: Pick<NavNode, 'types' | 'only'>, t: number | undefined): boolean {
+  if (t === undefined) return true;
+  const bit = (n: Pick<NavNode, 'types'>) => (((n.types ?? 0) >>> t) & 1) === 1;
+  if (A.only && B.only) return bit(A) && bit(B);
+  if (A.only) return bit(A) && !bit(B);
+  if (B.only) return bit(B) && !bit(A);
+  return !bit(A) && !bit(B);
+}
+
+/** The 2D corners (x, z) of a node's square: (±0.5, ±0.5) x size turned by its yaw (0x100d50e0). */
+function squareCorners(n: NavNode): [number, number][] {
+  const h = (n.size ?? 2 * n.radius) / 2, c = Math.cos(n.yaw ?? 0), s = Math.sin(n.yaw ?? 0);
+  return [[-h, -h], [h, -h], [h, h], [-h, h]].map(([u, v]) => [n.x + u * c + v * s, n.z - u * s + v * c] as [number, number]);
+}
+
+/** Is (x, z) in the node's square (0x100d3da0: the offset turned by -yaw, |x|, |z| <= size / 2)? */
+function inSquare(n: NavNode, x: number, z: number): boolean {
+  const h = (n.size ?? 2 * n.radius) / 2, c = Math.cos(n.yaw ?? 0), s = Math.sin(n.yaw ?? 0);
+  const dx = x - n.x, dz = z - n.z;
+  return Math.abs(dx * c - dz * s) <= h && Math.abs(dx * s + dz * c) <= h;
+}
+
+/** Convex hull (x, z) of a point set, counter-clockwise (monotone chain). */
+function hull2(pts: [number, number][]): [number, number][] {
+  const p = [...pts].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (o: number[], a: number[], b: number[]) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lo: [number, number][] = [], hi: [number, number][] = [];
+  for (const q of p) {
+    while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], q) <= 0) lo.pop();
+    lo.push(q);
+  }
+  for (const q of p.reverse()) {
+    while (hi.length >= 2 && cross(hi[hi.length - 2], hi[hi.length - 1], q) <= 0) hi.pop();
+    hi.push(q);
+  }
+  return lo.slice(0, -1).concat(hi.slice(0, -1));
+}
+
+function inConvex(poly: [number, number][], x: number, z: number): boolean {
+  for (let i = 0; i < poly.length; i++) {
+    const [ax, az] = poly[i], [bx, bz] = poly[(i + 1) % poly.length];
+    if ((bx - ax) * (z - az) - (bz - az) * (x - ax) < 0) return false;
+  }
+  return poly.length >= 3;
+}
+
+function outlineDistance(poly: [number, number][], x: number, z: number): number {
+  let best = Infinity;
+  for (let i = 0; i < poly.length; i++) {
+    const [ax, az] = poly[i], [bx, bz] = poly[(i + 1) % poly.length];
+    const dx = bx - ax, dz = bz - az, L = dx * dx + dz * dz || 1e-9;
+    const t = Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / L));
+    best = Math.min(best, Math.hypot(ax + dx * t - x, az + dz * t - z));
+  }
+  return best;
+}
+
+/**
+ * Does the edge A-B's area hold the point (0x100d6a10 with the prefilter, margin 0) [verified
+ * unless marked]: within 2 m of the plane through A that holds the edge and its horizontal
+ * perpendicular (0x100d5c90 / 0x100d5da0, [0x10178b30]); within 1.415 x size (3D) of either node,
+ * or over the segment within the smaller of the two horizontally (0x100d4eb0); then in either
+ * node's square, or in the strip between them: the convex hull of both squares' corners
+ * (0x100d5400 / 0x100d6040) [hull: strong]. No walker radius is taken off (FindPath's margin is 0).
+ */
+export function edgeHolds(A: NavNode, B: NavNode, x: number, y: number, z: number): boolean {
+  const ex = B.x - A.x, ey = B.y - A.y, ez = B.z - A.z;
+  const nx = -ey * ex, ny = ex * ex + ez * ez, nz = -ey * ez, nl = Math.hypot(nx, ny, nz);
+  if (nl > 1e-9 && Math.abs((nx * (x - A.x) + ny * (y - A.y) + nz * (z - A.z)) / nl) > 2) return false;
+  const rA = 1.415 * (A.size ?? 2 * A.radius), rB = 1.415 * (B.size ?? 2 * B.radius);
+  if (Math.hypot(x - A.x, y - A.y, z - A.z) > rA && Math.hypot(x - B.x, y - B.y, z - B.z) > rB) {
+    const L = Math.hypot(ex, ey, ez);
+    if (L * L <= (rA - rB) ** 2) return false;
+    const t = ((x - A.x) * ex + (y - A.y) * ey + (z - A.z) * ez) / (L || 1e-9);
+    if (t < 0 || t > L) return false;
+    const hl = Math.hypot(ex, ez) || 1e-9;
+    if (Math.abs(((x - A.x) * ez - (z - A.z) * ex) / hl) > Math.min(rA, rB)) return false;
+  }
+  if (inSquare(A, x, z) || inSquare(B, x, z)) return true;
+  return inConvex(hull2([...squareCorners(A), ...squareCorners(B)]), x, z);
 }
 
 /**
@@ -53,9 +144,9 @@ export const NO_NAV_TYPE = 31;
 
 /**
  * Where a point lies on the graph (the start or the goal of a path) [verified, Suffering.rfl]:
- * the nav code keeps edges, not nodes. Each edge's area is its two nodes' squares (half the node's size less the
- * walker's radius, turned by the node's yaw; 0x100d3da0) and the strip between them (0x100d5400 /
- * 0x100d6040) [the sizes inferred]. The global search (0x100d87e0) walks the grid cells
+ * the nav code keeps edges, not nodes. Each edge's area is its two nodes' squares (half the node's size, turned
+ * by the node's yaw, no walker radius taken off; 0x100d3da0) and the strip between them (0x100d5400 /
+ * 0x100d6040): edgeHolds, locateEdge. The global search (0x100d87e0) walks the grid cells
  * around the point and returns the first edge that passes the walker's filter (0x100d8780 ->
  * 0x100d5c30: usable, the walker's surface, wide enough, and its passage kind and NPC Exclusion
  * Types, 0x100dbf30) and holds the point; the incremental one (0x100d8bd0) and the A*'s goal
@@ -134,7 +225,7 @@ export class NavGraph {
       const [x, y, z] = toOutputSpace(e.position);
       index.set(e.uid, this.nodes.length);
       this.byUid.set(e.uid, this.nodes.length);
-      const node: NavNode = { uid: e.uid, x, y, z, radius: Math.max(0.5, (e.scale?.[0] ?? 1) * 0.5), edges: [], ceiling: e.values?.[0] === 1 };
+      const node: NavNode = { uid: e.uid, x, y, z, radius: Math.max(0.5, (e.scale?.[0] ?? 1) * 0.5), edges: [], ceiling: e.values?.[0] === 1, size: e.scale?.[0] ?? 1, yaw: ((e.rotation?.[1] ?? 0) * Math.PI) / 180 };
       const list = e.values?.[2];
       let types = 0;
       if (typeOf)
@@ -185,6 +276,36 @@ export class NavGraph {
       if (Math.hypot(x0 + dx * t - n.x, z0 + dz * t - n.z) < 2 * n.radius + 0.3) return true;
     }
     return false;
+  }
+
+  /**
+   * The floor edge FindPath puts a target point on [verified: global locate 0x100db660 ->
+   * 0x100d87e0, FindPath's hint edge is -1, margin 0]: the first edge the walker may use whose area
+   * holds the point (edgeHolds); when none does, the edge whose area outline is nearest
+   * horizontally among those that failed, **the walker's type filter included** (0x100d5940): the
+   * search never comes back empty while the graph has an edge, and its fallback may hand the walker
+   * an edge it may not use. `passes`: whether the walker may use the edge found. The original
+   * walks its grid cells outward from the point and stops at the first productive cell; the port
+   * takes the nearest outline over all edges [inferred to agree]. Disabled edges (EdgeToggler) are
+   * left out [inferred].
+   */
+  locateEdge(x: number, y: number, z: number, navType?: number): { a: number; b: number; held: boolean; passes: boolean } | null {
+    let best: { a: number; b: number; held: boolean; passes: boolean } | null = null;
+    let bd = Infinity;
+    for (let a = 0; a < this.nodes.length; a++) {
+      const A = this.nodes[a];
+      if (A.ceiling) continue;
+      for (const b of A.edges) {
+        if (b < a || this.nodes[b].ceiling || !this.edgeEnabled(a, b)) continue;
+        const B = this.nodes[b];
+        const passes = navEdgePasses(A, B, navType);
+        const held = edgeHolds(A, B, x, y, z);
+        if (held && passes) return { a, b, held, passes };
+        const d = outlineDistance(hull2([...squareCorners(A), ...squareCorners(B)]), x, z);
+        if (d < bd) (bd = d), (best = { a, b, held, passes });
+      }
+    }
+    return best;
   }
 
   /** Any ceiling node in the level (crawling creatures have somewhere to climb). */

@@ -21,7 +21,7 @@
 // them to 0, so a new game starts on the neutral suite's clean set.
 //
 // Debug: window.__repskin = { state(), setBlood(n), addBlood(n), refresh(), pendingFill }.
-// Service: services.repskin = { blood, maxBlood, addBlood(n), changedBack() } (the insanity
+// Service: services.repskin = { blood, maxBlood, addBlood(n), setBlood(n), changedBack() } (the insanity
 // system calls changedBack() when the morph back to human ends).
 
 import type * as THREE from 'three/webgpu';
@@ -275,6 +275,11 @@ export function createReputationSkinSystem(ctx: GameContext): GameSystem {
       return skins.body.maxBlood;
     },
     addBlood: (n: number) => addBlood(n),
+    /** The body's level set directly (Game Cheats case 3 writes Player +0x42 = 0: no weapon, no transform test). */
+    setBlood: (n: number) => {
+      s.blood = Math.max(0, Math.min(skins.body.maxBlood, n));
+      refresh();
+    },
     /**
      * Called by the insanity system when the morph back to human ends: blood added while
      * transformed, or a level already at the maximum, fills the level and applies the last set.

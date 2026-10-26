@@ -87,6 +87,8 @@ export interface WorldService {
    * returns its uid.
    */
   dropItem(template: ResRef, at: Vec3, yawDeg?: number, opts?: { fall?: boolean }): number | undefined;
+  /** Hand an item template to the player at once (Game Cheats item lists; no pickup text / sound). */
+  giveItem(template: ResRef): boolean;
   /** A damageable level object as a character's target (KillEnemies p3; props.ts targetInfo). */
   propTarget(uid: number): PropTargetInfo | undefined;
   /** Edge Passages: door uid between two move nodes. */
@@ -315,8 +317,9 @@ export async function createWorldSystem(ctx: GameContext): Promise<GameSystem> {
     if (w && w.e.family === 'Character' && w.cls !== 'Player') actors()?.receive(to, msg);
   });
 
-  function onPickup(w: WorldEntity) {
+  function onPickup(w: WorldEntity, quiet = false) {
     const name = world.itemLabel(w);
+    const toast = (t: string) => !quiet && hud.toast(t);
     const v = w.e.values;
     // Xombium bottles are carried (Item p44 = 9) and drunk with the Health key: the weapons
     // system stores them when it runs (services.weapons.storeHealthPack, src/game/weapons).
@@ -324,26 +327,49 @@ export async function createWorldSystem(ctx: GameContext): Promise<GameSystem> {
     // Heal p55 x the p56 Difficulty Modifier (src/game/campaign/difficulty.ts).
     const healAmount = (typeof v[55] === 'number' ? (v[55] as number) : 20) * difficulty.healScale(w.e);
     if (w.cls === 'Health Bonus Item' && w.e.template && packs?.storeHealthPack?.(name, w.e.template, healAmount)) {
-      hud.toast(`Picked up ${name}`);
+      toast(`Picked up ${name}`);
     } else if (w.cls === 'Health Bonus Item') {
       const amount = healAmount;
       const c = combat();
       if (c) c.healPlayer(amount);
       else inventory.health = Math.min(inventory.maxHealth, inventory.health + amount);
       inventory.add(name, 1);
-      hud.toast(`${name} (+${Math.round(amount)} health)`);
+      toast(`${name} (+${Math.round(amount)} health)`);
     } else {
       const tpl = (v[55] && typeof v[55] === 'object' ? (v[55] as ResRef) : undefined) ?? w.e.template;
       const amount = w.cls === 'Ammo Box' && typeof v[56] === 'number' ? Math.max(1, v[56] as number) : 1;
       inventory.add(name, amount, tpl, templateClassName(pkgs, tpl));
-      hud.toast(amount > 1 ? `Picked up ${name} ×${amount}` : `Picked up ${name}`);
+      // A plain x: the HUD's game font has no multiplication sign (it drew '?').
+      toast(amount > 1 ? `Picked up ${name} x${amount}` : `Picked up ${name}`);
     }
     const snd = v[48] as ResRef | null;
-    if (snd && typeof snd === 'object') {
+    if (!quiet && snd && typeof snd === 'object') {
       const k = sfxKeys([`${snd.pkg}:${snd.id}`]);
       if (k.length) audio.play(k[0], { bus: 'sfx' });
     }
     console.info(`[world] picked up ${name} (${w.cls}#${w.uid.toString(16)})`);
+  }
+
+  /**
+   * Game Cheats item lists (src/game/cheats, Suffering.rfl 0x10041130): each template is created
+   * at the player and handed over at once (its vt+0xa0 -> Player 0x1003a410), without the touch
+   * handler: no CanPickUp test, no pickup text, no pickup sound [verified: the touch path shows
+   * them]. A carried supply already at its cap stays there (the add clamps to Item p44).
+   */
+  function giveItem(template: ResRef): boolean {
+    const o: LevelObject = { index: -1, uid: 0, template, position: [0, 0, 0], flags: 0x81, links: [], rotation: [0, 0, 0], propWords: new Uint32Array(0), propIndices: new Uint16Array(0), ref: { pkg: 0, id: 0 } };
+    const e = entityFromObject(o, pkgs);
+    // A weapon or ammo template itself (Player p315 lists the revolver, shotgun, axe...): into the
+    // inventory, whose wrapped add applies the weapons' rules (a second revolver: the pair).
+    if (e.className === 'Ranged Weapon' || e.className === 'Melee Weapon' || e.className === 'Missile Item') {
+      inventory.add(typeof e.props.pickupName === 'string' && e.props.pickupName ? e.props.pickupName : e.className, 1, template, e.className);
+      return true;
+    }
+    if (!PICKUP_CLASSES.has(e.className)) return false;
+    const w: WorldEntity = { uid: 0, e, cls: e.className, pos: [0, 0, 0], destroyed: false, enabled: true, visible: true, s: {} };
+    if (atCarryCap(w.cls, e.values, e.template ? inventory.count(e.template) : 0)) return false;
+    onPickup(w, true);
+    return true;
   }
 
   // Player start: the spawn point matching the transition's spawn name (and source level).
@@ -536,7 +562,15 @@ export async function createWorldSystem(ctx: GameContext): Promise<GameSystem> {
   });
   view.scene.add(props.scatter);
   fx.placeLevel(world);
-  damage = createDamageService(props, () => ctx.services.actors as Parameters<typeof createDamageService>[1] extends () => infer A ? A : never);
+  damage = createDamageService(
+    props,
+    () => ctx.services.actors as Parameters<typeof createDamageService>[1] extends () => infer A ? A : never,
+    // Blasts reach the player too (his hit reaction by the blast's force and p4 special).
+    () =>
+      view.walking && view.player.enabled
+        ? { position: view.player.position, hit: (amount, info) => (ctx.services.combat as { damagePlayer?(n: number, s?: unknown): void } | undefined)?.damagePlayer?.(amount, info) }
+        : null,
+  );
   const interact = new Interactions({
     world,
     pkgs,
@@ -789,6 +823,7 @@ export async function createWorldSystem(ctx: GameContext): Promise<GameSystem> {
       const w = world.get(uid);
       if (w && w.cls === 'Switch' && !w.destroyed) world.switchSet(w, true);
     },
+    giveItem: (template) => giveItem(template),
     dropItem: (template, at, yawDeg = 0, opts) => placeDrop({ uid: nextDropUid, template, at: [at[0], at[1], at[2]], yaw: yawDeg }, !!opts?.fall),
     propTarget: (uid) => props?.targetInfo(uid),
     passages: world.of('Edge Passage').map((w) => ({ door: Number(w.e.values[1]) || 0, nodeA: Number(w.e.values[2]) || 0, nodeB: Number(w.e.values[3]) || 0 })),

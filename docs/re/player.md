@@ -232,9 +232,21 @@ matches.
 the clip:
 - stick below 0.2: standing jump (PWP p151, revolver set 2:87);
 - otherwise, within PWP p168 = 45° of the facing: forward jump (p152, 2:86);
-- within PWP p169 = 135°: the third jump clip (p153, 2:85).
+- beyond PWP p169 = 135°: the backward jump (p153, 2:85; the body turns away from the stick so
+  the clip's backward root goes the stick's way);
+- between 45° and 135°: no jump but a **Roll** (state 15) toward the stick side (`0x1003af1a`;
+  Roll enter picks p166 / p167 by the stick's side when no roll key set its bit, `0x1003aa3c`).
+  An earlier reading took 45..135° for the third clip.
 
-The trajectory is the clip's root motion; there is no velocity constant. The jump "power"
+The trajectory is the clip's root motion (x, y and z extracted, the lock off); there is no
+velocity constant and no gravity while Jump runs. Root scales: y (+0x68) = power, z (+0x6c) =
+(1 + power) / 2 x max(stick magnitude, 0.3). In the first 0.2 s of a standing jump a sideways
+stick becomes a Roll (`0x1003b409`). Air steering in Jump (`0x1003a6e0`, every frame): rate x
+the stick's world direction; standing p207 = 3, a mostly sideways stick p208 = 3, the forward
+axis along the jump p205 = 1, against it p206 = 7 [verified; replaces the inferred mapping
+below]. At the clip's end Jump leaves into Fall with the root's last velocity (`0x1003b27c`:
+the animator's root delta / dt into +0x15a). Retail clips: docs/game-logic.md §14.1
+"Third-person jump and landing"; port: `src/game/actors/player-states.ts`. The jump "power"
 `0x1003a590`:
 1. clamps the Jump action's analog value to [p209 0.4, p210 0.8] (pressure buttons);
 2. maps that range linearly onto [p211, 100] %, with **p211 = 100 → always 1.0**.
@@ -256,8 +268,9 @@ air control (§5.2) and moves the fall-damage reference up by 2764.8 units = **1
 - **FP-jump air control (`0x1003a6e0`):** the stick input × **p216 = 7.5**/s, added to the
   displacement.
   - Third-person air-steer values: p205 = 1, p206 = 7, p207 = 3, p208 = 3, chosen by the jump
-    type `+0x684` [inferred mapping].
-  - In the Fall code the air-control helper is gated by the FP-jump flag.
+    type `+0x684` and the stick (§5.1) [verified]; used by Jump's per frame.
+  - In the Fall code the air-control helper is gated by the FP-jump flag: a third-person fall
+    keeps its velocity.
 - **Falling clip:** after dropping p217 = 0.6 below the start point, the falling clip starts
   (`0x1003a430`).
 - **Long-fall clip:** after dropping more than **p213 = 7.7** below the start point, the
@@ -284,6 +297,18 @@ There is no fall-velocity threshold; only height counts.
 
 FallBehavior / JumpBehavior are clip-driven (`game-logic.md` §15.2). This pass did not decode
 any fall-damage rule for NPCs.
+
+### 5.5 Landing (state 12) [verified]
+
+Landing enter `0x1003b990`: sets on-ground (+0x98 bit 0), runs the fall damage (§5.3), then picks
+the held PWP's clip by the fall's horizontal velocity (+0x15a, or the animator's root velocity
+when zero) against the body's forward: zero -> p158, forward -> p160, backward -> p162, each +1
+when the fall did damage. With Hit Reacting (17) on and not the airborne layer, the reaction's
+p7 floor clip plays instead (root extracted). First person (or +0x9c bit 10): no clip, Landing
+ends at once. Per frame `0x1003bce0`: ends with its clip; leave `0x1003bfc0` ends Hit Reacting
+too and plays the stance idle p13 unless Move / MeleeAttack / FP Melee runs. Move cannot start
+while Landing runs ([1][12] = 0); Hit Reacting cannot either ([17][12] = 0). Retail clips and the
+port: docs/game-logic.md §14.1 "Third-person jump and landing".
 
 ## 6. Movement [verified unless marked]
 

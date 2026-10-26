@@ -68,6 +68,8 @@ interface ActorLike {
   readonly ch: Character;
   scripted: boolean;
   setScriptPose(pos: THREE.Vector3Like | null, quat?: THREE.Quaternion): void;
+  /** The character's speech channel takes a sound at priority 9 (actors/speech.ts). */
+  adoptSpeech?(h: { stop(fade?: number): void; readonly playing: boolean }): void;
 }
 interface ActorsLike {
   get(uid: number): ActorLike | undefined;
@@ -669,6 +671,10 @@ export async function createSequenceSystem(ctx: GameContext): Promise<GameSystem
     if (h.loop) loopCuts.push({ h, at: stompVoiceEnd(clock, info.duration) });
     // Lip-sync: the track's object is the speaker (src/game/actors/lipsync.ts).
     lipSyncService(ctx)?.speak(h, track.uid, characterOf(track.uid));
+    // Key flag 0x20 hands the sound to the track's character (message 0x1011, SUFFERING.EXE
+    // 0x450b10): its speech channel takes it at priority 9, cutting the line it was saying, and
+    // the character's own lines wait for it (actors/speech.ts) [verified].
+    if (key.flags & 0x20) actors()?.get(track.uid)?.adoptSpeech?.(h);
     // Paged over the line's duration, the box closes 1 s after it (cinema.ts subtitlePages).
     if (subtitle && loadSettings().subtitles) subs.show(subtitle, clock, Math.max(0, info.duration));
   };

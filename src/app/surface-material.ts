@@ -64,7 +64,7 @@ import {
 } from '../formats/model';
 import { coverageMipmaps, decodeTexture, punchThroughBlack } from '../formats/texture';
 import type { DecodedTexture } from '../formats/types';
-import { glowMarkAlphaRef, glowMarked, passAlphaRef, passDepthWrite, passTakesVertexAlpha, tintFactor, translucentPassBlend } from '../formats/render-data';
+import { glowMarkAlphaRef, glowMarked, passAlphaRef, passDepthWrite, passTakesVertexAlpha, tintFactor, translucentPassBlend, TRANSLUCENT_OPACITY } from '../formats/render-data';
 import { glowMark, setGlowMark } from './glow-mark';
 import { singlePassIfOrderFree } from './single-pass';
 import { ENHANCED } from './enhanced/config';
@@ -617,7 +617,12 @@ export function createSurfaceMaterial(opts: SurfaceMaterialOptions, src: Surface
     if (s) rgb = blendOver(rgb, s, layers[i].blend);
   }
   if (opts.splat?.length) rgb = applySplats(rgb, opts.splat, src, missing, S, light ? (c: N) => toLinear(engineStages(engineAlbedo(toSrgb(c)).mul(light))) : undefined);
-  const colour: N = vec4(rgb, isBlended(blend) || blend === Blend.Cutout ? alpha : float(1));
+  // An opaque first pass on a faded object (opacity < 0.99) is drawn as mode 1 (render-data.ts
+  // translucentPassState): its alpha is then texture alpha x ALPHAARG2 like any pass's, oD0.a for
+  // an untinted one (the opacity again without colours: opacity², or the vertex alpha x opacity;
+  // DiffuseAlpha), TFACTOR for a tinted one (the opacity three.js applies) [verified, §5.4].
+  const opaqueAlpha: N = LEGACY_LIGHTING ? float(1) : materialOpacity.lessThan(TRANSLUCENT_OPACITY).select(alpha, float(1));
+  const colour: N = vec4(rgb, isBlended(blend) || blend === Blend.Cutout ? alpha : opaqueAlpha);
   // Enhanced mode: glow-marked surfaces (the scene glow's sources) are emitters in the HDR frame.
   const glow = !LEGACY_LIGHTING && !!enhancedShading.glow && glowMarked(layers);
   if (glow) S.tok('glow');

@@ -142,9 +142,18 @@ its rotation. `0x44fd70` turns them into animator flags, for channel-0 keys only
 - The extracted delta is scaled per axis in model space by animator +0x64 / +0x68 / +0x6c
   (x, y, z; 1 by default) before the model's matrix turns it, and is added to the object's
   pending matrix (object vtable +0xf0, `0x4546d0`), the same one the player's gait moves.
-  Gameplay writers: the player's melee strike (+0x6c = PWP p85 without a target), the jump
-  power (+0x6c) and the clamber's ledge height (+0x68). `docs/game-logic.md` §14.1 "Player
-  melee: root motion".
+  Gameplay writers: the player's melee strike (+0x6c = PWP p85 without a target), the
+  third-person jump (+0x68 = the power, +0x6c = (1 + power) / 2 x max(stick, 0.3); Jump enter
+  0x1003af56..0x1003af87) and the clamber's ledge height (+0x68). `docs/game-logic.md` §14.1
+  "Player melee: root motion", "Third-person jump and landing".
+- Player states that extract (the +0x70 sites): Hit Reacting (17) enter and per frame (the
+  knockdown 2:128 three metres back, its floor clip 2:130 through Landing), Jump (8) enter (the
+  clip's root is the whole trajectory, y included), Landing (12) through Fall's leave (2:89,
+  0.4 m forward), LadderClimb (27) enter (each rung clip 0.5 m up or down at speed 1). Fall (9)
+  enter turns extraction off and the lock on: a body knocked off a ledge drops straight down.
+  Port: `src/game/actors/player-states.ts` (RootClip: per-axis scaled root deltas into
+  `PlayerController.rootMove`, y through `MotorInput.moveY` with `fly`), `world/interact.ts`
+  (rungs).
 - Data:
   - 1240 of 1433 keys use 0000;
   - walk / run clips driven by transform keys use `0020` (forward axis z locked, sway and bob

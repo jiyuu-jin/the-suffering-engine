@@ -25,6 +25,7 @@
 // with an OpenDoorBehavior (template p104) stops at the door, plays the push clip and sends
 // the Switch its activate message; locked doors cut the edge.
 
+import { SPEECH_PRIORITY } from './speech';
 import * as THREE from 'three/webgpu';
 import { CharacterMotor, COLLISION_LAYER, type CollisionWorld } from '../../app/physics';
 import type { PlayerController } from '../../app/player';
@@ -33,7 +34,7 @@ import type { Entity } from '../../formats/entities';
 import { instanceRotation } from '../../formats/level';
 import type { CreatureKind, KindAttack } from './kinds';
 import { npcMotorConfig } from './mover';
-import { clearLine, clearWide, groundAlong, shortcutBarred, type NavGraph } from './nav';
+import { clearLine, clearWide, edgeHolds, groundAlong, shortcutBarred, type NavGraph } from './nav';
 import type { Behavior, BehaviorLibrary, DialogLine, InvestigateProfile, NoiseSpec } from './behaviors';
 import { deathWeaponMode } from './drops';
 import { chooseFleeSpot, recentHits, type FleeSpot } from './flee';
@@ -103,6 +104,8 @@ export interface RangedProfile {
   damage: number;
   /** Damage type of the shot (Missile p32: 1 bullets, 13 pellets) [data]. */
   type?: number;
+  /** Impact force of one round: Missile p28 near, p29 far, between p30 and p31 m (missileForce). */
+  force?: { near: number; far: number; nearDist: number; farDist: number };
   /** Projectile speed (m/s, Missile p1); slow ones (thrown needles) fly visibly. */
   speed: number;
   /** Ranged Weapon p75 spread (degrees). */
@@ -222,6 +225,22 @@ export interface NpcBlowHit {
   type?: number;
   /** The struck hit sphere's bone, when the blow knows it (a blade's sweep, a missile's contact). */
   bone?: number;
+  /**
+   * The damage record's impact force (+0x1c: Melee Weapon p69 x Attack p7, a Missile's p28..p29
+   * by distance): what the player's hit reaction is picked by (actors/player-states.ts).
+   */
+  force?: number;
+}
+
+/**
+ * Impact force of a Missile's round at `dist` m: p28 up to p30, p29 from p31, linear between
+ * (as the player's rounds, weapons/data.ts projectileForce) [verified data layout].
+ */
+export function missileForce(f: RangedProfile['force'], dist: number): number | undefined {
+  if (!f) return undefined;
+  if (dist <= f.nearDist) return f.near;
+  if (dist >= f.farDist) return f.far;
+  return f.near - ((dist - f.nearDist) * (f.near - f.far)) / Math.max(1e-6, f.farDist - f.nearDist);
 }
 
 /** What an actor needs from the outside world each frame. */
@@ -276,7 +295,7 @@ export interface ActorEnv {
   /** Level-logic message. */
   send(uid: number, message: number, from: number): void;
   /** Speak a dialog line (sound + subtitle + lip-sync); returns its length (s). */
-  say(a: Actor, line: DialogLine): number;
+  say(a: Actor, line: DialogLine, priority?: number): number;
   /** Behaviour change notice (debug / save). */
   onBehavior?(a: Actor, b: Behavior | undefined): void;
   /** Nav edge veto (locked or unopenable closed doors), by node index. */
@@ -530,6 +549,8 @@ export class Actor {
    * 0x1012cf00) [verified].
    */
   speech?: { stop(fade?: number): void; readonly playing: boolean };
+  /** The priority of that line (speech component +0xb4; actors/speech.ts speechAdmits). */
+  speechPriority = 0;
   /**
    * The line a SimpleConversationBehavior is saying (its PlayDialog child, vtable 0x10156fc0):
    * its exit (vt +0x4c 0x100ffc70) stops the line when the conversation's p3 is set, and that
@@ -2032,7 +2053,7 @@ export class Actor {
     }
     // MoveTo failing ends the WaypointBehavior: the stack goes on with its next behaviour
     // (waypointLegFails).
-    if (this.waypointLegFails(wp.uid, x, y, z, env)) {
+    if (this.waypointLegFails(wp.uid, x, y, z, env, b.keepPath)) {
       this.gait = 1;
       return this.completeBehavior(env);
     }
@@ -2057,13 +2078,28 @@ export class Actor {
    * stairs down to the gate (WaypointBehavior 7524 -> Waypoint 8316), so the gate 7f48 he opens
    * stayed shut.
    */
-  private waypointLegFails(wp: number, x: number, y: number, z: number, env: ActorEnv): boolean {
+  private waypointLegFails(wp: number, x: number, y: number, z: number, env: ActorEnv, pathMode = true): boolean {
     const nav = env.nav;
     if (!nav?.size) return false;
     const leg = this.b.leg;
     if (leg && leg.wp === wp) return !leg.ok;
     const pos = this.motor.position;
     const navType = this.profile.navType;
+    // A path-mode MoveTo (WaypointBehavior p7 = 1) puts its target on an edge first (FindPath,
+    // NavGraph.locateEdge): when no edge the walker may use holds it, the nearest edge is taken,
+    // barred or not, and the A*, whose neighbour filter drops edges barred to the walker
+    // (0x100d5c30 -> 0x100dbf30), finds no way onto a barred one: FindPath fails, MoveTo code 2,
+    // and the leg fails at once [strong]. 6b's Waypoint 208d (Clem's walk 208c, his type 10:674)
+    // lies off every edge by the pier door, nearest the edge 17f5-1872 his type may not use:
+    // the walk ends where he stands and Behavior Changer a45's chain goes on (his talk a46, the
+    // next Fester wave a54), where the port walked him into the slope under it for good.
+    if (pathMode && navType !== undefined) {
+      const g = nav.locateEdge(x, y, z, navType);
+      if (g && !g.passes && !edgeHolds(nav.nodes[g.a], nav.nodes[g.b], pos.x, pos.y, pos.z)) {
+        this.b.leg = { wp, at: env.time, ok: false };
+        return true;
+      }
+    }
     const barred = navType !== undefined && nav.crossesExcluded(pos.x, pos.y, pos.z, x, z, navType);
     let ok = !barred && clearLineCached(this, env, x, y, z);
     if (!ok) {
@@ -2186,10 +2222,12 @@ export class Actor {
 
   private speak(line: DialogLine, env: ActorEnv) {
     this.endTalkLine();
-    this.speech = undefined;
+    // One channel (actors/speech.ts): a line said over another one of the same or higher
+    // priority is dropped, and the PlayDialog child's done test asks the channel, so the talk
+    // waits for whatever the character is saying to end.
     const len = env.say(this, line);
     const b = this.behavior;
-    if (this.speech) this.talkLine = { h: this.speech, stop: b?.kind !== 'talk' || b.stopOnExit !== false };
+    if (this.speech?.playing) this.talkLine = { h: this.speech, stop: b?.kind !== 'talk' || b.stopOnExit !== false };
     if (line.message) this.fireLinks(env, line.message);
     const c = line.anims.length ? env.clip(this, line.anims[Math.floor(Math.random() * line.anims.length)]) : -1;
     if (c >= 0) {
@@ -2932,7 +2970,7 @@ export class Actor {
         const onTarget = !this.target || (v === 'player' ? !!this.target.player : this.target.actor === v);
         const dmg = npcBlowDamage(win.weapon, a.scale ?? 1, onTarget);
         // The contact and the weapon's p70 type go with the blow: Part Caps cut by them.
-        const hit: NpcBlowHit = { point: { x: p[0], y: p[1], z: p[2] }, type: win.weapon.type, bone: spheres[struck.i]?.bone };
+        const hit: NpcBlowHit = { point: { x: p[0], y: p[1], z: p[2] }, type: win.weapon.type, bone: spheres[struck.i]?.bone, force: (win.weapon.force ?? 0) * (a.forceScale ?? 1) };
         if (v === 'player') env.damagePlayer(dmg, this, hit);
         else env.damageActor(v, dmg, this, hit);
       }
@@ -2988,7 +3026,7 @@ export class Actor {
       this.missiles.splice(i, 1);
       if (c.kind === 'expired') continue;
       for (const g of spec.impact) env.spawnFx?.(g, c.point, c.kind === 'world' ? c.normal : undefined);
-      if (c.kind === 'body') this.hitTarget(env, c.body, spec.damage, { point: c.point, type: spec.type, bone: c.bone });
+      if (c.kind === 'body') this.hitTarget(env, c.body, spec.damage, { point: c.point, type: spec.type, bone: c.bone, force: missileForce(this.profile.ranged?.force, Math.hypot(c.point.x - this.position.x, c.point.z - this.position.z)) });
     }
   }
 
@@ -3003,7 +3041,7 @@ export class Actor {
       if (!this.targetAlive(s.target, env)) continue;
       const p = this.aimPoint(env, s.target);
       if (Math.hypot(p.x - s.at.x, p.z - s.at.z) > 0.9) continue; // dodged
-      this.hitTarget(env, s.target, s.damage, { point: p, type: this.profile.ranged?.type });
+      this.hitTarget(env, s.target, s.damage, { point: p, type: this.profile.ranged?.type, force: missileForce(this.profile.ranged?.force, Math.hypot(p.x - this.position.x, p.z - this.position.z)) });
     }
   }
 
@@ -3061,7 +3099,7 @@ export class Actor {
       this.inFlight.push({ t: env.time + Math.hypot(d, aim.y - muzzle.y) / r.speed, target: t, at: { x: p.x, y: p.y, z: p.z }, damage: r.damage });
       return;
     }
-    this.hitTarget(env, t, r.damage, { point: at, type: r.type });
+    this.hitTarget(env, t, r.damage, { point: at, type: r.type, force: missileForce(r.force, Math.hypot(d, aim.y - muzzle.y)) });
   }
 
   // --- doors -----------------------------------------------------------------
@@ -3991,6 +4029,16 @@ export class Actor {
     const tl = this.talkLine;
     this.talkLine = undefined;
     if (tl?.stop && tl.h.playing) tl.h.stop(0);
+  }
+
+  /**
+   * A sound a STOMP key hands the character (key flag 0x20, message 0x1011): its speech channel
+   * takes it at priority 9 once it plays (0x1012d3b0), cutting the line it was saying.
+   */
+  adoptSpeech(h: { stop(fade?: number): void; readonly playing: boolean }) {
+    if (this.speech && this.speech !== h && this.speech.playing) this.speech.stop(0);
+    this.speech = h;
+    this.speechPriority = SPEECH_PRIORITY.sequence;
   }
 
   /** Stop whatever line the character is saying (its death; StopSpeech 0x100e1b30). */

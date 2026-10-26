@@ -51,6 +51,7 @@ import { createServer as httpServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createTactics } from './playthrough-tactics.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -450,8 +451,34 @@ const ROUTE = [
   { id: '1b.cp2', obj: 'through the arena door: checkpoint', do: 'goto', to: [448.5, 73.7, 476.3], loot: 14, expect: { checkpoint: 0x8339 } },
   { id: '1b.ledges', obj: 'up the ledges past the arena (clamber twice)', do: 'clamber', from: [473.3, 73.65, 428.4], preLoot: 16, face: [[471.75, 75, 428.4], [469, 79.5, 428.5]], stands: [null, [471.75, 76.23, 428.5]] },
   { id: '1b.cp3', obj: 'the checkpoint on the ledge', do: 'walk', to: [469, 79.7, 428.4], expect: { checkpoint: 0x833b }, shot: true },
+  // Past door 890b, Detector 833a starts Horace's scene (STOMP 88a1), whose end takes Slayer
+  // 7ff6's starting invulnerability off (Relays 89df / 89e0); it then shoots from the room north
+  // (453, 444), 13 m off, two volleys of five 3s an Attack. The player crowds it: up close it
+  // only kicks, which deals nothing (row 82, tools/playthrough-tactics.js). Then what lies in
+  // the two rooms is picked up (`loot` 20 m): from the deep link the revolver and its rounds
+  // (88e9 / 890c...), which the door below needs (run f4 came without and could not blow it).
+  // (`enter`: the scene's Detector walked into first; the fight follows the scene at once: as a
+  // step of its own, the time between the steps cost the player the Slayer's first Attack, 30.)
+  { id: '1b.hall', obj: "Horace's scene, then Slayer 7ff6 (it shoots from 13 m: crowded)", do: 'arena', enter: [456.0, 79.7, 430.9], enterTol: 0.4, stand: [455.9, 79.7, 431.2], hold: 18, prey: [0x7ff6], brace: { hp: 70, keep: 1 }, loot: 20, until: `!__actors.manager.get(0x7ff6)?.alive`, timeout: 240, expect: { played: [0x88a1] } },
+  // The doorway south out of that room is Detector 6508 (444..450, 442.5..443.5): Relay 8343 ->
+  // Timers 8349 / 835a drop CartWheelers 8359 / 8341 off the hall's ceiling 6 m south of it
+  // (JumpBehavior 8353). Braced in the room north (bottles, reload, the creature form if the
+  // meter is full), the player steps into it and holds there facing south, shooting them as they
+  // fall and land 6 m off, then backs off north out of their blades.
+  { id: '1b.ambush', obj: 'the ceiling ambush (CartWheelers 8359 / 8341): braced, triggered, fought from the room north', do: 'ambush', back: [448.5, 79.7, 447.3], trigger: [448.5, 79.7, 443.0], face: [448.5, 80.5, 437.3], retreat: false, triggered: `!!__world.world.get(0x6508)?.destroyed || !__world.world.get(0x6508)?.enabled || ['chase', 'attack', 'hurt', 'fall'].includes(__actors.manager.get(0x8359)?.state)`, brace: { hp: 90, keep: 0, morph: true }, hold: 14, prey: [0x8359, 0x8341], until: `[0x8359, 0x8341].every((u) => !__actors.manager.get(u)?.alive)`, timeout: 150 },
+  // Down the hall, Detector 8101 (a line across it at x 438.4) gives Slayer 7ffc in the low side
+  // room (433.8, 421.5) a WaypointBehavior out into the hall (Relay 8106 -> Behavior Changer
+  // 8103). Braced, the player crosses the line and holds there: it runs its waypoints (8102,
+  // 8105) unseeing for about 10 s, then comes back and sees him from 4..5 m (run x4); crowded
+  // from there and taken with the blade. Its first Attack goes on point-blank (about 30).
+  { id: '1b.slayer2', obj: 'across Detector 8101: Slayer 7ffc out of its side room (crowded)', do: 'arena', enter: [438.2, 79.7, 415.2], enterTol: 0.5, stand: [440.5, 79.7, 415], hold: 14, prey: [0x7ffc], brace: { hp: 70, keep: 0 }, until: `!__actors.manager.get(0x7ffc)?.alive`, timeout: 150 },
   // Horace talks again on the way (Detector 88f4); the hall ends at a locked door with 30 health.
-  { id: '1b.door', obj: 'smash the locked door at the end of the hall', do: 'break', from: [438.6, 79.65, 393.9], uids: [0x53c2], expect: { destroyed: [0x53c2] } },
+  // Four Breakables stand by it (6532 / 6533 / 7567 / 7568, 10 health each): any blow sets them
+  // off together and the blast breaks the door, 202 to a player beside it (a shiv swing at the
+  // door, run x2; 90 from 8 m, 20 from 11 m; since 4ce8320 blasts hurt the player, and run f1
+  // died at the door from its own revolver rounds). Shot from 17 m up the hall, 6533 takes the
+  // door with it and nothing reaches the player.
+  { id: '1b.door', obj: 'blow the locked door at the end of the hall: its gas cans shot from up the hall', do: 'break', from: [441.5, 79.65, 408.5], aim: [438.4, 80.5, 391.7], uids: [0x6533], until: `!!__world.world.get(0x53c2)?.destroyed`, expect: { destroyed: [0x53c2] } },
   { id: '1b.vision', obj: 'the room behind it (a vision)', do: 'walk', to: [428.3, 79.7, 390.5], then: { wait: 3 } },
   // The door 653a stays locked while a pushable stands in Detector 7fe9 in front of it.
   // Out of the corridor (into the open end at z < 412) so that the player can get past it.
@@ -500,6 +527,11 @@ const ROUTE = [
   // with the Slayers dead, Behavior Changers 7e17 / 7e1d / 7e23. The companion flees from the
   // creatures (FleeBehavior 7e3e) instead of leading the player there, so the player goes ahead.
   { id: '1c.east', obj: 'into the east yard (Detector 7e13: the last CartWheelers)', do: 'walk', to: [499, 78.1, 387.5], tol: 1, then: { wait: 2, fight: 40 } },
+  // The last two (7e20 / 7e21, Count Down 7e2a's) wake only with the player in Detector 7e28 or
+  // 7e29 (Relay 7e27 -> Count Down 7efe -> Behavior Changers 7e1d / 7e23); the inmate's last walk
+  // waits on them. A fight that ends south of z 398 never crossed it (run r1 of 2026-10-25: the
+  // inmate idle for the whole of 1c.lead).
+  { id: '1c.wake', obj: 'north across the east yard (Detector 7e29): the last two CartWheelers wake', do: 'walk', to: [505.5, 78.6, 401], tol: 1.5, then: { wait: 2, fight: 40 }, expect: { awake: [0x7e20, 0x7e21] } },
   {
     // On to the east yard: Count Down 7e2a (two Slayers, six CartWheelers) -> Relay 8080 gives
     // the inmate his last walk; his Waypoint 7b8c enables the transition 7813 (Relay 808c).
@@ -635,6 +667,16 @@ const ROUTE = [
     // be4. The Tommy Gun's bursts (fight weapon choice) killed him at his gun inside the nest
     // before he left, the nest door stayed locked, and the lever 1356 with it (run d2).
     weapon: '4:5',
+    // The step's own fights (what comes at the player meanwhile) leave him to those single shots:
+    // he shoots at the player, so they took him as a threat and killed him at his gun with the
+    // distance's gun (run r2, "fought: 18 swings"), as in d2 / f2. Nothing in the data shields him
+    // (160 health on Medium, invulnerable only through the camera scene, Relays 33b0 / 33b1).
+    spare: [0x7f4],
+    // At the chest, not the head: a revolver round (6) on his head cuts his neck 40..70 % of the
+    // time (Part Cap 10:865, bone 48, from 3.9, 500 a second of bleed), which killed him in 0.3 s
+    // after his fourth hit (session: 154 -> 136, then 8.3 a frame to 0). His torso cap 10:866
+    // takes no bullets (p14).
+    aimDy: 1.1,
     from: [171, 94.7, 251],
     until: `(() => { const c = __world.world.get(0x2e11), a = __actors.manager.get(0x7f4); return !c || c.destroyed || !a?.alive || Math.hypot(a.position.x - 163.7, a.position.z - 248.8) > 1.5; })()`,
     timeout: 90,
@@ -644,7 +686,9 @@ const ROUTE = [
     obj: 'the six inmates of the south yard (Count Down fe0)',
     do: 'arena',
     stand: [185, 94.7, 245],
-    until: `(() => { const c = __world.world.get(0xfe0); return !c || c.destroyed; })()`,
+    // (Over when Count Down fe0 is, or with the gunner its last one: he is fought out of the nest
+    // in `2.gunner-out`.)
+    until: `(() => { const c = __world.world.get(0xfe0); return !c || c.destroyed || (c.s.count === 1 && !!__actors.manager.get(0x7f4)?.alive); })()`,
     timeout: 300,
     // (Not the gunner 7f4: he has to walk out of his nest alive, through its locked door be4,
     // which only his Edge Passage opens; the lever 1356 stands inside. Killed at his gun by the
@@ -656,6 +700,12 @@ const ROUTE = [
     force: { why: 'riot not over in time: the inmates left killed through services.actors.damage', js: `(() => { for (const u of [0xfdf, 0xff6, 0xfdd, 0xfde, 0xfdc]) { const a = __actors.manager.get(u); if (a?.alive) __actors.services.actors.damage(a, 1000, __player.position.clone(), 'player'); } return 1; })()` },
     shot: true,
   },
+  // Out of his nest (Count Down 2e11's five Damaged -> Relay 2e07 -> WaypointBehavior 2e0b through
+  // be4 to Waypoint 2e0c, then his Hostility 10:131) the gunner is the riot's sixth (Count Down
+  // fe0 counts his Died too): fought now, outside. Dallas (prisoners' 10:214 lists his team
+  // 10:1645) would take him on as well, but dies earlier in most runs. Not while he is still in
+  // the nest (x < 166.9, the door be4): killed there the nest stays shut.
+  { id: '2.gunner-out', obj: 'the gunner, out of his nest: the riot\'s last (Count Down fe0)', do: 'arena', unless: `(() => { const c = __world.world.get(0xfe0), a = __actors.manager.get(0x7f4); return !c || c.destroyed || !a?.alive || a.position.x < 166.9; })()`, stand: [172, 94.7, 246], preyR: 20, prey: [0x7f4], until: `(() => { const c = __world.world.get(0xfe0); return !c || c.destroyed; })()`, timeout: 120, shot: true },
   // The gate c36 (locked, no Edge Passage) opens from the lever 1356 by the nest (p64 On, p65
   // Off). Count Down fe0 sends the inmate there (WaypointBehavior 314c -> Waypoint 314b -> Timer
   // 314e: On to the lever); the lever is the player's too (unlocked, usable), so with the inmate
@@ -1184,7 +1234,11 @@ const ROUTE = [
   // 1ddf with Visiblity Message Filter 20d3 (35 % x 20 %) -> Relay 20cc: Torque's children
   // (1af3 / 1af4: Speech Players 20ff / 2101, a voice line), Detector 1de0 enabled.
   { id: '6a.cp4', obj: 'west along the creek: checkpoint', do: 'walk', to: [268, 84.4, 343], tol: 1.5, drop: 6, expect: { checkpoint: 0x232b } },
-  { id: '6a.pond-walk', obj: 'into the cave by the pond', do: 'walk', to: [226, 83.5, 320], tol: 1.5 },
+  // (Detector 1ddf spans x 221.0..227.0 and fires its On only every tick an occupant is inside
+  // (outOnEnterAgain; the first touch sends nothing). The old stop, [226, ..] within 1.5 m, ended
+  // at x 227.3: the Detector's edge, where the body's few centimetres while the look turned it
+  // decided whether the filter was ever asked (run r6: not; a session: at once). 2 m inside.)
+  { id: '6a.pond-walk', obj: 'into the cave by the pond (Detector 1ddf)', do: 'walk', to: [225, 83.6, 319.5], tol: 0.8, expect: { inside: 0x1ddf } },
   { id: '6a.children', obj: 'look across the pond: the children', do: 'look', at: [209.6, 84.8, 321.4], then: { until: `__world.world.get(0x20cc).s.left === 0`, timeout: 10, wait: 6 }, shot: true },
   // They walk off and vanish (Waypoints 2116 / 2119 p0 Destroy, Count Down 211a -> Relay 211b,
   // Timer 23f0 at the latest): Timer 20e9 -> the Burrower 20e2 and Object Cloner 21d5's
@@ -1222,8 +1276,14 @@ const ROUTE = [
   // Along the beach with Clem: Fester waves (Object Cloners 894, 87f, a54, 1fe1) and Clem's chain
   // of Behavior Changers (843, a45, a4a, a4c -> FollowBehavior 138f). The door under the pier
   // opens to it: Relay 205c enables Detectors 203a / 2059 (from Count Downs 1d87 / 1d89, or Clem's
-  // death, Relay a42).
-  { id: '6b.shore', diag: allyDiag(0x49a), obj: 'east along the beach with Clem through the Fester waves', do: 'follow', uid: 0x49a, until: `__world.world.get(0x203a).enabled || __world.world.get(0x2059).enabled`, timeout: 600, fight: true, shot: true },
+  // death, Relay a42). With Clem alive: his walk 208c to Waypoint 208d fails at once (off the
+  // graph, docs/game-logic.md §15.5; bug log row 117), his line a46, then Relay a55 starts the
+  // wave a54 and his follow 138f; a54's end -> a4a -> the wave 1fe1 -> Count Down 1d89 -> 205c.
+  { id: '6b.shore', diag: allyDiag(0x49a), obj: 'east along the beach with Clem through the Fester waves', do: 'follow', uid: 0x49a, until: `__world.world.get(0x203a).enabled || __world.world.get(0x2059).enabled || __actors.manager.get(0x49a)?.behavior?.uid === 0x138f`, timeout: 600, fight: true, shot: true },
+  // The last waves' copies come ashore by the pier and fight each other there (a54's Burrower
+  // lists the Festers' team), out of the follow's reach (session: 2 left under the pier 600 s
+  // into the shore): hunted from the pier door until the waves are used up.
+  { id: '6b.waves', obj: 'with Clem alive: the waves a54 / 1fe1 hunted until the pier door is enabled (Count Down 1d89)', do: 'arena', unless: `__world.world.get(0x203a).enabled || __world.world.get(0x2059).enabled`, stand: [447, 77.7, 226], preyR: 40, until: `__world.world.get(0x203a).enabled || __world.world.get(0x2059).enabled`, timeout: 400, shot: true },
   // The door under the pier: Detector 203a (or a look from 2059) -> "Door" 2035: Fester 2034
   // bursts out through it.
   { id: '6b.door', obj: 'to the door under the pier: a Fester bursts out', do: 'walk', to: [447, 77.3, 226], tol: 1, then: { wait: 4, fight: 40 }, expect: { played: [0x2035] }, shot: true },
@@ -2081,6 +2141,10 @@ try {
   // `stay`: a page expression; while it holds the player keeps his ground (turns and swings at
   // what comes into reach, does not walk: the 1a gas chamber's lit floor tiles).
   // `area` [x, z, r]: only creatures within r m of (x, z) are engaged (engage()).
+  // Fight tactics (tools/playthrough-tactics.js): crowding a gunman, drinking under fire, the
+  // creature form and throwables in a fight, reloading in a lull, bracing before an ambush.
+  // (walk / fight are defined below: the wrappers call them once the run is under way.)
+  const tactics = createTactics({ ev, press, hold, sideKeys, sleep, note, shortcut, walk: (...a) => walk(...a), fight: (...a) => fight(...a), checkDeath: () => checkDeath(), cinematic: () => cinematic(), waitCine: (...a) => waitCine(...a), stepTo: (...a) => stepTo(...a) });
   const fight = async (seconds = 40, all = false, huntOnly = false, stay = null, area = null) => {
     const end = Date.now() + seconds * 1000;
     let quiet = 0;
@@ -2104,7 +2168,18 @@ try {
       }
       // Low on health with a Xombium bottle in hand: drink (the H key needs pointer lock).
       if (await ev(`__actors.combat.health < 40 && (__hud.model().healthPacks ?? 0) > 0 && __weapons.service.useHealthPack()`)) shortcut('api', 'Xombium bottle through useHealthPack (the H key needs pointer lock)');
-      const t = await ev(`(() => { const t = __pt.engage(${all ? '40, true' : huntOnly ? '14, false, true' : '14'}${area ? `${all || huntOnly ? '' : ', false, false'}${all ? ', false' : ''}, ${JSON.stringify(area)}` : ''}); if (!t) return null; const shoot = __pt.canShoot(t.id); const swing = (t.d <= 1.7 || shoot) && __pt.attack(t.id); /* An Inferna is shot from where the player stands: walking up to it is walking into its burning footprints (9 Lighthouse). */ const ta = __actors.manager.actors.find((x) => x.id === t.id); const keep = shoot && (t.d < 15 || ta?.entity?.className === 'Inferna' || Math.abs((ta?.motor.position.y ?? 0) - __player.position.y) > 2); const p = __player.position; const near = (shoot || __pt.inFire()) && (__pt.inFire() || __actors.manager.actors.some((a) => a.alive && __pt.infMode(a) === 'flaming' && Math.hypot(a.position.x - p.x, a.position.z - p.z) < 7 && Math.abs(a.position.y - p.y) < 3) || (t.st === 'attack' && t.d < 3 && !ta?.profile?.ranged && ta?.entity?.className !== 'Burrower')); const room = near ? __pt.evadeKeys(${area ? JSON.stringify(area) : 'null'}) : null; const kite = !!room && !Array.isArray(room) ? room : null; return { ...t, act: t.d > 1.0 && !keep ? 'close' : 'hit', swing, kite }; })()`);
+      // Transformed with the meter run dry: press Insanity again, as a player does (the empty
+      // meter drains health until then; run r1 of 2026-10-25 died of it in 1b's arena, 31 swings
+      // into one fight, the arena loop's own check coming only between fights).
+      if (await ev(`(() => { const m = window.__insanity?.model; return !!m && m.form === 'creature' && m.s.meter <= m.max * 0.05; })()`).catch(() => false)) await changeBack('the meter ran dry');
+      const t = await ev(`(() => { const t = __pt.engage(${all ? '40, true' : huntOnly ? '14, false, true' : '14'}${area ? `${all || huntOnly ? '' : ', false, false'}${all ? ', false' : ''}, ${JSON.stringify(area)}` : ''}); if (!t) return null; const shoot = __pt.canShoot(t.id); const swing = (t.d <= 1.7 || shoot) && __pt.tac?.holdFire !== t.id && __pt.attack(t.id); /* An Inferna is shot from where the player stands: walking up to it is walking into its burning footprints (9 Lighthouse). */ const ta = __actors.manager.actors.find((x) => x.id === t.id); const keep = shoot && (t.d < 15 || ta?.entity?.className === 'Inferna' || Math.abs((ta?.motor.position.y ?? 0) - __player.position.y) > 2); const p = __player.position; const near = (shoot || __pt.inFire()) && (__pt.inFire() || __actors.manager.actors.some((a) => a.alive && __pt.infMode(a) === 'flaming' && Math.hypot(a.position.x - p.x, a.position.z - p.z) < 7 && Math.abs(a.position.y - p.y) < 3) || (t.st === 'attack' && t.d < 3 && !ta?.profile?.ranged && ta?.entity?.className !== 'Burrower')); const room = near ? __pt.evadeKeys(${area ? JSON.stringify(area) : 'null'}) : null; const kite = !!room && !Array.isArray(room) ? room : null; return { ...t, act: t.d > 1.0 && !keep ? 'close' : 'hit', swing, kite }; })()`);
+      // The tactics take the tick when they act (tools/playthrough-tactics.js).
+      if (await tactics.tick(t, { stay, area })) {
+        quiet = 0;
+        if (t?.swing) hits++;
+        target = t ?? target;
+        continue;
+      }
       // Gunmen (Slayers, guards with guns) need a clear line at their Fire marker: with one shooting
       // at him and the player under 70, he takes cover within 8 m out of all their lines and
       // holds it, shooting what comes round (they come closer to find a line: shotgun range),
@@ -2603,6 +2678,8 @@ try {
     for (const u of exp.open ?? []) if (!(await ev(`!!__world.world.get(${u})?.s.open`))) out.push(`#${hex(u)} not open`);
     for (const u of exp.taken ?? []) if (!(await ev(`!!__world.world.get(${u})?.s.taken`))) out.push(`#${hex(u)} not taken`);
     for (const u of exp.unlocked ?? []) if (!(await ev(`!!__world.world.get(${u})?.s.unlocked`))) out.push(`#${hex(u)} still locked`);
+    // `inside`: a Detector (uid or list) the player must stand in at the end of the step.
+    for (const u of [exp.inside ?? []].flat()) if (!(await ev(`(() => { const d = __world.world.get(${u}); return !!d && d.s.inside instanceof Set && d.s.inside.has(__world.world.playerUid); })()`))) out.push(`not inside Detector #${hex(u)}`);
     // Actors that must be dead / broken (5b's projectors: Animating Statics run as actors).
     for (const u of exp.dead ?? []) if (await ev(`!!__actors.manager.get(${u})?.alive`)) out.push(`#${hex(u)} still alive`);
     // [actor uid, [x, y, z], tolerance m]: where a character must be (alive, not fallen away).
@@ -2906,6 +2983,9 @@ try {
       // voice dropped because none was free).
       if (step.expect?.heard) await ev(`(() => { window.__ptHeard = new Set(); if (!__audio.__ptHeardHook) { const prev = __audio.onPlay; __audio.onPlay = (info, opts) => { window.__ptHeard?.add(info.key); return prev?.(info, opts); }; __audio.__ptHeardHook = true; } return 1; })()`).catch(() => {});
       // `unless` (JS): what the step does is done already (by another character): skipped.
+      // `brace` (an ambush step braces at its waiting spot instead): ready for a fight the route
+      // knows is coming: bottles, the gun reloaded (tools/playthrough-tactics.js).
+      if (step.brace && step.do !== 'ambush' && !(step.unless && (await ev(step.unless)))) await tactics.brace(step.brace);
       if (step.unless && (await ev(step.unless))) note(`skipped: already done (${step.unless})`);
       else switch (step.do) {
         case 'intro': {
@@ -3023,6 +3103,9 @@ try {
           break;
         }
         case 'arena': {
+          // `enter`: a point walked to first (the Detector that starts the fight's scene).
+          // (A list: walked through in turn.)
+          for (const pt of step.enter ? (Array.isArray(step.enter[0]) ? step.enter : [step.enter]) : []) await walk(pt, step.enterTol ?? 0.6, 60);
           const end = Date.now() + (step.timeout ?? 300) * 1000;
           let done = false;
           const skipPrey = new Set();
@@ -3268,8 +3351,23 @@ try {
                 await walk(to, 0.3, 30);
               }
             }
+            // Without a step `weapon`: what the player carries that hurts it (__pt.breakWeapon: the
+            // prop's Damage Resistances), as a player picks it; a blade from up close. (r1b's
+            // locked door 64e1 takes no bullets: with the shells spent in the sewer's fights the
+            // revolver in hand did nothing for 240 s, run r7v.)
+            let bladeAt = null;
+            if (!step.weapon && !(await ev(`!!__world.world.get(${u})?.destroyed`))) {
+              const bw = await ev(`(() => { const b = __pt.breakWeapon(${u}); window.__ptBreakWeapon = b ? b.id : null; return b; })()`);
+              if (!bw) note(`#${hex(u)}: nothing carried hurts it`);
+              else if (bw.kind !== 'ranged') {
+                bladeAt = await ev(`(() => { const p = __player.position, c = __pt.center(${u}); const dx = p.x - c[0], dz = p.z - c[2], l = Math.hypot(dx, dz) || 1; return [c[0] + (dx / l) * 1.0, p.y, c[2] + (dz / l) * 1.0]; })()`);
+                note(`#${hex(u)}: no gun with rounds hurts it (damage types): the ${bw.id} blade from ${bladeAt.map((v) => v.toFixed(1)).join(', ')}`);
+                await walk(bladeAt, 0.3, 20);
+              } else if (bw.id !== (await ev(`__weapons.persist.current`))) note(`#${hex(u)}: ${bw.id} (damage type ${bw.type}) for it`);
+            }
             // `until` (JS): done another way (5b: the projector breaks before its Breakable).
             for (let n = 0; n < 30 && !abortRun && !(await ev(`!!__world.world.get(${u})?.destroyed`)) && !(step.until && (await ev(step.until))); n++) {
+              if (bladeAt && (await ev(`Math.hypot(__player.position.x - ${bladeAt[0]}, __player.position.z - ${bladeAt[2]}) > 0.8`))) await walk(bladeAt, 0.3, 10);
               // (A death here was not seen: the game restored its checkpoint while the loop went
               // on hitting, and the run counted none; 1b's locked hall door, shot from the hall.)
               await checkDeath();
@@ -3302,6 +3400,9 @@ try {
             }
           }
           }
+          // (The pick is the step's own: left set, a later step's attacks on objects and its
+          // shots without a target kept the blade, 2's gunner behind his window.)
+          await ev(`(() => { window.__ptBreakWeapon = null; return 1; })()`);
           break;
         }
         case 'shoot': {
@@ -3318,16 +3419,20 @@ try {
             }
           };
           await equipStep();
+          // (attack() without a target keeps the step's gun in hand: __ptBreakWeapon.)
+          await ev(`(() => { window.__ptBreakWeapon = ${JSON.stringify(step.weapon ?? null)}; return 1; })()`);
           while (Date.now() < end && !(await ev(step.until))) {
             await checkDeath();
             if (await fight(10, false, true)) (await walk(step.from, 0.4, 30), await equipStep());
             // (Aim, let a frame draw it, then fire: see `break`.)
-            await ev(`(() => { const a = __actors.manager.get(${step.uid}); if (a?.alive) __pt.aimAt(a.position.x, a.position.y + 1.5, a.position.z); return 1; })()`);
+            // `aimDy`: the height aimed at over his feet (default 1.5 m, the head).
+            await ev(`(() => { const a = __actors.manager.get(${step.uid}); if (a?.alive) __pt.aimAt(a.position.x, a.position.y + ${step.aimDy ?? 1.5}, a.position.z); return 1; })()`);
             await sleep(80);
-            const r = await ev(`(() => { const a = __actors.manager.get(${step.uid}); if (!a?.alive) return 'gone'; __pt.aimAt(a.position.x, a.position.y + 1.5, a.position.z); return __pt.attack() ? 'hit' : ''; })()`);
+            const r = await ev(`(() => { const a = __actors.manager.get(${step.uid}); if (!a?.alive) return 'gone'; __pt.aimAt(a.position.x, a.position.y + ${step.aimDy ?? 1.5}, a.position.z); return __pt.attack() ? 'hit' : ''; })()`);
             if (r === 'gone') break;
             await sleep(600);
           }
+          await ev(`(() => { window.__ptBreakWeapon = null; return 1; })()`);
           if (!(await ev(step.until))) cur.problems.push(`shoot #${hex(step.uid)}: not done in ${step.timeout ?? 60} s`);
           break;
         }
@@ -3369,6 +3474,12 @@ try {
             const grounded = () => waitFor(() => ev('__player.onGround && Math.abs(__player.velocity?.y ?? 0) < 0.05'), 4000, 'on the ground').catch(() => false);
             await grounded();
             const y0 = (await ev('__pt.state()')).p[1];
+            // Already above this ledge's face (the walk or the fight before put him on the first
+            // ledge, and one press took him up the next: 1b.ledges, run r1 of 2026-10-25).
+            if (!step.here && y0 > f[1] + 0.2 && y0 > step.from[1] + 1) {
+              note(`already above the ledge at ${f.map((v) => v.toFixed(1))} (feet ${y0.toFixed(2)})`);
+              continue;
+            }
             let y1 = y0;
             // A second try when nothing happened (3b's second ledge: once in four runs the press
             // came while the body was still sliding to rest at the foot).
@@ -3443,6 +3554,12 @@ try {
           const d = Math.hypot(st.p[0] - end[0], st.p[2] - end[2]);
           if (d > 1.5 || Math.abs(st.p[1] - end[1]) > 1.2) cur.problems.push(`route: ended ${d.toFixed(1)} m from its last point`);
           if (jumps) note(`${jumps} jump(s) on the way`);
+          break;
+        }
+        case 'ambush': {
+          // A scripted ambush whose trigger the route knows: braced, triggered, fought from a
+          // waiting spot (tools/playthrough-tactics.js `ambush`).
+          if (!(await tactics.ambush(step))) cur.problems.push(`ambush: ${step.until} not reached in ${step.timeout ?? 120} s`);
           break;
         }
         case 'evade': {

@@ -492,7 +492,8 @@ export async function createHudSystem(ctx: GameContext): Promise<GameSystem> {
   let reverting = false;
   const offActions = installActions(ctx, { dead: () => wasDead });
   const offInventory = input.onPress('inventory', () => {
-    if (!wasDead) inventory?.toggle(hudBus.clock);
+    // Not while the cheat chord is held (Suffering.rfl 0x1004944e reads the cheat state's +0).
+    if (!wasDead && !(ctx.services.cheats as { chordHeld?: boolean } | undefined)?.chordHeld) inventory?.toggle(hudBus.clock);
   });
   // Map key: the map screen over the paused game (map.ts data, the menu flow draws it).
   const offMap = input.onPress('map', () => {

@@ -1456,6 +1456,13 @@ export interface MotorInput {
    */
   moveX?: number;
   moveZ?: number;
+  /**
+   * Vertical root motion this step (world metres; the third-person jump clip's root:
+   * actors/player-states.ts). With `fly` there is no gravity: the clip's root carries the feet;
+   * a rise leaves the ground and the ground probe meets a descent.
+   */
+  moveY?: number;
+  fly?: boolean;
 }
 
 export class CharacterMotor {
@@ -1626,22 +1633,26 @@ export class CharacterMotor {
       this.airTime = cfg.coyoteTime; // no double jump via coyote time
     }
 
-    // Gravity.
+    // Gravity (none while a clip's root carries the feet: `fly`).
     const wasGrounded = this.onGround;
-    if (!this.onGround) v.y -= cfg.gravity * dt;
+    const ey = input.moveY ?? 0;
+    if (input.fly) {
+      v.y = 0;
+      if (ey > 0) this.onGround = false;
+    } else if (!this.onGround) v.y -= cfg.gravity * dt;
     else v.y = Math.min(v.y, 0);
 
     const ex = input.moveX ?? 0, ez = input.moveZ ?? 0;
     if (!this.world) {
       this.position.x += v.x * dt + ex;
-      this.position.y += v.y * dt;
+      this.position.y += v.y * dt + ey;
       this.position.z += v.z * dt + ez;
       return;
     }
 
     // Move + slide the floating capsule.
     const c = this.capsule(this.currentHeight);
-    const dy = this.onGround ? 0 : v.y * dt;
+    const dy = (this.onGround ? 0 : v.y * dt) + (this.onGround && ey <= 0 ? 0 : ey);
     const mv = this.world.moveCapsule(c, v.x * dt + ex, dy, v.z * dt + ez, v, this.cosSlope, false, this.onGround);
     this.lastMove = mv;
     this.position.x = c.x;
@@ -1649,8 +1660,9 @@ export class CharacterMotor {
     this.position.y = c.y0 - cfg.stepHeight - cfg.radius;
 
     // Ground probe: step up / snap down / land.
-    const reach = wasGrounded && v.y <= 0.01 ? cfg.snapDistance : Math.max(0.02, -v.y * dt);
-    this.probeGround(v.y <= 0.01, reach);
+    const rising = v.y > 0.01 || ey > 0;
+    const reach = wasGrounded && !rising ? cfg.snapDistance : Math.max(0.02, -v.y * dt, -ey);
+    this.probeGround(!rising, reach);
 
     if (this.onGround) this.airTime = 0;
     else this.airTime += dt;

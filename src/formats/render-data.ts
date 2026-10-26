@@ -653,7 +653,8 @@ export const TRANSLUCENT_OPACITY = 0.99;
  * Pass state of a material on an object drawn at `opacity` [verified, 0x48fab0 with the
  * translucent argument, from 0x4933b1 / 0x493719: opacity < 0.99 or object +0xc bit 7]:
  * every pass blends (ALPHABLENDENABLE), an opaque or cut-out first pass as mode 1 with the
- * > 2 / 255 alpha test; ZWRITEENABLE still follows the first pass's own mode (0x48fc70 reads the
+ * > 2 / 255 alpha test (0x48fb08..0x48fb2e: modes 0 and 8 alike, so a cut-out's > 200 test goes);
+ * ZWRITEENABLE still follows the first pass's own mode (0x48fc70 reads the
  * layer's mode, not the substituted one), so a fading figure whose first pass is opaque keeps
  * writing depth and its farther faces behind nearer ones are not drawn over. At full opacity
  * the material's own state (`base`) applies.
@@ -663,7 +664,7 @@ export function translucentPassState(
   opacity: number,
 ): { transparent: boolean; depthWrite: boolean; alphaTest: number } {
   if (opacity >= TRANSLUCENT_OPACITY || base.transparent) return { ...base };
-  return { transparent: true, depthWrite: base.depthWrite, alphaTest: Math.max(base.alphaTest, BLEND_ALPHA_REF) };
+  return { transparent: true, depthWrite: base.depthWrite, alphaTest: BLEND_ALPHA_REF };
 }
 
 /**

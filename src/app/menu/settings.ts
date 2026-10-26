@@ -17,6 +17,8 @@ import type { AudioSystem } from '../audio';
 import { PAD_DEFAULTS, pads } from '../gamepad';
 import { input } from '../../game/hud/bindings';
 import { portOptions } from '../../game/port-options';
+import { handGripOption } from '../../game/actors/hand-grip';
+import { ENHANCED } from '../enhanced/config';
 
 export interface Settings {
   master: number;
@@ -123,6 +125,8 @@ export function applySettings(s: Settings, t: SettingsTargets): void {
   }
   applyPadSettings(s);
   portOptions.ignorePlayer = s.extra.ignorePlayer === true;
+  // Enhanced option (not in the original): the hand closes on the held weapon in third person.
+  handGripOption.enabled = ENHANCED && s.extra.closeHand === true;
 }
 
 /** Controller page options -> the gamepad manager and the bindings' pad layout. */

@@ -12,6 +12,16 @@
 //   - floor layers (no material, landscape splats): the splat with the largest weight at the
 //     nearest vertex; splat texture -> the Landscape Material template that uses it;
 //   - dynamic bodies (props, doors): the model's first submesh material.
+//
+// A material without Game Material Properties (no word 0, 2 062 retail materials) takes the
+// level's: Suffering.rfl 0x100b6310 maps a material handle to its GMP and, when there is none
+// (or word 0 names a Material Type: 15 Advanced Materials; the engine warns and refuses it),
+// returns Level Properties p17 [verified]. Every retail level names 2:7 there, which has no
+// Material Type (p0 empty, p2 hardness 0.5, p4 0), so footsteps and impacts take the lists'
+// untyped entry. The floor layers' hidden cells (flag 0x30: their texture did not resolve, the
+// cell's texture index is -1) give the null texture handle (SUFFERING.EXE 0x49f790, the layer
+// interface's +0x10 that the footstep code 0x100b0c10 asks for the texture under the feet), so
+// they take the level default too [strong: the handle lookup of -1 is not traced].
 
 import type { EntityPackageSet, PropValue } from '../../formats/entities';
 import { classByHash, decodeTemplateProps, readObjectTemplate } from '../../formats/entities';
@@ -87,28 +97,45 @@ export class Surfaces {
 
   /** Material template "pkg:id" -> Material Type "pkg:id" (word 0 -> Game Material Properties p0). */
   typeOfMaterial(key: string | undefined): string | null {
-    if (!key) return null;
+    if (!key) return this.defaultType;
     let t = this.typeByMaterial.get(key);
     if (t !== undefined) return t;
     t = null;
     const [pkg, id] = key.split(':').map(Number);
     const m = this.template({ pkg, id });
     const gmp = m && isRef(m.values[0]) ? this.template(m.values[0] as ResRef) : undefined;
-    if (gmp?.cls === 'Game Material Properties' && isRef(gmp.values[0])) t = refKey(gmp.values[0] as ResRef);
-    else if (gmp?.cls === 'Material Type') t = refKey(gmp.ref);
+    if (gmp?.cls === 'Game Material Properties') {
+      if (isRef(gmp.values[0])) t = refKey(gmp.values[0] as ResRef);
+    } else t = this.defaultType;
     this.typeByMaterial.set(key, t);
     return t;
   }
 
-  /** Material template "pkg:id" -> its Game Material Properties "pkg:id" (word 0), or null. */
+  /** The level's Game Material Properties (Level Properties p17) and its Material Type. */
+  private defaultGmp: string | null = null;
+  private defaultType: string | null = null;
+
+  /**
+   * Level Properties p17: what a surface without Game Material Properties gets (0x100b6310's
+   * fallback). Set before the first lookup (the caches keep what they computed).
+   */
+  setLevelDefault(gmp: ResRef | null | undefined) {
+    const t = gmp ? this.template(gmp) : undefined;
+    this.defaultGmp = t?.cls === 'Game Material Properties' ? refKey(gmp!) : null;
+    this.defaultType = t?.cls === 'Game Material Properties' && isRef(t.values[0]) ? refKey(t.values[0] as ResRef) : null;
+    this.typeByMaterial.clear();
+    this.gmpByMaterial.clear();
+  }
+
+  /** Material template "pkg:id" -> its Game Material Properties "pkg:id" (word 0), else the level's. */
   gmpOfMaterial(key: string | undefined): string | null {
-    if (!key) return null;
+    if (!key) return this.defaultGmp;
     let g = this.gmpByMaterial.get(key);
     if (g !== undefined) return g;
     const [pkg, id] = key.split(':').map(Number);
     const m = Number.isFinite(pkg) && Number.isFinite(id) ? this.template({ pkg, id }) : undefined;
     const w0 = m && isRef(m.values[0]) ? this.template(m.values[0] as ResRef) : undefined;
-    g = w0?.cls === 'Game Material Properties' ? refKey(w0.ref) : null;
+    g = w0?.cls === 'Game Material Properties' ? refKey(w0.ref) : this.defaultGmp;
     this.gmpByMaterial.set(key, g);
     return g;
   }
@@ -170,7 +197,9 @@ export class Surfaces {
         if (t) return { type: t, material: `splat:${part.splat[k].texture}`, gmp: this.gmpOfMaterial(this.materialByLandTexture.get(part.splat[k].texture)) };
       }
     }
-    return { type: null, material: part.material?.key, gmp: this.gmpOfMaterial(part.material?.key) };
+    // No material and no splat (a floor layer's hidden cells, collision only): the null handle,
+    // so the level's Game Material Properties (setLevelDefault).
+    return { type: part.material?.key ? this.typeOfMaterial(part.material.key) : this.defaultType, material: part.material?.key, gmp: this.gmpOfMaterial(part.material?.key) };
   }
 
   /**

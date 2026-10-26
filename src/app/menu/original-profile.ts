@@ -4,8 +4,15 @@
 // the port does not use are kept from the imported file (localStorage, ORIGINAL_KEY) so an
 // export gives the player's own file back with the options changed; without one the export
 // carries the RFL's default key table read from the user's Suffering.rfl.
+//
+// One binding travels both ways: the Flare key (action 0x427, retail T). An import puts the
+// file's keyboard / mouse inputs for it on the port's Flare row; an export writes the port's
+// Flare row into the file's records. The other actions keep the port's own key set (its WASD
+// layout differs from the original's on purpose: src/game/hud/bindings.ts).
 
-import { defaultOriginalSettings, originalSettingsToPort, portSettingsToOriginal, readDefaultBindings, RFL_DEFAULT_BINDINGS, writeOriginalSettings, type OriginalSettings, type PortSettingsFromOriginal } from '../../formats/save-original';
+import { bindingInputs, defaultOriginalSettings, originalSettingsToPort, portSettingsToOriginal, readDefaultBindings, RFL_DEFAULT_BINDINGS, withBindingInputs, writeOriginalSettings, type KeyBinding, type OriginalSettings, type PortSettingsFromOriginal } from '../../formats/save-original';
+import { input, type ActionId } from '../../game/hud/bindings';
+import { RETAIL_PC_KEYS } from '../player-rules';
 import { peOffset, readPe } from '../../formats/pe';
 import type { GameFS } from '../gamefs';
 import type { ArchivesSpec } from './model';
@@ -32,6 +39,32 @@ export function archiveBits(archives: ArchivesSpec | undefined, unlocked: Iterab
   return out;
 }
 
+/** The actions whose binding an Unspeakable.cfg carries (port action, original action id). */
+export const CARRIED_BINDINGS: readonly [ActionId, number][] = [['flare', RETAIL_PC_KEYS.flare.id]];
+
+/** The port's two key / mouse slots for each carried action, from the file's records. */
+export function importedBindings(bindings: readonly KeyBinding[]): Partial<Record<ActionId, [string, string]>> {
+  const out: Partial<Record<ActionId, [string, string]>> = {};
+  for (const [a, id] of CARRIED_BINDINGS) {
+    const codes = bindingInputs(bindings, id);
+    if (codes.length) out[a] = [codes[0], codes[1] ?? ''];
+  }
+  return out;
+}
+
+/** The file's records with each carried action's records replaced by the port's slots. */
+export function exportedBindings(bindings: readonly KeyBinding[], keys: Partial<Record<ActionId, readonly [string, string]>>): KeyBinding[] {
+  let out = bindings.map((b) => ({ ...b }));
+  // No table to write into (no imported file, no readable Suffering.rfl): left empty, as the
+  // original then falls back to its defaults; a file holding only these would unbind the rest.
+  if (!out.length) return out;
+  for (const [a, id] of CARRIED_BINDINGS) {
+    const k = keys[a];
+    if (k) out = withBindingInputs(out, id, k.filter((c) => !!c));
+  }
+  return out;
+}
+
 /** Imported profile -> the port's settings (in place) and the player profile. Returns what changed. */
 export function applyOriginalProfile(s: OriginalSettings, settings: Settings, archives: ArchivesSpec | undefined): { pages: number; finished: boolean } {
   const p = originalSettingsToPort(s);
@@ -47,6 +80,13 @@ export function applyOriginalProfile(s: OriginalSettings, settings: Settings, ar
   settings.extra.helpText = p.extra.helpText ? 0 : 1;
   settings.extra.environmentFx = p.extra.environmentFx;
   settings.extra.padVibration = p.extra.vibration;
+  // The carried bindings (the Flare key) onto the port's rows.
+  const keys = importedBindings(s.bindings);
+  for (const [a, k] of Object.entries(keys) as [ActionId, [string, string]][]) {
+    input.set(a, 0, k[0]);
+    input.set(a, 1, k[1]);
+  }
+  if (Object.keys(keys).length) input.save();
   const fresh = profile.unlockPages(archiveRefs(archives, p.archivePages));
   if (p.gameFinished) profile.setGameFinished();
   try {
@@ -102,5 +142,6 @@ export async function buildOriginalProfile(settings: Settings, archives: Archive
   const stored = storedOriginal();
   const base = stored ?? { ...defaultOriginalSettings(), bindings: await rflBindings(fs) };
   const s = portSettingsToOriginal(portSide(settings, archives), base);
+  s.bindings = exportedBindings(s.bindings, input.current.keys);
   return { bytes: writeOriginalSettings(s), base: stored ? 'imported' : 'defaults', bindings: s.bindings.length };
 }

@@ -80,6 +80,12 @@ const toSrgb = (c: N): N => (linearToSrgbTsl as N)(c);
 const toLinear = (c: N): N => (srgbToLinearTsl as N)(c);
 
 /** `?lighting=legacy`: previous renderer look (for before/after comparisons). */
+/**
+ * Layer of meshes drawn by a merged draw instead of on their own (actors/decor-batch.ts): no view
+ * camera has it; the projected-shadow silhouette cameras do (renderShadows draws the casters).
+ */
+export const BATCHED_LAYER = 29;
+
 export const LEGACY_LIGHTING = typeof location !== 'undefined' && /(?:^|[?&])lighting=legacy(?:&|$)/.test(location.search);
 
 /**
@@ -257,10 +263,28 @@ const objectAmbient: N = uniform(new THREE.Vector3()).onObjectUpdate(({ object }
 /** Bit i set: uploaded directional light i applies to the object (objectLightSet). */
 const objectDirs: N = uniform(0).onObjectUpdate(({ object }) => setOf(object)?.dirs);
 
+/**
+ * The light-set inputs of a light-set graph: the drawn object's own uniforms (objectLightSet,
+ * above), or per-vertex lookups of a merged draw of several objects, each with its own set
+ * (actors/decor-batch.ts: the swaying trees of 9). `key` tells the graphs apart.
+ */
+export interface ObjectSetNodes {
+  key: string;
+  /** vec4: slots of the chosen point lights (-1 = none). */
+  points: N;
+  /** float: the fifth point light's slot. */
+  point5: N;
+  /** vec3: the object's ambient. */
+  ambient: N;
+  /** float: bit i = uploaded directional light i applies. */
+  dirs: N;
+}
+
 /** Σ of the object's chosen point lights (no per-vertex cut-off: the engine lights the whole object). */
-function chosenPointLights(P: N, Nrm: N): N {
+function chosenPointLights(P: N, Nrm: N, set?: ObjectSetNodes): N {
   let acc: N = vec3(0);
-  for (const slot of [objectPoints.x, objectPoints.y, objectPoints.z, objectPoints.w, objectPoint5]) {
+  const pts = set ? set.points : objectPoints;
+  for (const slot of [pts.x, pts.y, pts.z, pts.w, set ? set.point5 : objectPoint5]) {
     acc = acc.add(pointLight(P, Nrm, int(slot.max(0)), false).mul(step(0, slot)));
   }
   return acc;
@@ -288,6 +312,13 @@ const spotLights = Fn(([P, Nrm]: N[]) => {
 
 /** Ambient of the object (objectLightSet) + its directional lights: dynamic objects with a light set. */
 const objectBase = Fn(([P, Nrm]: N[]) => vec3(objectAmbient).add(directionalLights(P, Nrm, 'object')));
+/** objectBase of a merged draw's per-vertex light sets (ObjectSetNodes), one Fn per set. */
+const objectBases = new Map<string, N>();
+const objectBaseOf = (set: ObjectSetNodes): N => {
+  let f = objectBases.get(set.key);
+  if (!f) objectBases.set(set.key, (f = Fn(([P, Nrm]: N[]) => vec3(set.ambient).add(directionalLights(P, Nrm, 'object', set.dirs)))));
+  return f;
+};
 
 const insideBox = (P: N, lo: N, hi: N): N => step(lo.x, P.x).mul(step(P.x, hi.x)).mul(step(lo.y, P.y)).mul(step(P.y, hi.y)).mul(step(lo.z, P.z)).mul(step(P.z, hi.z));
 
@@ -319,11 +350,11 @@ const dynamicBase = Fn(([P, Nrm]: N[]) => {
  * - 'object': the object's own choice (objectLightSet, made on its bounds).
  */
 // (A plain builder, called inside the Fn bodies below, so `mode` stays a JS choice.)
-function directionalLights(P: N, Nrm: N, mode: 'vertex' | 'baked' | 'object'): N {
+function directionalLights(P: N, Nrm: N, mode: 'vertex' | 'baked' | 'object', dirs: N = objectDirs): N {
   const acc = vec3(0).toVar();
   const cut = float(0).toVar();
   const rimDone = float(0).toVar();
-  const bits = mode === 'object' ? float(objectDirs).toVar() : null;
+  const bits = mode === 'object' ? float(dirs).toVar() : null;
   Loop(u.dirs, ({ i }: { i: N }) => {
     const a = el(D_A, i);
     const contrib = el(D_B, i).xyz.mul(Nrm.dot(a.xyz).max(0));
@@ -521,8 +552,9 @@ export function engineLightFactor(opts: EngineLightOptions): N {
       // and the mesh draws no pixels (docs/re/renderer.md §1.11).
       const P = positionWorld.toVar();
       const Nrm = normalWorld.toVar();
-      const base = opts.precomputed ? bakedBase(P, Nrm) : set ? objectBase(P, Nrm) : dynamicBase(P, Nrm);
-      const points = set ? chosenPointLights(P, Nrm) : pointLights(P, Nrm, opts.precomputed ? u.bakedPoints : u.points);
+      const os = set ? opts.objectSet : undefined;
+      const base = opts.precomputed ? bakedBase(P, Nrm) : set ? (os ? objectBaseOf(os)(P, Nrm) : objectBase(P, Nrm)) : dynamicBase(P, Nrm);
+      const points = set ? chosenPointLights(P, Nrm, os) : pointLights(P, Nrm, opts.precomputed ? u.bakedPoints : u.points);
       return base.add(points).add(spotLights(P, Nrm));
     })(),
     'v_engineLight',
@@ -541,6 +573,8 @@ export function engineLightFactor(opts: EngineLightOptions): N {
 export interface EngineLightOptions {
   precomputed: boolean;
   lightSet?: boolean;
+  /** With `lightSet`: the set's inputs when they are not the drawn object's uniforms. */
+  objectSet?: ObjectSetNodes;
   /** Enhanced mode only: per-surface nodes from generated maps (enhancedShading.surface). */
   surface?: unknown;
 }
@@ -608,7 +642,7 @@ export function engineLightMaterial<M extends THREE.NodeMaterial>(m: M, opts: En
   // the texture enhancement, neutral stand-ins where it has none): still one graph per layout.
   const maps = enhancedShading.surface && opts.enhancedMaps && (opts.enhancedMaps.normal || opts.enhancedMaps.roughness || opts.enhancedMaps.specular) ? opts.enhancedMaps : undefined;
   const surf = maps && (maps.roughness ?? maps.specular);
-  const key = `${opts.precomputed ? 1 : 0}${opts.lightSet ? 1 : 0}${maps ? `|m${maps.normal ? 'n' : ''}${surf ? 's' : ''}` : ''}`;
+  const key = `${opts.precomputed ? 1 : 0}${opts.lightSet ? 1 : 0}${maps ? `|m${maps.normal ? 'n' : ''}${surf ? 's' : ''}` : ''}${opts.lightSet && opts.objectSet ? `|o${opts.objectSet.key}` : ''}`;
   let node = sharedEngineColor.get(key);
   if (!node) {
     let o: EngineLightOptions = opts;
@@ -825,7 +859,12 @@ class EngineLightRig {
     }
     return s;
   }
-  private readonly shadowCams = Array.from({ length: MAX_SHADOWS }, () => new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 10));
+  // (They also see BATCHED_LAYER: a merged decoration's members cast their own silhouettes.)
+  private readonly shadowCams = Array.from({ length: MAX_SHADOWS }, () => {
+    const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 10);
+    cam.layers.enable(BATCHED_LAYER);
+    return cam;
+  });
   /**
    * Compile the silhouette pass of these characters (hidden or not) into a shadow target ahead
    * of play (the fx system calls it from the level's pipeline precompile, src/app/prewarm.ts):
@@ -867,6 +906,10 @@ class EngineLightRig {
   private readonly shadowScratch ={ list: [] as { c: ShadowCaster; d: number; dir: THREE.Vector3; fade: number }[], swapped: [] as [THREE.Mesh, THREE.Material | THREE.Material[]][], hidden: [] as THREE.Object3D[] };
   /** Frame counter (update()): per-object light sets are chosen once per frame. */
   private frame = 0;
+  /** This frame's number (update()): a light set read at the same number is still current. */
+  get frameId(): number {
+    return this.frame;
+  }
   /** Ambient Light boxes, smallest first (setAmbient). */
   private ambientBoxes: AmbientBox[] = [];
   private readonly sets = new WeakMap<THREE.Object3D, ObjectLightSet>();

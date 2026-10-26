@@ -38,6 +38,8 @@ export interface NpcMeleeWeapon {
   /** p68 (flat damage) and p70 (damage type). */
   damage: number;
   type: number;
+  /** p69: impact force, x the Attack's p7 (0x100caa61..0x100caa89; what hit reactions read). */
+  force?: number;
 }
 
 const shapes = new Map<string, NpcMeleeWeapon | null>();
@@ -60,7 +62,7 @@ export function readMeleeWeapons(pkgs: PackageSet, values: readonly PropValue[])
       const shape = mdu && t?.modelRef ? weaponShape(readModelSphereNodes(mdu, t.modelRef.id)) : undefined;
       if (t && c?.name === 'Melee Weapon' && shape) {
         const v = decodeTemplateProps(c, t);
-        w = { bone: -1, shape, damage: typeof v[68] === 'number' ? v[68] : 0, type: typeof v[70] === 'number' ? v[70] : 0 };
+        w = { bone: -1, shape, damage: typeof v[68] === 'number' ? v[68] : 0, type: typeof v[70] === 'number' ? v[70] : 0, force: typeof v[69] === 'number' ? v[69] : 0 };
       }
       shapes.set(key, w);
     }

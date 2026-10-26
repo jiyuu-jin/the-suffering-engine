@@ -59,6 +59,8 @@ export interface DamageEvent {
   force?: number;
   minForce?: number;
   bone?: number;
+  /** The Special Hit Reaction the damage carries (Radius Damage p4: 2:736 for explosions). */
+  special?: { pkg: number; id: number };
 }
 
 /** Damage at distance `d` of a radius event: Radius Damage falloff (inner / min) or linear. */
@@ -131,7 +133,13 @@ interface ActorsLike {
   damage(actor: ActorLike, amount: number, from?: { x: number; y: number; z: number }, by?: unknown, hit?: { point?: { x: number; y: number; z: number }; type?: number; force?: number; bone?: number }): boolean;
 }
 
-export function createDamageService(props: DamageablePropSet, actors: () => ActorsLike | undefined): DamageService {
+/** The player for blasts: feet position and the damage entry (services.combat.damagePlayer). */
+export interface DamagePlayerLike {
+  position: { x: number; y: number; z: number };
+  hit(amount: number, info: { kind: number; force?: number; special?: { pkg: number; id: number }; from: { x: number; y: number; z: number } }): void;
+}
+
+export function createDamageService(props: DamageablePropSet, actors: () => ActorsLike | undefined, player?: () => DamagePlayerLike | null | undefined): DamageService {
   const fromOf = (e: DamageEvent) => {
     const s = e.source as { x?: number; y?: number; z?: number } | undefined;
     if (s && typeof s === 'object' && typeof s.x === 'number') return s as { x: number; y: number; z: number };
@@ -171,6 +179,15 @@ export function createDamageService(props: DamageablePropSet, actors: () => Acto
           // A blast of no damage at that distance still pushes (a hit reaction by its force).
           const force = splashForce(e, d);
           if (amount > 0 || (force !== undefined && force > 0 && d < (e.radius ?? 0))) hitActor(a, Math.max(0, amount), force);
+        }
+        // The player in the blast, as every object in it [strong: Radius Damage reaches every
+        // object; the thrower's own blast is the weapons system's p7 self-damage, source 'player'].
+        const pl = e.source !== 'player' ? player?.() : undefined;
+        if (pl) {
+          const d = Math.hypot(pl.position.x - e.point.x, pl.position.y + 0.9 - e.point.y, pl.position.z - e.point.z);
+          const amount = splashAmount(e, d);
+          const force = splashForce(e, d);
+          if (amount > 0 || (force !== undefined && force > 0 && d < (e.radius ?? 0))) pl.hit(Math.max(0, amount), { kind: type, force, special: e.special, from: e.point });
         }
         return { hits };
       }

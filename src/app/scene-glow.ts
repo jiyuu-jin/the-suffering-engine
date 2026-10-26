@@ -107,6 +107,8 @@ export class SceneGlow {
   private readonly presentMat = new THREE.NodeMaterial();
   private readonly frameTex: N;
   private readonly glowColor = uniform(new THREE.Vector3(1, 1, 1));
+  /** 1: no mask test (glow flag p3 / state +0xc set: the whole frame glows). */
+  private readonly noMask = uniform(0);
   private readonly size = new THREE.Vector2();
   private readonly meshes: THREE.Mesh[] = [];
   private readonly saved: (THREE.Material | THREE.Material[])[] = [];
@@ -147,7 +149,7 @@ export class SceneGlow {
           let sum: N = null;
           for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
             const t: N = src.sample(p.add(d.mul(vec2(sx, sy))));
-            const c: N = t.rgb.mul(t.a.greaterThan(GLOW_MASK_REF).select(1, 0));
+            const c: N = t.rgb.mul(t.a.greaterThan(GLOW_MASK_REF).or(this.noMask.greaterThan(0)).select(1, 0));
             sum = sum ? sum.add(c) : c;
           }
           return vec4(sum.mul(0.25 * GLOW_DOWNSAMPLE).clamp(0, 1), 1);
@@ -233,17 +235,23 @@ export class SceneGlow {
    * mesh is drawn this frame.
    */
   apply(target: THREE.RenderTarget) {
-    if (!this.collect(false)) return;
+    // The state's flag (+0xc: an HDR Scene Glow p3, or the Game Cheats toggle through engine slot
+    // +0x24, 0x48cde0) drops the level-0 alpha test (0x48d232..0x48d2e9): every frame texel enters.
+    const all = !!this.state.flag;
+    this.noMask.value = all ? 1 : 0;
+    if (!this.collect(false) && !all) return;
     const r = this.r;
     const prev = r.getRenderTarget();
     const autoClear = r.autoClear;
     try {
       r.autoClear = false;
       r.setRenderTarget(target);
-      // 1. the mask in the frame's alpha.
-      this.quad.material = this.clearAlphaMat;
-      this.quad.render(r);
-      this.drawMarks();
+      // 1. the mask in the frame's alpha (not read with the flag set).
+      if (!all) {
+        this.quad.material = this.clearAlphaMat;
+        this.quad.render(r);
+        this.drawMarks();
+      }
       // 2. the levels.
       const src = this.frameTex;
       const saved = src.value;

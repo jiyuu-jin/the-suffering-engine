@@ -231,6 +231,12 @@ export class EffectDirector {
    * applies it to the effects and music buses (dialogue stays audible in the visions) [inferred].
    */
   audioLevel = 1;
+  /**
+   * The clock while no Time Scale runs: 1, or what Game Cheats 20 / 21 set (1.3 / 0.7, the
+   * engine clock setter [0x1017bf40] vt+0x44). A Time Scale sets the same clock while it runs and
+   * ends "back to 1", so a run (or the morph, 1 / p272 then 1: system.ts) puts it back to 1.
+   */
+  baseRate = 1;
 
   constructor(
     readonly fx: ScreenEffects,
@@ -247,10 +253,15 @@ export class EffectDirector {
       if (f.done) this.faders.delete(f);
     }
     let rate = 1;
+    let running = false;
     for (const c of this.clocks) {
       c.update(realDt);
-      if (c.active) rate = Math.min(rate, c.current);
+      if (!c.active) continue;
+      rate = Math.min(rate, c.current);
+      running = true;
     }
+    if (running) this.baseRate = 1;
+    else rate = this.baseRate;
     this.setClock(rate);
 
     // One blur state in the engine (the last update of the frame wins); here: the strongest.

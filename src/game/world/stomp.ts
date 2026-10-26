@@ -505,8 +505,18 @@ export interface StompObserver {
 }
 
 /**
- * Plays one sequence: delivers keys of all tracks in time order (messages, visibility,
- * animation, sound, attach, control) and poses every transform track each frame.
+ * Order of keys at the same time: the engine sorts a sequence's keys by time, then by a per-tag
+ * rank (qsort comparator SUFFERING.EXE 0x44dbf0, table 0x5b9c70: control 1, transform 2,
+ * animation 3, sound / attach / visibility / message 5, camera 9; lower first) [verified]. So a
+ * take at 0 s comes before a hide at 0 s: 5b's Killjoys 13e3 ("Camera" 1296) and 13db (2942)
+ * are taken (shown, stompTakeShows) and then hidden until their show keys.
+ */
+const KEY_RANK: Record<StompEvent['kind'], number> = { control: 1, anim: 3, sound: 5, attach: 5, visibility: 5, message: 5 };
+
+/**
+ * Plays one sequence: delivers keys of all tracks in time order (at one time: control, then
+ * animation, then messages, visibility, sound and attach; KEY_RANK) and poses every transform
+ * track each frame.
  */
 export class StompRun {
   /** Sequence time (s). */
@@ -536,8 +546,8 @@ export class StompRun {
       for (const key of track.attaches) add(key.time, { kind: 'attach', key });
       for (const key of track.controls) add(key.time, { kind: 'control', key });
     }
-    // Stable: equal times keep track / tag order.
-    this.events.sort((a, b) => a.time - b.time);
+    // Equal times: the engine's tag rank (KEY_RANK), then track / tag order (stable sort).
+    this.events.sort((a, b) => a.time - b.time || KEY_RANK[a.ev.kind] - KEY_RANK[b.ev.kind]);
   }
 
   get cinematic() {

@@ -495,15 +495,14 @@
       return `${r}; waited held for ${heldFrames} frames; taken while held: ${takenHeld}`;
     },
     /**
-     * Thrown objects in the air: the player's flare (thrown with the Throw action) and an NPC's
+     * Thrown objects in the air: the player's flare (thrown with the Flare action) and an NPC's
      * Molotov (services.weapons.throwObject, as an NPC throw: actors/throw.ts).
      */
     async thrown() {
       W().give('4:455', 2);
       W().give('4:249', 2);
-      W().selectThrowable('4:455');
       const n0 = window.__weapons.thrown.length;
-      W().throw();
+      W().throwFlare();
       await until(() => window.__weapons.thrown.length > n0, 4000);
       const d = W().def('4:249');
       const by = actorsNear(40, (a) => a.alive)[0];

@@ -497,6 +497,67 @@ export function readDefaultBindings(rfl: Uint8Array, offset: number, max = 512):
   return out;
 }
 
+/**
+ * DirectInput scan codes (DIK_*, keyboard records, device 0) as browser KeyboardEvent.code. The
+ * game reads the keyboard through DirectInput, so the codes are key positions, not characters.
+ */
+export const DIK_CODES: Readonly<Record<number, string>> = (() => {
+  const m: Record<number, string> = {
+    0x01: 'Escape', 0x0c: 'Minus', 0x0d: 'Equal', 0x0e: 'Backspace', 0x0f: 'Tab', 0x1a: 'BracketLeft', 0x1b: 'BracketRight',
+    0x1c: 'Enter', 0x1d: 'ControlLeft', 0x27: 'Semicolon', 0x28: 'Quote', 0x29: 'Backquote', 0x2a: 'ShiftLeft', 0x2b: 'Backslash',
+    0x33: 'Comma', 0x34: 'Period', 0x35: 'Slash', 0x36: 'ShiftRight', 0x37: 'NumpadMultiply', 0x38: 'AltLeft', 0x39: 'Space',
+    0x3a: 'CapsLock', 0x45: 'NumLock', 0x46: 'ScrollLock', 0x47: 'Numpad7', 0x48: 'Numpad8', 0x49: 'Numpad9', 0x4a: 'NumpadSubtract',
+    0x4b: 'Numpad4', 0x4c: 'Numpad5', 0x4d: 'Numpad6', 0x4e: 'NumpadAdd', 0x4f: 'Numpad1', 0x50: 'Numpad2', 0x51: 'Numpad3',
+    0x52: 'Numpad0', 0x53: 'NumpadDecimal', 0x56: 'IntlBackslash', 0x57: 'F11', 0x58: 'F12', 0x9c: 'NumpadEnter', 0x9d: 'ControlRight',
+    0xb5: 'NumpadDivide', 0xb7: 'PrintScreen', 0xb8: 'AltRight', 0xc5: 'Pause', 0xc7: 'Home', 0xc8: 'ArrowUp', 0xc9: 'PageUp',
+    0xcb: 'ArrowLeft', 0xcd: 'ArrowRight', 0xcf: 'End', 0xd0: 'ArrowDown', 0xd1: 'PageDown', 0xd2: 'Insert', 0xd3: 'Delete',
+    0xdb: 'MetaLeft', 0xdc: 'MetaRight', 0xdd: 'ContextMenu',
+  };
+  '1234567890'.split('').forEach((c, i) => (m[0x02 + i] = `Digit${c}`));
+  const rows: [number, string][] = [[0x10, 'QWERTYUIOP'], [0x1e, 'ASDFGHJKL'], [0x2c, 'ZXCVBNM']];
+  for (const [at, keys] of rows) keys.split('').forEach((c, i) => (m[at + i] = `Key${c}`));
+  for (let i = 0; i < 10; i++) m[0x3b + i] = `F${i + 1}`;
+  return m;
+})();
+
+/**
+ * Mouse records (device 1): 0 / 1 up / down and 2 / 3 left / right are the axes (no port code),
+ * 4 / 5 the wheel, 6 / 7 / 8 the left / right / middle button, 9 / 10 buttons 4 / 5
+ * (docs/re/player.md §9), as the port's Mouse<button> / Wheel<dir> codes.
+ */
+export const MOUSE_CODES: Readonly<Record<number, string>> = { 4: 'WheelUp', 5: 'WheelDown', 6: 'Mouse0', 7: 'Mouse2', 8: 'Mouse1', 9: 'Mouse3', 10: 'Mouse4' };
+
+/** One binding record as a port input code ('' when the port has none: mouse axes, pads...). */
+export function bindingInput(b: Pick<KeyBinding, 'device' | 'code'>): string {
+  return (b.device === 0 ? DIK_CODES[b.code] : b.device === 1 ? MOUSE_CODES[b.code] : undefined) ?? '';
+}
+
+/** The keyboard / mouse inputs bound to `action`, in record order (mouse axes left out). */
+export function bindingInputs(bindings: readonly KeyBinding[], action: number): string[] {
+  return bindings.filter((b) => b.action === action).map(bindingInput).filter((c) => !!c);
+}
+
+/**
+ * `bindings` with `action`'s keyboard and mouse button / wheel records replaced by `codes` (port
+ * codes; unknown ones are skipped), written where its first such record was (else at the end).
+ * Its axis and other-device records are kept.
+ */
+export function withBindingInputs(bindings: readonly KeyBinding[], action: number, codes: readonly string[]): KeyBinding[] {
+  const toRecord = (c: string): KeyBinding | null => {
+    for (const [dev, table] of [[0, DIK_CODES], [1, MOUSE_CODES]] as const) {
+      for (const [k, v] of Object.entries(table)) if (v === c) return { action, device: dev, code: Number(k), lo: -1, hi: 1 };
+    }
+    return null;
+  };
+  const fresh = codes.map(toRecord).filter((r): r is KeyBinding => !!r);
+  const replaced = (b: KeyBinding) => b.action === action && !!bindingInput(b);
+  const at = bindings.findIndex(replaced);
+  const kept = bindings.filter((b) => !replaced(b)).map((b) => ({ ...b }));
+  const pos = at < 0 ? kept.length : bindings.slice(0, at).filter((b) => !replaced(b)).length;
+  kept.splice(pos, 0, ...fresh);
+  return kept;
+}
+
 // ---------------------------------------------------------------------------
 // <Level>.rsg
 

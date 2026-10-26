@@ -203,12 +203,94 @@ shafts (7:292, 4:1318, 9:5841, 9:5847, 3:4057), 1b's animated 7:1304 and 5b's 7:
 lamp cards (glow-marked), glass shards (untinted) and the Sky / Sun cards (prop cache) are
 untouched. `lightVolumeUniforms` (strength, ramps) can be set from the console for A/B shots.
 
-Evidence (Enhanced Medium, the report's pose in 1b, 2246 × 1274 at Auto 65 %; strength 0 / 1 in
-one session): shaft region mean luma 35.8 → 34.3, frame mean 28.0 → 27.1 (Original 41.0 with the
-glow), grazing inner walls and the near-camera band fade. It does not soften a box's outer
-silhouette, where two walls seen at ordinary angles stop together: that needs the light's path
-length through the volume, e.g. a pass that adds the back faces' depth and subtracts the front
-faces' into a thickness target and scales the sheets by it (next step).
+Evidence of that first step (Enhanced Medium, the report's pose in 1b, 2246 × 1274 at Auto 65 %;
+strength 0 / 1 in one session): shaft region mean luma 35.8 → 34.3, frame mean 28.0 → 27.1
+(Original 41.0 with the glow). It did not soften a box's outer silhouette, where two walls seen
+at ordinary angles stop together; the thickness volumes below do.
+
+**Thickness volumes** (`light-volume.ts` `takeLightShafts` / `fitLightShaft`,
+`light-volume-pass.ts`). The shafts leave the sheet geometry at load (renderer.ts, Enhanced
+only) and their light is integrated along each pixel's ray instead: light through dust is as
+bright as the path the eye's ray takes through the lit air.
+
+- *Which sheets* (each connected component of a light-volume part): v must be linear along one
+  axis (R² ≥ 0.95, the axis = v's gradient: the textures fade along v), the walls must run along
+  it (area-weighted |n·axis| ≤ 0.35) and enclose it (10 of 12 sectors around it), at least 8
+  triangles, 0.75 m long, the wide end's section at least 0.25 m and not a slab (narrow side ≥
+  0.2 × wide). In the retail levels that is 1b's arena shaft (four boxes, 9:5841), 4b's six
+  beams (23:920, 7:584) and the lighthouse's three nested cones in 9 (3:4057). Everything else
+  stays a sheet with the fade above (floor pools, flat cards, flame domes, 1b's ceiling sheet
+  9:5847, the animated 7:1304 / 7:1308); `tests/light-volume.test.ts`.
+- *Shape*: a frustum along the axis, its section's centre and half extents fitted at both ends
+  (1b: 2.31 m at the top, 1.92 m at the floor: the walls lean out), a superellipse section
+  (exponent 2.5 for a box, 2 round) whose light fades over its outer 80 % and over 0.25 m at
+  each end.
+- *Light*: per metre, the walls' own light at that height (16 steps of texture × tint, sampled
+  on the walls: 1b's profile is 0 at the top, full at the floor), times a slowly drifting dust
+  noise (±35 %, one fetch per segment) and the sheets' fog to black. Its gain is the brightness
+  budget: over 700 rays (any heading, within 35° of level, through the bounding sphere) the
+  volume adds what the decoded walls add (Σ of each crossed wall's linear light, as Original
+  draws them, without the |N·V| fade); a CPU ray cast at load.
+- *Per pixel*: the ray is clipped to each volume's box and to the scene's depth (a body standing
+  in the shaft hides the light behind it, not in front of it) and summed in 8 stratified steps
+  (jittered with TRAA). Up to 8 volumes, the nearest in view; dynamic volumes (projector beams)
+  share the slots.
+- *Cost*: a pass of its own at half the render scale (`LightVolumeNode`), skipped in frames with
+  no volume in view. High at 55 %: 0.28 ms in the 1b arena (796 × 539, four shafts), 0.30 ms at
+  40 %; none in 1a (no shafts). The first version, inline at full resolution in the chain, cost
+  1.3-1.7 ms at Medium.
+- `?lightvol=sheet` keeps the faded sheets (the previous look, for A/B frames);
+  `lightVolumePass.gain` / `dust` and each shape's `soft` / `exponent` can be set from the
+  console.
+
+Evidence (headless Brave, the report's pose (475, 73.7, 478), yaw 1.95, `--window 1728,1117,2`,
+Enhanced Medium at 75 %, frames frozen, the shaft toggled in one session): the faded sheets add
++2.6 display luma to the frame, the volumes +3.5 (the sheets' |N·V| fade took a quarter of the
+walls' light; the volumes carry the whole budget). The volumes' light gathers over the grate and
+thins out to nothing at the shaft's sides and top; no wall edge, pane or edge-on line remains.
+Original (frame mean 34.3, the blown-out grate) is unchanged: the arena's grate region differs by
+0.01-0.03 luma between the trees, the rest by the lamps' flicker and animation as much as
+between two runs of one tree.
+
+### Projector beams (`projector-beam.ts`)
+
+Killjoy's beams are five additive cones of thin rays (Killjoy model 10:90 submesh 0, texture
+10:256 × 0x2d2d2d), fans from a lens to his outline; Original draws exactly that
+(docs/game-logic.md §15.7.8). The reference the user gave (the original's 1b close-up) reads as
+one soft fan. Enhanced keeps the rays at half their light for the film's streaks and adds, per
+standing beam, a light volume (the pass above): a soft elliptical cone from the lens to the
+skinned outline its rays end on (up to 24 of its vertices, fitted each frame), its light per
+section the same along it (`focus` 1), its sides fading over 55 %, warm white
+(1, 0.9, 0.74) × his opacity, so it flickers with the Projector Effect's p4. Beams from one lens
+(1b: all five p10 entries are one projector) are one volume fitted to all their rays (light ×
+√n): one fifth of the cost. Within 2.5 m of the eye a beam adds nothing and its light saturates
+towards 0.08 (`near`, `cap`): in 5b's theatre the camera stands inside the five big beams and the
+haze washed the frame out before. A few dust motes (22 per beam, 1.2 cm) drift in each beam and
+catch the light now and then (one instanced sprite draw, pipeline pre-warmed with the level).
+
+Cost: 0.17-0.2 ms (High at 55 %, the 1b close-ups at 70 / 74 s of "Camera" #247), 0.5 ms before
+the beams of one lens were merged. Evidence: 1b "Camera" #247 at 70 and 74 s, 5b's theatre
+("Camera" 1ba4, Projector Effect #1501) at 9 and 16 s, each frozen with the fan on and off.
+
+### Close Hand on Weapon (`game/actors/hand-grip.ts`, not in the original)
+
+A Gameplay option, off by default, labelled as not in the original game; it applies only in
+Enhanced. The third-person idle and walk clips (2:27, 2:30) leave the right hand open about 4 cm
+from the weapon bone 35 (docs/game-logic.md §4.5 "Held weapon grip"; Original keeps that). With
+the option on, while a weapon is held and the body is the view, the finger bones (the hand 34's
+descendants outside bone 35: 36..47) are blended (0.2 s ease) towards their rotations in the
+weapon's armed run (heading set 0's run, Player Weapon Properties p20: the revolver's 2:28),
+after the mixer and the bend hooks (`Character.blendBoneLocal`). On the walk 2:30 the hand's skin
+centre moves from 4.3 cm to 1.6 cm from bone 35 (the run's own 1.6); `tests/hand-grip.test.ts`.
+The menu's Gameplay rows close up evenly (8 value rows) to fit above Accept / Cancel.
+
+### Morph light (both modes)
+
+Player p274 (4:1250 → white Point Light 4:1248, Lighting Effect 4:1246) is now drawn during a
+morph, in Original as in Enhanced, as a point light of the engine light rig's provider list
+(`insanity/morph-light.ts`; docs/game-logic.md §13.10): a uniform entry, so no lit material is
+rebuilt. First morph of a fresh page: Enhanced Medium max frame 33.4 ms with it (33.4 ms
+without), Original 50 ms for one frame (the creature's first appearance).
 
 ### Post stack and horror grade (`post.ts`)
 

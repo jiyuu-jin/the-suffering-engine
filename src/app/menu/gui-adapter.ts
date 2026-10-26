@@ -58,6 +58,7 @@ import {
   type VideoRef,
 } from './model';
 import { CALIBRATE_SCREEN, CONTROLLER_SCREEN, controllerItems, decorateController } from './screens/controller';
+import { CHEATS_BUTTON, CHEATS_SCREEN, cheatsScreen } from './screens/cheats';
 import { RENDER_SCALES } from '../render-scale';
 
 const INTERFACE = 'COMMON/Interface/Interface';
@@ -495,6 +496,40 @@ function fromFrontEnd(fe: FrontEnd, readNode: (r: RefKey) => GuiNode | undefined
             place: { ...p, font: defaultFont, scale: 0.8, hAlign: 'center', vAlign: 'top', margins: undefined, rect: { x: 48, y: (92 * 480) / 100, w: 544, h: 36 } },
           },
         });
+        // Enhanced option (not in the original; game/actors/hand-grip.ts), 8 % further down.
+        const dy3 = dy2 + (8 * 480) / 100;
+        const shift3 = <T extends { rect: { y: number } }>(q: T): T => ({ ...q, rect: { ...q.rect, y: q.rect.y + dy3 } });
+        rows.push({
+          type: 'choice',
+          label: { text: CLOSE_HAND_LABEL },
+          setting: CLOSE_HAND_SETTING,
+          place: shift3(p),
+          choices: [
+            { label: { text: 'Off' }, value: false, place: ref.choices[0] ? shift3(placed(ref.choices[0], titleFont)) : undefined },
+            { label: { text: 'On' }, value: true, place: ref.choices[1] ? shift3(placed(ref.choices[1], titleFont)) : undefined },
+          ],
+          help: {
+            label: { text: CLOSE_HAND_HELP },
+            place: { ...p, font: defaultFont, scale: 0.8, hAlign: 'center', vAlign: 'top', margins: undefined, rect: { x: 48, y: (92 * 480) / 100, w: 544, h: 36 } },
+          },
+        });
+        // Eight value rows do not fit the game's 8 % spacing above Accept / Cancel: they keep their
+        // first row's place and close up evenly until the last one ends above the buttons (as the
+        // Graphics page's rows do).
+        const values = rows.filter((r) => (r.type === 'choice' || r.type === 'slider') && r.place);
+        const accept = page.accept ? placed(page.accept, titleFont).rect.y : undefined;
+        const last = values[values.length - 1]?.place?.rect;
+        if (accept !== undefined && last && last.y + last.h > accept && values.length > 1) {
+          const y0 = values[0].place!.rect.y;
+          const step = (accept - last.h - y0) / (values.length - 1);
+          const move = <T extends { rect: Rect }>(q: T | undefined, d: number): T | undefined => (q ? { ...q, rect: { ...q.rect, y: q.rect.y + d } } : q);
+          values.forEach((r, k) => {
+            const d = y0 + k * step - r.place!.rect.y;
+            r.place = move(r.place, d);
+            if (r.type === 'choice') r.choices = r.choices.map((c) => ({ ...c, place: move(c.place, d) }));
+            if (r.type === 'slider') r.meter = move(r.meter, d);
+          });
+        }
       }
     }
     const message: Label | undefined = undefined;
@@ -623,6 +658,18 @@ function fromFrontEnd(fe: FrontEnd, readNode: (r: RefKey) => GuiNode | undefined
     screens.pause = PROVISIONAL_MODEL.screens.pause;
     screens.confirmQuitGame = PROVISIONAL_MODEL.screens.confirmQuitGame;
   }
+  // Port page (not in the original): "Cheats (port)" below the pause menu's last item, one row
+  // further down (screens/cheats.ts; the flow fills it from the running level).
+  {
+    const sc = screens.pause;
+    const placedItems = sc.items.filter((it) => it.place);
+    const last = placedItems[placedItems.length - 1]?.place;
+    const prev = placedItems[placedItems.length - 2]?.place;
+    const step = last && prev ? Math.max(18, Math.min(48, last.rect.y - prev.rect.y)) : 0;
+    sc.items.push({ type: 'button', label: { text: CHEATS_BUTTON }, action: { kind: 'openCheats' }, ...(last ? { place: { ...last, rect: { ...last.rect, y: Math.min(440, last.rect.y + step) } } } : {}) });
+    const style: Placed = last ?? { rect: { x: 0, y: 0, w: 100, h: 28 }, font: titleFont, scale: 1, hAlign: 'left', vAlign: 'middle', colors: { normal: '#909090', disabled: '#404040', focused: '#ffffff' } };
+    screens[CHEATS_SCREEN] = cheatsScreen(style, sc.dim);
+  }
 
   // --- Alert boxes -----------------------------------------------------------------
   const alertCache: Record<string, AlertSpec> = {};
@@ -737,6 +784,12 @@ export const IGNORE_PLAYER_SETTING = 'x.ignorePlayer';
 export const IGNORE_PLAYER_LABEL = 'Enemies Ignore Player';
 export const IGNORE_PLAYER_HELP =
   'Port option, not in the original game: enemies never target, grab or hear you. Stray shots, blasts, gas and fire still hurt.';
+
+/** Gameplay pages' Enhanced option row "Close Hand on Weapon" (game/actors/hand-grip.ts). */
+export const CLOSE_HAND_SETTING = 'x.closeHand';
+export const CLOSE_HAND_LABEL = 'Close Hand on Weapon';
+export const CLOSE_HAND_HELP =
+  'Enhanced graphics option, not in the original game: in third person the hand closes on the held weapon (the original idle and walk leave it open).';
 
 const SETTING_ROWS: Record<string, { setting: string; min: number; max: number; step: number } | { setting: string; values: (number | boolean)[] }> = {
   effectsVolume: { setting: 'sfx', min: 0, max: 1, step: 0.1 },

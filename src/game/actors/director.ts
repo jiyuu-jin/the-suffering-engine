@@ -21,6 +21,7 @@
 // every delivered message (services.world.subscribe('*')) and acts on the ones addressed to
 // the classes above, firing their outputs back through services.world.send.
 
+import { SPEECH_PRIORITY } from './speech';
 import type { Entity, PropValue } from '../../formats/entities';
 import { classByHash, decodeTemplateProps, readObjectTemplate, type EntityPackageSet } from '../../formats/entities';
 import { toOutputSpace } from '../../formats/level';
@@ -48,7 +49,7 @@ export interface DirectorHooks {
   playerUid: number;
   damagePlayer(amount: number): void;
   /** Play a dialog sound for a speaker (subtitles + lip-sync); returns its length (s). */
-  speak(keys: string[], speaker: Actor | undefined, at: { x: number; y: number; z: number }): number;
+  speak(keys: string[], speaker: Actor | undefined, at: { x: number; y: number; z: number }, priority?: number): number;
   isDestroyed(uid: number): boolean;
   log(msg: string): void;
   /** A positional sound (one of `keys`); returns its length (s), 0 when none played. */
@@ -667,7 +668,8 @@ export class Director {
     const clipRef = refs(v[17])[0];
     const clip = clipRef ? this.manager.kinds.clipIndex(a.kind, clipRef) : -1;
     const at = { x: a.position.x, y: a.bottom + a.height * 0.9, z: a.position.z };
-    const said = this.hooks.speak([lines[Math.floor(Math.random() * lines.length)]], a, at);
+    // Priority 2 (0x1008d5ec): it cuts a line the NPC is saying (actors/speech.ts).
+    const said = this.hooks.speak([lines[Math.floor(Math.random() * lines.length)]], a, at, SPEECH_PRIORITY.hitAnswer);
     const played = env && clip >= 0 ? a.attackedByPlayer(clip, env) : 0;
     d.warnUntil = this.time + (played ? Math.max(played, said) : 0);
     this.note(`Action Dialog#${d.e.uid.toString(16)}: ${a.ch?.root.name ?? a.uid} warned (hit ${d.rep.count} of ${num(v[18], 3)})`);
@@ -686,7 +688,7 @@ export class Director {
     const out = num(v[30]);
     if (out) for (const u of d.e.links) if (!this.manager.get(u)) this.hooks.send(u, out, d.e.uid);
     const lines = refs(v[20]).map(key);
-    if (lines.length && a.alive) this.hooks.speak([lines[Math.floor(Math.random() * lines.length)]], a, { x: a.position.x, y: (a.bottom ?? a.position.y) + (a.height ?? 1.8) * 0.9, z: a.position.z });
+    if (lines.length && a.alive) this.hooks.speak([lines[Math.floor(Math.random() * lines.length)]], a, { x: a.position.x, y: (a.bottom ?? a.position.y) + (a.height ?? 1.8) * 0.9, z: a.position.z }, SPEECH_PRIORITY.hitAnswer);
     this.note(`Action Dialog#${d.e.uid.toString(16)}: ${a.ch?.root.name ?? a.uid} turns (hit ${d.rep.count}) -> ${out} to ${d.e.links.filter((u) => !this.manager.get(u)).map((u) => u.toString(16)).join(', ')}`);
     if (num(v[23]) === 1) {
       a.barks = undefined;

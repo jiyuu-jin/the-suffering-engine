@@ -150,6 +150,21 @@ export class InsanityModel {
     return i < 5 ? this.attacks[i] : undefined;
   }
 
+  /**
+   * The next insanity attack at once (Game Cheats case 14, Player 0x10042100): only transformed
+   * (state 20) and while index + 1 < 5, it enters state 30 as a threshold reached does. Returns
+   * whether one was acquired.
+   */
+  acquireNext(): boolean {
+    if (this.form !== 'creature') return false;
+    const next = this.nextAttack;
+    if (!next) return false;
+    this.s.attackIndex++;
+    this.s.attackPoints = 0;
+    this.events.acquire?.(next);
+    return true;
+  }
+
   /** Reputation-weighted value: a at p70 (evil, -150), b at p71 (good, +150), clamped. */
   byReputation(a: number, b: number, f: FormParams = this.current): number {
     const [r0, r1] = f.reputationRange;

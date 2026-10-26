@@ -145,6 +145,8 @@ interface ClimbState {
   top: THREE.Vector3;
   y: number;
   exiting?: { from: THREE.Vector3; to: THREE.Vector3; t: number };
+  /** The rung under way (-1 down / +1 up) and its time (s): a started rung always finishes. */
+  rung?: { dir: number; t: number };
 }
 
 export class Interactions {
@@ -764,8 +766,24 @@ export class Interactions {
       return false;
     }
     // W climbs up, S down (looking down the ladder reverses nothing: the original maps forward to up).
-    c.y += input.forward * 2.0 * dt;
-    this.clips.ladderClimb(input.forward, 2.0 * Math.abs(input.forward));
+    // Whole rungs at the rung clip's own root (LadderClimb per frame 0x1011fb90: a new rung only
+    // once the last one ended or from the hold, played at speed 1, its root extracted; 0.5 m in
+    // 0.367 s = 1.36 m/s) [verified]; the port climbed 2 m/s continuously and stopped mid-rung.
+    const rung = this.clips.ladderRung() ?? { height: 0.5, length: 0.367 };
+    const want = Math.abs(input.forward) > 0.2 ? Math.sign(input.forward) : 0;
+    if (!c.rung && want) c.rung = { dir: want, t: 0 };
+    if (c.rung) {
+      const r = c.rung;
+      const step = Math.min(dt, rung.length - r.t);
+      c.y += (r.dir * rung.height * step) / rung.length;
+      r.t += dt;
+      if (r.t >= rung.length) {
+        const left = r.t - rung.length;
+        c.rung = want ? { dir: want, t: left } : undefined;
+        if (c.rung) c.y += (want * rung.height * left) / rung.length;
+      }
+    }
+    this.clips.ladderClimb(c.rung?.dir ?? 0, rung.height / rung.length);
     if (c.y > c.height - 0.9 && input.forward > 0) {
       c.exiting = { from: new THREE.Vector3(c.spot.x, c.base.y + c.y, c.spot.z), to: c.top.clone(), t: 0 };
       this.clips.ladderExit(true);

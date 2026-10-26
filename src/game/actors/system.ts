@@ -43,11 +43,13 @@
 //
 // Debug: window.__actors { manager, director, env, services, ... }.
 
+import { BrushAnimations, playerProxySpheres } from './brush';
+import { SPEECH_PRIORITY, speechAdmits } from './speech';
 import * as THREE from 'three/webgpu';
 import type { GameContext, GameSystem } from '../runtime';
 import { parseEntities, readXduString, type Entity, type EntityPackageSet } from '../../formats/entities';
 import { instanceRotation, toOutputSpace } from '../../formats/level';
-import type { ResRef } from '../../formats/model';
+import type { PackageSet, ResRef } from '../../formats/model';
 import { SoundCategory } from '../../formats/sound';
 import type { RayHit, Vec3Like } from '../../app/physics';
 import { loadSettings } from '../../app/menu/settings';
@@ -79,6 +81,11 @@ import { ANIM_EVENT_MESSAGE, readAnimEvents } from '../../formats/animation';
 import { buildHeldModel } from '../weapons/models';
 import type { ArcHandle, ArcTarget } from '../fx/electric-arc';
 import { gore } from '../fx/gore-bus';
+import { PlayerStates, readPlayerHitTables, type BlowInfo } from './player-states';
+import { readTemplate as readSpecialTemplate } from './specials/runtime';
+import { resistanceForceMultiplier } from '../fx/gas';
+import { loadClip } from './clipmap';
+import type { PropValue } from '../../formats/entities';
 
 export interface ActorsService {
   list(): readonly Actor[];
@@ -215,9 +222,18 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
 
   /** Dialog line: positional voice, jaw, subtitle (when enabled). Returns its length (s). */
   const speakLog: { t: number; key: string; who: string; subtitle?: string }[] = [];
-  const speak = (keys: string[], speaker: Actor | undefined, at: { x: number; y: number; z: number }): number => {
+  const speak = (keys: string[], speaker: Actor | undefined, at: { x: number; y: number; z: number }, priority: number = SPEECH_PRIORITY.line): number => {
     const ok = keys.filter((k) => audio.get(k));
     if (!ok.length) return 0;
+    if (speaker) {
+      // One speech channel (actors/speech.ts, Suffering.rfl 0x1012d190): a dead character says
+      // nothing (0x100e1b40); a line over another is dropped unless its priority is above 1 and
+      // at least the other's, which it then stops.
+      if (!speaker.alive) return 0;
+      const cur = speaker.speech;
+      if (!speechAdmits(!!cur?.playing, speaker.speechPriority, priority)) return 0;
+      if (cur?.playing) cur.stop(0);
+    }
     const k = ok[Math.floor(Math.random() * ok.length)];
     const info = audio.get(k)!;
     const dialog = info.category === SoundCategory.Dialog;
@@ -225,6 +241,7 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
     if (speaker) {
       lipSyncService(ctx)?.speak(h, speaker.uid, speaker.ch);
       speaker.speech = h;
+      speaker.speechPriority = priority;
     }
     const text = info.subtitle ? readXduString(pkgs, info.subtitle) : undefined;
     if (text && loadSettings().subtitles) {
@@ -345,7 +362,7 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
     channelBone: (a, c) => hardpointTable(packages, a.kind.skinned.ref)[c],
     entity: (uid) => byUid.get(uid),
     send: (uid, msg, from) => worldSvc()?.send?.(uid, msg, from),
-    say: (a, line) => speak(line.sounds, a, { x: a.position.x, y: a.bottom + a.height * 0.9, z: a.position.z }),
+    say: (a, line, priority) => speak(line.sounds, a, { x: a.position.x, y: a.bottom + a.height * 0.9, z: a.position.z }, priority),
     weaponMuzzle: (a, r) => {
       // NPC weapons ride the hands (src/game/weapons/npc.ts); fire from the held model.
       const held = (ctx.services.weapons as WeaponsLike | undefined)?.npcWeapons?.(a)?.[0];
@@ -531,6 +548,9 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
   };
   // Before the first setupParts: it records each actor's gib rule (gibs below).
   for (const a of manager.actors) if (!a.template) setupParts(a);
+  // Animating Statics the player brushes against play a p37 clip (brush.ts).
+  const playerEntity = entities.find((e) => e.className === 'Player' && !(e.flags & 0x8)) ?? entities.find((e) => e.className === 'Player');
+  const brush = new BrushAnimations(packages as PackageSet, playerProxySpheres(packages as PackageSet, playerEntity?.values), (a, r) => manager.kinds.clipIndex(a.kind, r), manager.actors);
   manager.on('spawn', (a) => !a.template && setupParts(a));
   manager.on('death', (a) => parts.died(a));
   manager.partHit = (a, amount, from, by, hit) =>
@@ -662,17 +682,69 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
       .map((e) => ({ time: e.time, bone: byHash?.get(e.boneHash) ?? -1 }))
       .filter((e) => e.bone >= 0);
   };
-  function playerBlow(amount: number, from: Actor, hit?: { point?: THREE.Vector3Like; type?: number }) {
+  function playerBlow(amount: number, from: Actor, hit?: { point?: THREE.Vector3Like; type?: number; force?: number; special?: ResRef; attack?: ResRef }) {
     const was = combat.alive;
     const human = !(insanity() as { transformed?: boolean } | undefined)?.transformed;
-    const clip = was ? playerDeathClip(from) : undefined;
+    // The killer's class clip first, then the knocked-down reaction's p8 (0x1002e7d8).
+    const clip = was ? (playerDeathClip(from) ?? playerStates.deathClip) : undefined;
     if (clip) combat.deathClip = clip;
     combat.damage(amount, from);
     combat.deathClip = undefined;
+    // The damage override's hit reaction (player-states.ts), by the blow's impact force.
+    playerReact(hit?.force, hit?.type, hit?.special, hit?.attack, from.position);
     if (!playerPart || !human) return;
     if (amount > 0 && hit?.point) parts.hit(playerPart, { amount, type: hit.type, point: hit.point, from: from.position, byPlayer: false, attackerClass: classOf(from) });
     if (was && !combat.alive && clip && combat.deathClipLength > 0) parts.schedule(playerPart, capLimbEvents(clip));
   }
+  // Hit Reacting (17), the third-person Jump (8) and Landing (12): player-states.ts.
+  const playerValues: readonly PropValue[] = playerEnt?.values ?? [];
+  const weaponsSvc = () => ctx.services.weapons as { current?: { id: string } | null; def?(id: string): { pwp?: { ref: ResRef } } | undefined; cancelMelee?(): void } | undefined;
+  const pwpValues = (): readonly PropValue[] => {
+    const w = weaponsSvc();
+    const r = (w?.current ? w.def?.(w.current.id)?.pwp?.ref : undefined) ?? body?.unarmedProps;
+    return (r && readSpecialTemplate(packages, r)?.v) ?? [];
+  };
+  const playerStates = new PlayerStates({
+    player: view.player,
+    body: () =>
+      body
+        ? {
+            play: (c, o) => body.play(c, o),
+            release: (fade) => body.release(fade),
+            layer: (c, bone) => {
+              const data = loadClip(packages, c);
+              if (!data || data.animSet !== body.body.skinned.animSet) return 0;
+              body.body.playLayer(bone, body.addClip(data), { loop: false, independent: true });
+              return data.duration / (data.rate || 1);
+            },
+            stopLayer: (bone) => body.body.stopLayer(bone, 0.2),
+          }
+        : null,
+    clip: (c) => loadClip(packages, c),
+    tables: readPlayerHitTables((r) => readSpecialTemplate(packages, r), playerValues),
+    pwp: pwpValues,
+    playerValues,
+    // States that refuse 17: death, a hold (Controlled), scripted feet (ladder, use clips,
+    // mounted gun), a cutscene, the morph.
+    refused: () => !combat.alive || !!view.player.attackOverride || !!view.player.motionOverride || !view.walking || !!worldSvc()?.inCutscene,
+    rolling: () => !!(ctx.services.roll as { rolling?: boolean } | undefined)?.rolling,
+    transformed: () => !!(insanity() as { transformed?: boolean } | undefined)?.transformed,
+    roll: (dir) => !!(ctx.services.roll as { roll?(d: -1 | 1): boolean } | undefined)?.roll?.(dir),
+    endActions: () => weaponsSvc()?.cancelMelee?.(),
+  });
+  /** A blow's reaction: force x the Damage Resistance's p2 (0x1002e27f; the player's p7 is empty). */
+  function playerReact(force: number | undefined, type: number | undefined, special: ResRef | undefined, attack: ResRef | undefined, from: Vec3Like | undefined) {
+    if (!combat.alive) return playerStates.reset(true);
+    if (force === undefined) return;
+    const scaled = force * (type !== undefined ? resistanceForceMultiplier(packages as never, playerValues as PropValue[], type) : 1);
+    const b: BlowInfo = { force, scaled, special, attack, from: from && { x: from.x, y: from.y, z: from.z } };
+    playerStates.onBlow(b);
+  }
+  view.player.jumpOverride = (input) => playerStates.onJump(input);
+  const offStates = view.player.onUpdate((f) => {
+    if (!combat.alive) return playerStates.reset(true);
+    playerStates.update(f);
+  });
   let playerDown = false;
   /** A revived player (checkpoint) is whole again. */
   const checkPlayerParts = () => {
@@ -762,7 +834,13 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
     get player() {
       return { health: combat.health, maxHealth: combat.maxHealth, alive: combat.alive };
     },
-    damagePlayer: (amount) => combat.damage(amount),
+    // `source`: a hazard's { kind, at } and, from a blast, its impact force / Special Hit
+    // Reaction / centre (world/damage.ts): the hit reaction (player-states.ts).
+    damagePlayer: (amount, source) => {
+      combat.damage(amount);
+      const s = source as { kind?: number; force?: number; special?: ResRef; from?: Vec3Like; at?: Vec3Like } | undefined;
+      if (s && s.force !== undefined) playerReact(s.force, s.kind, s.special, undefined, s.from ?? s.at);
+    },
     healPlayer: (amount) => combat.heal(amount),
     attack: (kind) => combat.attack(kind),
   };
@@ -793,7 +871,7 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
   ];
   // Debug/test hook, like window.__view.
   Object.assign(window, {
-    __actors: { manager, director, parts, gibs: { thrown, going, rule: (a: Actor) => gibRules.get(a) }, playerPart, combat, body, env, fx, speakLog, services: { actors: actorsService, combat: combatService }, companions: { pending: pendingCarry, arrived, spawnName: ctx.spawnName, levelPath: ctx.levelPath } },
+    __actors: { playerStates, manager, director, parts, gibs: { thrown, going, rule: (a: Actor) => gibRules.get(a) }, playerPart, combat, body, env, fx, speakLog, brush, services: { actors: actorsService, combat: combatService }, companions: { pending: pendingCarry, arrived, spawnName: ctx.spawnName, levelPath: ctx.levelPath } },
   });
 
   const kinds = manager.kinds.all();
@@ -877,6 +955,7 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
         checkPlayerParts();
         manager.drawDistance = view.culler?.fogDistance ?? Infinity;
         manager.update(dt, env, view.camera);
+        brush.update(env.time, view.walking && combat.alive ? view.player.position : undefined);
       }
       if (view.walking && combat.alive) manager.pushPlayer(view.player.motor, !!view.player.motionOverride);
       body?.tick(dt);
@@ -889,6 +968,9 @@ export async function createActorsSystem(ctx: GameContext): Promise<GameSystem> 
       unhookStomp?.();
       unhookMsg?.();
       offDraw();
+      offStates();
+      playerStates.reset();
+      if (view.player.jumpOverride) view.player.jumpOverride = null;
       combat.dispose();
       hud.dispose();
       fx.dispose();

@@ -107,6 +107,7 @@ const DEFAULT_KEYS: Record<ActionId, [string, string]> = {
   insanity: ['KeyQ', ''],
   reload: ['KeyR', ''],
   flashlight: ['KeyF', ''],
+  // The original's Flare key: RFL table record {0x427, keyboard, DIK_T} (throws a flare).
   flare: ['KeyT', ''],
   rollLeft: ['KeyZ', ''],
   rollRight: ['KeyX', ''],
@@ -141,6 +142,9 @@ const DEFAULT_KEYS: Record<ActionId, [string, string]> = {
  * buttons; the left stick turns instead of strafing, the right stick strafes and pitches),
  * Double Stick+Flashlight (flashlight on LB, insanity on D-pad up), Jump On Top (Y jump,
  * A reload).
+ * The Flare action has no pad cell in any layout, as in the original: the PC table holds no pad
+ * records (devices 0 / 1 only) and the console Controller Settings page names no flare action
+ * among its 23 (p31..p53). It can be bound in the keyboard page's pad column.
  */
 export const PAD_LAYOUT_COUNT = 6;
 export const PAD_LAYOUT_CUSTOM = 5;
@@ -226,6 +230,7 @@ const PLACEHOLDERS: Record<string, ActionId | ActionId[]> = {
   Run: 'run',
   LadderMove: ['forward', 'backward'],
   Flashlight: 'flashlight',
+  Flare: 'flare',
   FirstPerson: 'firstPerson',
   Insanity: 'insanity',
   Reload: 'reload',

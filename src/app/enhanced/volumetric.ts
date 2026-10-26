@@ -16,6 +16,8 @@ import * as THREE from 'three/webgpu';
 import {
   Fn,
   If,
+  array,
+  inverseSqrt,
   Loop,
   NodeUpdateType,
   dot,
@@ -47,9 +49,9 @@ type N = any;
 
 const _quad = new THREE.QuadMesh(undefined as unknown as THREE.NodeMaterial);
 
-/** The dust noise, baked once per page (dust-noise.ts): one trilinear fetch per step. */
+/** The dust noise, baked once per page (dust-noise.ts): one trilinear fetch per step (also light-volume-pass.ts). */
 let dustTexture: THREE.Data3DTexture | null = null;
-function dust(): THREE.Data3DTexture {
+export function dust(): THREE.Data3DTexture {
   if (!dustTexture) {
     const t = new THREE.Data3DTexture(bakeDustNoise(), DUST_SIZE, DUST_SIZE, DUST_SIZE);
     t.format = THREE.RedFormat;
@@ -154,6 +156,8 @@ export class VolumetricNode extends THREE.TempNode {
         const jitter = interleavedGradientNoise(screenCoordinate.xy.add(this.frameJitter));
         const sigma = this.density.mul(1.4).div(fogEnd);
         const acc = vec3(0).toVar();
+        // Each step's dens × T × length, kept for the lamp loop (lampHalos).
+        const weights: N = array('float', n).toVar();
         const dustTex: N = texture3D(dust());
         const drift = vec3(EU.time.mul(0.05), EU.time.mul(0.02), EU.time.mul(-0.03));
         Loop(n, ({ i }: { i: N }) => {
@@ -182,24 +186,7 @@ export class VolumetricNode extends THREE.TempNode {
             const shadow = mix(float(1), occ, EU.flShadowOn.mul(step(ndc.x.abs(), 1)).mul(step(ndc.y.abs(), 1)));
             light.addAssign(EU.flColor.mul(beam.mul(shadow).div(fd2.add(FLASH_NEAR))).mul(phaseHG(dot(dir.negate(), fdir), 0.35)).mul(this.flashScatter));
           });
-          // Lamps (engine point lights): halos; the cube-shadowed ones cast shafts.
-          Loop(EU.lampCount, ({ i: k }: { i: N }) => {
-            const a = lampArray.element(int(k).mul(2));
-            const b = lampArray.element(int(k).mul(2).add(1));
-            const v = P.sub(a.xyz);
-            const d2 = dot(v, v).max(0.02);
-            const rad = b.xyz.max(0).mul(a.w.div(d2).min(2));
-            const sh = float(1).toVar();
-            If(b.w.greaterThan(-0.5), () => {
-              const dn = d2.sqrt().div(LAMP_SHADOW_RANGE).sub(0.006);
-              If(b.w.lessThan(0.5), () => {
-                sh.assign(lampLit(dn, shadowTextures.lamp0.sample(v).level(float(0)).r));
-              }).Else(() => {
-                sh.assign(lampLit(dn, shadowTextures.lamp1.sample(v).level(float(0)).r));
-              });
-            });
-            light.addAssign(rad.mul(sh).mul(phaseHG(dot(dir, v.normalize()), 0.25)).mul(this.lampScatter).mul(0.6));
-          });
+          // (The lamps' halos and shafts: lampHalos, after the march, from the kept weights.)
           // Moonlight shafts (none without a moonlight shadow map: a uniform branch).
           If(EU.moonOn.greaterThan(0.5), () => {
             const mp = EU.moonMatrix.mul(vec4(P, 1));
@@ -211,8 +198,11 @@ export class VolumetricNode extends THREE.TempNode {
             const edge = smoothstep(1, 0.8, mp.x.abs().max(mp.y.abs()));
             light.addAssign(EU.moonColor.mul(mLit.mul(edge)).mul(phaseHG(dot(dir, EU.moonDir), 0.55)).mul(this.moonScatter).mul(1.2));
           });
-          acc.addAssign(light.mul(dens).mul(T).mul(stepLen));
+          const w = dens.mul(T).mul(stepLen);
+          weights.element(i).assign(w);
+          acc.addAssign(light.mul(w));
         });
+        acc.addAssign(this.lampHalos(eye, dir, stepLen, jitter, weights));
         return vec4(acc, 1);
       })();
     void camera;
@@ -223,6 +213,56 @@ export class VolumetricNode extends THREE.TempNode {
     this.material.fragmentNode = this.fragment();
     this.material.needsUpdate = true;
     return this.textureNode;
+  }
+
+  /**
+   * Halos around the lamps (engine point lights), shafts for the cube-shadowed ones: Σ over lamps
+   * of colour × Σ over steps of weight × min(I / max(d², 0.02), 2) × shadow × HG phase. The same
+   * sum, steps and jitter as a lamp loop inside each step, reordered (docs/perf.md Perf D): the
+   * lamp loop outside the step loop, its offset from the eye taken once, so that a step is a few
+   * scalar operations (|v|² from the ray parameter, two inverse square roots; the colour, the
+   * scatter gain and the phase constant multiply the lamp's sum once), and the shadowed / plain
+   * choice is made per lamp, not per step. At High (6 lamps × 24 steps) the pass took 16.6 ms at
+   * 3456 x 2234 before, 11.3 after.
+   */
+  private lampHalos(eye: N, dir: N, stepLen: N, jitter: N, weights: N): N {
+    const n = this.steps;
+    const g = 0.25;
+    const total = vec3(0).toVar();
+    Loop(EU.lampCount, ({ i: k }: { i: N }) => {
+      const a = lampArray.element(int(k).mul(2));
+      const b = lampArray.element(int(k).mul(2).add(1));
+      const w0 = eye.sub(a.xyz).toVar();
+      const I = a.w.toVar();
+      // |v|² = |w0 + dir t|² = c0 + t (2 c1 + t) and v·dir = c1 + t (dir is unit length).
+      const c1 = dot(w0, dir).toVar();
+      const c0 = dot(w0, w0).toVar();
+      const c2 = c1.mul(2).toVar();
+      const sum = float(0).toVar();
+      // One step of lamp k: weight × min(I / max(d², 0.02), 2) × HG phase (without its
+      // constant: x^-1.5 with x = 1 + g² − 2g cos) × `lit`.
+      const term = (i: N, lit: ((v: N, vv: N) => N) | null) => {
+        const t = float(i).add(jitter).mul(stepLen);
+        const vv = t.add(c2).mul(t).add(c0).max(1e-8);
+        const r = inverseSqrt(vv);
+        const rx = inverseSqrt(float(1 + g * g).sub(c1.add(t).mul(r).mul(2 * g)));
+        let s: N = weights.element(i).mul(I.mul(r.mul(r).min(50)).min(2)).mul(rx.mul(rx).mul(rx));
+        if (lit) s = s.mul(lit(w0.add(dir.mul(t)), vv));
+        sum.addAssign(s);
+      };
+      const shadowed = (cube: N) => (v: N, vv: N) => lampLit(vv.max(0.02).sqrt().div(LAMP_SHADOW_RANGE).sub(0.006), cube.sample(v).level(float(0)).r);
+      If(b.w.lessThan(-0.5), () => {
+        Loop(n, ({ i }: { i: N }) => term(i, null));
+      })
+        .ElseIf(b.w.lessThan(0.5), () => {
+          Loop(n, ({ i }: { i: N }) => term(i, shadowed(shadowTextures.lamp0)));
+        })
+        .Else(() => {
+          Loop(n, ({ i }: { i: N }) => term(i, shadowed(shadowTextures.lamp1)));
+        });
+      total.addAssign(b.xyz.max(0).mul(sum));
+    });
+    return total.mul(this.lampScatter.mul(0.6 * ((1 - g * g) / (4 * Math.PI))));
   }
 
   dispose() {

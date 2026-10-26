@@ -94,3 +94,117 @@ test('1b arena: the lit panel under the grate (Static Object 87cd, 9:5897) is th
   const grate = readModel(pkgs, { pkg: 12, id: 635 })!;
   assert.ok(grate.submeshes.some((s) => s.material?.layers[0]?.blend === Blend.Cutout), 'grate 87ce: mode 8 (KEEP, 0x48fb55..0x48fb93)');
 });
+
+// ---------------------------------------------------------------------------
+// Thickness volumes (enhanced/light-volume.ts fitLightShaft / takeLightShafts, light-volume-pass.ts)
+
+import { fitLightShaft, takeLightShafts, triangleComponents, shapeDensity, volumeRayLight, LIGHT_SHAFT, type WallLight } from '../src/app/enhanced/light-volume';
+import type { MeshPart } from '../src/formats/types';
+
+/** An open box of four walls (w x d section, h tall, from y0), v = 0 at the top, 1 at the floor. */
+function box(cx: number, cz: number, w: number, d: number, h: number, y0 = 0) {
+  const pos: number[] = [], uv: number[] = [], idx: number[] = [];
+  const corners = [[-w / 2, -d / 2], [w / 2, -d / 2], [w / 2, d / 2], [-w / 2, d / 2]];
+  for (let k = 0; k < 4; k++) {
+    const [ax, az] = corners[k], [bx, bz] = corners[(k + 1) % 4];
+    const base = pos.length / 3;
+    for (const [x, z, y, u, v] of [[ax, az, y0, 0, 1], [bx, bz, y0, 1, 1], [bx, bz, y0 + h, 1, 0], [ax, az, y0 + h, 0, 0]]) pos.push(cx + x, y, cz + z), uv.push(u, v);
+    idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  }
+  return { pos: Float32Array.from(pos), uv: Float32Array.from(uv), idx: Uint32Array.from(idx) };
+}
+/** A light that fades along v only (as 7:584): alpha v, white. */
+const fadeV: WallLight = (_u, v) => [0.02 * v, 0.02 * v, 0.02 * v];
+const allTris = (n: number) => Array.from({ length: n / 3 }, (_, i) => 3 * i);
+
+test('light shafts: an open box of light walls becomes a volume along v, boxy section, brightest at the floor', () => {
+  const b = box(0, 0, 4, 4, 2);
+  const s = fitLightShaft(b.pos, b.uv, allTris(b.idx.length), b.idx, fadeV)!;
+  assert.ok(s, 'fitted');
+  assert.ok(Math.abs(Math.abs(s.axis[1]) - 1) < 1e-6, 'axis vertical (v runs along the height)');
+  assert.ok(Math.abs(s.length - 2) < 1e-3);
+  for (const r of [...s.r0, ...s.r1]) assert.ok(Math.abs(r - 2) < 0.05, `half extent 2 (${r})`);
+  assert.equal(s.exponent, LIGHT_SHAFT.boxExponent, 'a box section');
+  const p = s.profile!;
+  // Profile along z: the axis points down (v grows downwards), so z = L is the floor.
+  assert.ok(p[3 * 15 + 1] > 0.9 && p[1] < 0.15, `fades along the height (${p[1]} .. ${p[3 * 15 + 1]})`);
+  // Soft sides: full light on the axis, none at the walls, in between half-way out.
+  const mid = s.length / 2;
+  assert.ok(shapeDensity(s, s.c0[0], s.c0[1], mid) > 0.99);
+  assert.equal(shapeDensity(s, s.c0[0] + 2.01, s.c0[1], mid), 0);
+  const half = shapeDensity(s, s.c0[0] + 1.4, s.c0[1], mid);
+  assert.ok(half > 0.05 && half < 0.95, `fades towards the side (${half})`);
+});
+
+test('light shafts: the budget: over the spread of views the volume adds what the walls add', () => {
+  const b = box(0, 0, 4, 4, 2);
+  const s = fitLightShaft(b.pos, b.uv, allTris(b.idx.length), b.idx, fadeV)!;
+  // Horizontal rays across the box at every height and offset: the walls add two crossings
+  // each (a hard-edged band), the volume a soft one; summed over the set they agree.
+  let walls = 0, vol = 0;
+  for (let y = 0.05; y < 2; y += 0.1)
+    for (let z = -2.95; z < 3; z += 0.1) {
+      if (Math.abs(z) < 2) walls += 2 * fadeV(0, 1 - y / 2)[0];
+      vol += volumeRayLight(s, [-10, y, z], [1, 0, 0], 64) * s.gain;
+    }
+  assert.ok(vol > 0.5 * walls && vol < 2 * walls, `budget (${vol.toFixed(3)} vs ${walls.toFixed(3)})`);
+  // The light gathers where the path through the air is long: the middle is brighter than a wall pair.
+  const o: [number, number, number] = [-10, 0.3, 0], d: [number, number, number] = [1, 0, 0];
+  assert.ok(volumeRayLight(s, o, d, 200) * s.gain > 2 * fadeV(0, 1 - 0.3 / 2)[0], 'brighter core');
+  // A ray past the box's side adds nothing (the walls' hard edge is gone).
+  assert.equal(volumeRayLight(s, [-10, 0.3, 2.2], d, 50), 0);
+  // Grazing the side inside the box: much less than through the middle.
+  assert.ok(volumeRayLight(s, [-10, 0.3, 1.7], d, 200) < 0.4 * volumeRayLight(s, o, d, 200));
+});
+
+test('light shafts: flat sheets, slabs and cards stay sheets', () => {
+  // One wall (a card): does not enclose the axis.
+  const b = box(0, 0, 4, 4, 2);
+  const one = fitLightShaft(b.pos, b.uv, [0, 3], b.idx, fadeV);
+  assert.equal(one, null, 'a single wall');
+  // A thin slab (14 x 0.3 section, like 1b's ceiling grate sheet 9:5847).
+  const slab = box(0, 0, 14, 0.3, 2);
+  assert.equal(fitLightShaft(slab.pos, slab.uv, allTris(slab.idx.length), slab.idx, fadeV), null, 'slab');
+  // A floor pool: v not along any axis the walls run along.
+  const floor = { pos: Float32Array.from([0, 0, 0, 4, 0, 0, 4, 0, 4, 0, 0, 4]), uv: Float32Array.from([0, 0, 1, 0, 1, 1, 0, 1]), idx: Uint32Array.from([0, 1, 2, 0, 2, 3]) };
+  assert.equal(fitLightShaft(floor.pos, floor.uv, [0, 3], floor.idx, fadeV), null, 'floor sheet');
+});
+
+test('light shafts: takeLightShafts removes the shaft components and keeps the rest of the part', () => {
+  const a = box(0, 0, 4, 4, 2), c = box(10, 0, 4, 4, 2);
+  // Two boxes in one part, the second missing three walls (a card).
+  const n = a.pos.length / 3;
+  const idx = [...a.idx, ...Array.from(c.idx.slice(0, 6), (i) => i + n)];
+  const part = {
+    positions: Float32Array.from([...a.pos, ...c.pos]),
+    uvs: Float32Array.from([...a.uv, ...c.uv]),
+    indices: Uint32Array.from(idx),
+    textureKey: '7:584',
+    material: { key: '9:5841', cls: 0, layers: [add()] },
+  } as unknown as MeshPart;
+  assert.equal(triangleComponents(part.positions, part.indices).length, 2);
+  const tex = { width: 2, height: 2, rgba: new Uint8Array([255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 200, 255, 255, 255, 200]) };
+  const r = takeLightShafts([part], () => tex);
+  assert.equal(r.volumes.length, 1);
+  assert.equal(r.parts.length, 1);
+  assert.equal(r.parts[0].indices.length, 6, 'the card stays a sheet');
+  // Untinted or layered passes are not light volumes: untouched.
+  const lit = { ...part, material: { key: 'x', cls: 0, layers: [add({ tint: undefined })] } } as unknown as MeshPart;
+  assert.deepEqual(takeLightShafts([lit], () => tex).parts, [lit]);
+});
+
+test('light shafts in the data: 1b arena 86c7 is four box volumes, its ceiling sheet 9:5847 stays', { skip }, async () => {
+  const { loadLevel } = await import('../src/app/loader');
+  const L = await loadLevel(nodeFS(), 'LEVELS/1 PrisonDeathRow/1b PrisonDeathRow.lvl');
+  const tex = new Map(L.textures.map((t) => [t.key, t]));
+  const r = takeLightShafts(L.level.parts, (k) => tex.get(k));
+  assert.equal(r.volumes.length, 4);
+  for (const v of r.volumes) {
+    assert.ok(Math.abs(v.axis[1] + 1) < 1e-3, 'down the shaft');
+    assert.ok(Math.abs(v.length - 2.05) < 0.05);
+    assert.ok(v.r0[0] > 2.2 && v.r0[0] < 2.45 && v.r1[0] > 1.8 && v.r1[0] < 2.05, `walls lean out upwards (${v.r0[0]} / ${v.r1[0]})`);
+    assert.ok(v.gain > 0 && Number.isFinite(v.gain));
+  }
+  assert.ok(r.parts.some((p) => p.material?.key === '9:5847'), 'the ceiling grate sheet stays');
+  assert.ok(!r.parts.some((p) => p.material?.key === '9:5841'), 'the shaft walls are gone');
+});

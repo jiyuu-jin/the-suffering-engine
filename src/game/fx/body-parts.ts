@@ -30,6 +30,7 @@ import { ADU_EVENTS, ANIM_EVENT_MESSAGE, readAnimEvents } from '../../formats/an
 import type { PropValue } from '../../formats/entities';
 import type { SrscFile } from '../../formats/srsc';
 import { findEntry } from '../../formats/model';
+import { translucentPassState } from '../../formats/render-data';
 import type { Character } from '../../app/character';
 import { cloneWithGlowMark } from '../../app/glow-mark';
 
@@ -177,6 +178,8 @@ interface CarrierState {
   t: number;
   /** Own copies of the carrier's materials (shared with its kind) once an opacity applies. */
   mats?: THREE.Material[];
+  /** Their own pass state at full opacity (render-data.ts translucentPassState). */
+  base?: { transparent: boolean; depthWrite: boolean; alphaTest: number; alphaToCoverage: boolean }[];
   applied?: number;
 }
 
@@ -370,17 +373,26 @@ export class BodyParts {
       const m = mesh.material;
       // Keeps the alpha test (three r186's NodeMaterial.copy drops it) and the glow mark.
       st.mats = (Array.isArray(m) ? m : [m]).map((x) => cloneWithGlowMark(x));
+      st.base = st.mats.map((x) => ({ transparent: x.transparent, depthWrite: x.depthWrite, alphaTest: x.alphaTest, alphaToCoverage: x.alphaToCoverage }));
       mesh.material = st.mats.length === 1 ? st.mats[0] : st.mats;
     }
-    for (const m of st.mats) {
-      // Blended passes already blend; an opaque one starts blending (its depth write off).
-      if (op < 1 && !m.transparent) {
-        m.transparent = true;
-        m.depthWrite = false;
+    st.mats.forEach((m, k) => {
+      // Below 0.99 the draw is translucent (0x4933b1): an opaque or cut-out first pass blends as
+      // mode 1 with the > 2 / 255 alpha test (0x48fb08) and keeps writing depth by its own mode
+      // (0x48fc70); its alpha is the pass's texture alpha x oD0.a (surface-material.ts). Blended
+      // passes keep their own state. At 0.99 and above the materials' own state is back.
+      const b = st.base![k];
+      const s = translucentPassState(b, op);
+      const a2c = s.transparent && !b.transparent ? false : b.alphaToCoverage;
+      if (s.transparent !== m.transparent || s.depthWrite !== m.depthWrite || s.alphaTest !== m.alphaTest || a2c !== m.alphaToCoverage) {
+        m.transparent = s.transparent;
+        m.depthWrite = s.depthWrite;
+        m.alphaTest = s.alphaTest;
+        m.alphaToCoverage = a2c;
         m.needsUpdate = true;
       }
       m.opacity = op;
-    }
+    });
   }
 
   dispose() {

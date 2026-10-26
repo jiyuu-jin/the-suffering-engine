@@ -111,6 +111,8 @@ import { Character, buildAnimationClip, decodeCharacterTextures } from '../../ap
 import type { PlayerController, PlayerFrame } from '../../app/player';
 import { classByHash, decodeTemplateProps, readObjectTemplate, type EntityPackageSet, type PropValue } from '../../formats/entities';
 import { clipSpeed, loadClip } from './clipmap';
+import { ENHANCED } from '../../app/enhanced/config';
+import { HandGrip, handGripOption } from './hand-grip';
 import { blendCycle, contactPhase, pickHeadingSet, rightAnkle, setCentre, setClipEventSource, setFacingOffset, setWidth, type HeadingSet } from './gait';
 
 const ROLE_IDS = {
@@ -407,6 +409,8 @@ export class PlayerBody {
     this.gaitTurnTime = fp.turnTime > 0 ? fp.turnTime : 0.35;
     this.ankle = rightAnkle(skinnedModel.skeleton);
     this.body.poseHooks.push(() => this.applyBend());
+    // (Enhanced "Close Hand on Weapon", after the bend: hand-grip.ts.)
+    this.body.poseHooks.push((_c, dt) => this.handGrip?.apply(dt, this.mode !== 'fp' || !!this.player.externalView));
     this.idleSets = readIdleSets(pkgs, fp.unarmed);
     const rawArms = readSkinnedModel(pkgs, fp.model);
     if (rawArms && rawArms.animSet === skinnedModel.animSet) {
@@ -534,6 +538,7 @@ export class PlayerBody {
    * holds (p61) are first-person clips; the aim-state sets (p110, p116 + 7k) are not modelled.
    */
   private setThirdPerson(pwp: ResRef | null | undefined) {
+    this.handGrip?.setClip(null);
     this.tpSets = [];
     this.tpIdle = -1;
     this.gaitSet = -1;
@@ -552,7 +557,17 @@ export class PlayerBody {
     }
     this.tpSets = sets;
     this.tpIdle = this.pwpClip(v, 13);
+    // Enhanced option: the fist of the weapon's armed run (set 0's run, p20) over the open hand
+    // of its idle / walk, on the PWP p0 weapon bone's hand (hand-grip.ts).
+    const wb = typeof v[0] === 'number' ? v[0] : -1;
+    const u = this.unarmedProps;
+    if (ENHANCED && wb >= 0 && u && !(pwp.pkg === u.pkg && pwp.id === u.id)) {
+      this.handGrip ??= new HandGrip(this.body, this.body.skinned.skeleton.bones[wb]?.parent ?? -1, wb, () => handGripOption.enabled);
+      this.handGrip.setClip(this.body.clips[sets[0].run] ?? null);
+    }
   }
+  /** Enhanced "Close Hand on Weapon" (hand-grip.ts), made on the first weapon. */
+  private handGrip: HandGrip | null = null;
   private tpSets: HeadingSet[] = [];
   private tpIdle = -1;
   /** Heading set being played (pickHeadingSet hysteresis), -1 standing. */

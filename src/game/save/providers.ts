@@ -320,6 +320,8 @@ interface PlayerLike {
   yaw: number;
   pitch: number;
   mode: 'fp' | 'tp';
+  /** The view apart from a hit reaction's third person (PlayerController.chosenMode). */
+  chosenMode?(): 'fp' | 'tp';
   spawn(feet: { x: number; y: number; z: number }, yaw: number): void;
   setMode(mode: 'fp' | 'tp'): void;
 }
@@ -337,7 +339,8 @@ export function playerSaveProvider(player: PlayerLike, onPlaced?: (s: PlayerSave
       p: [r3(player.position.x), r3(player.position.y), r3(player.position.z)],
       yaw: r3(player.yaw),
       pitch: r3(player.pitch),
-      mode: player.mode,
+      // (Not a hit reaction's passing third person: a save made during one came back in it.)
+      mode: player.chosenMode?.() ?? player.mode,
     }),
     load(d, info: LoadInfo) {
       if (info.reason !== 'load') return;

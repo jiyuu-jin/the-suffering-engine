@@ -112,6 +112,10 @@ export type MenuAction =
   | { kind: 'gameFinished'; save: boolean }
   /** Close an in-game alert box (GUI Launcher) with button `index`. */
   | { kind: 'closeAlert'; index: number }
+  /** Pause menu port page "Cheats" (not in the original): fill it from the running level, open it. */
+  | { kind: 'openCheats' }
+  /** Apply cheat `index` (src/game/cheats, the original's dispatcher case). */
+  | { kind: 'cheat'; index: number }
   | { kind: 'none' };
 
 /** One row of a Load / Save list (filled by the flow from the save store). */

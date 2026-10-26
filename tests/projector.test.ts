@@ -152,7 +152,8 @@ test('a translucent object: an opaque first pass blends, keeps its depth write, 
   const additive = { transparent: true, depthWrite: false, alphaTest: BLEND_ALPHA_REF };
   assert.deepEqual(translucentPassState(additive, 0.3), additive, 'a blended first pass never writes depth');
   const cutout = { transparent: false, depthWrite: true, alphaTest: 200 / 255 };
-  assert.equal(translucentPassState(cutout, 0.5).alphaTest, 200 / 255);
+  // Modes 0 and 8 alike become mode 1 with the > 2 test (0x48fb08..0x48fb2e): the > 200 test goes.
+  assert.equal(translucentPassState(cutout, 0.5).alphaTest, BLEND_ALPHA_REF);
 });
 
 test("Killjoy 10:90: back faces culled; each projector drives and hides the same cone", { skip }, async () => {

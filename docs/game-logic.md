@@ -390,8 +390,10 @@ fidgets, empty), `p86..p95` strike lists (§4.4 Melee), `p96..p102` reload by he
 (0 / the first-person hold played on entering first person), `p105..p108` first-person hold /
 fire / fire 2 / throw (heading set k = −2), `p109..p115` the standing set (k = −1: `p113` fire,
 revolver 2:474 0.27 s, shotgun 2:99 1.2 s with the pump, tommy gun 2:309 0.1 s), `p116..p150`
-five moving-aim sets (k = 0..4), `p151..p167` hit reactions (not played in first person,
-0x1003a548), `p172..p174` draw (`p172` first person; Equip 108 marker), `p175..p177` put away.
+five moving-aim sets (k = 0..4), `p151..p153` jumps, `p154..p157` falling clips (not in first
+person, 0x1003a548), `p158..p163` landings, `p164` / `p165` jump attack, `p166` / `p167` rolls
+(§14.1 "Third-person jump and landing"; the player's hit reactions are the Player's p89 / p90,
+§14.1 "Player hit reactions"), `p172..p174` draw (`p172` first person; Equip 108 marker), `p175..p177` put away.
 Clip roles come from the clips' animation markers (.adu type 5, kind 1: the param is a message id -
 102 Fire, 103 AmmoEject, 104 DetachWeaponFX, 107 Stow, 108 Equip, 100 / 101 Arm / Disarm, 230
 ThrowWeapon, 231 AttachThrownWeapon).
@@ -481,8 +483,14 @@ Map, Documents, Archives, Forward, Backward, Turn Left / Right, Left, Right, Run
 Fire, Throw, Jump, Use, First Person, Health, Insanity, Reload, Flashlight, Flare, Roll Left / Right,
 Shiv, Fire Axe, Pistol, Dual Pistols, Shotgun, Tommy Gun, Flamethrower, Flash/Bang Grenade,
 Shrapnel Grenade, TNT, Molotov Cocktail, Prev / Next Weapon, Prev / Next Thrown, Inventory. The
-default keys are not stored as a scan-code or virtual-key table in the EXE or RFL (searched for
-both orders and for key-name strings); the port's choices are in src/game/weapons/system.ts.
+default keys are in the data [verified]: Suffering.rfl's main control table at 0x10167520, 110
+records of `{u32 action, u32 device (0 keyboard, 1 mouse), u32 code (a DirectInput scan code or a
+mouse code), f32 -1, f32 1}` ended by action 0xffffffff, applied by the reset to defaults
+(0x100070c0); four 64-record presets beside it are referenced by no code (docs/re/player.md §9).
+The port reads it with `readDefaultBindings` (src/formats/save-original.ts, file offsets from
+src/formats/pe.ts) and translates it to `RETAIL_PC_KEYS` (src/app/player-rules.ts; every gameplay
+record checked by tests/flare-key.test.ts); its own defaults (src/game/hud/bindings.ts
+`DEFAULT_KEYS`) keep a WASD-style set and name the retail keys in their comment.
 
 Open: the scale between template damage and creature health (revolver 6 vs Slayer 78 x
 difficulty modifier 1.6 in GameObject `p2`, so 13+ shots; creature-side multipliers were not found),
@@ -797,15 +805,15 @@ unless marked.
   on the body's bone 51 (under the body's root) and one on the arms' bone 51 (under the arms
   pivot), attached through the HardpointAttacher and placed in `onBeforeDraw` with
   `updateCarriers`, so it has no one-frame lag. Each frame before the draw it follows the
-  selected throwable as the HUD shows it (`persist.throwable`, else the first owned), and only
+  selected throwable as the HUD shows it (`persist.throwable` while it is carried), and only
   while the weapons are out (not in creature form). Nothing new is saved: a load sets
   `persist.throwable` and the back follows. The throw: at the 231 marker of the clip it plays,
   the count drops, the carried copy moves to the marker's bone, the gun there is hidden until
   the throw action ends, and at 0 the `p45` rule picks the next. At 230 the hand copy goes and
   the thrown object is launched. If the weapons are put away in between, the hand copy is
-  launched then. The port still falls back to the first owned throwable when `persist.throwable`
-  is null, so with only flares left the flare shows and can be thrown with the throw key, where
-  the original's back would stay empty (only its Flare key throws flares) [port].
+  launched then. There is no fallback to the first owned throwable: the back (and the HUD's
+  throwable panel) shows only what was taken out, and with only flares left it stays empty
+  ("Flare key" below).
 - Verified in headless Brave (1a, third person, every throwable; scratch frames): each one on the
   back in the player's view and in close crops; a new selection swaps it the same frame. A
   single TNT: on the back, in the right hand from the 231 marker with the revolver hidden, gone
@@ -814,6 +822,106 @@ unless marked.
   Grenade (`p45` 5) is on the back. Weapons put away: none; out again: back. First person:
   attached, out of the picture. NPC attachments are unchanged.
 - Tests: `tests/back-throwable.test.ts`.
+
+Flare key (user request: the port had no separate Flare key; its throwable fallback put a flare
+on the back and threw it with the normal throw). Read in Suffering.rfl unless marked.
+- **Binding** [verified]: the default table 0x10167520 (110 records, devices 0 keyboard / 1
+  mouse only) has one Flare record, action 0x427 on the keyboard with DIK 0x14 (T). Every
+  gameplay record translates to `RETAIL_PC_KEYS` through the port's DirectInput / mouse code
+  tables (test). The keyboard page row is `p30[21]` of Control Settings GUI 5:906, after
+  Flashlight. **No pad binding exists** [strong]: the PC table has no pad records and the
+  console Controller Settings page's 23 action names (p31..p53) include no flare. The port keeps
+  the pad cell empty in every layout (bindable on the keyboard page's pad column).
+- **Input** [verified 0x10049b12, 0x10049c67]: in creature form (`+0xa4` bit 20, state 20) or
+  while a Killjoy Rebirth effect holds the player (`+0x786`), a Flare press ends the input
+  handler: nothing happens. Otherwise Throw or Flare pressed: the Flare press reads the count of
+  Player `p243` (4:455) in the inventory (0x100415d0), the Throw press reads what is on bone
+  `p119`; `+0x9c` bit 0x40000 is set to "flares > 0" (input bit 50), and with an object on the
+  back, a flare, or the global 0x1017a78c [set by one object 0x100e1580 testing a level id and a
+  spot; meaning unknown, not ported] state 21 Throw is requested.
+- **State and clip** [verified 0x10027b40]: Throw's enter needs flares > 0 when bit 0x40000 is
+  set, else an object on the back (else the state ends at once). It then requests Aim (2) and
+  plays the held set's throw clip: one path after the item test, so the flare uses the same
+  clip, bone and markers as any throw (PWP throw clips by view / heading, first person too).
+- **Count** [verified 0x1002ae40]: AttachThrownWeapon (231) hides the gun on the marker's bone as
+  for any throw, then with bit 0x40000 spawns Player `p243`'s `p55` object (BouncingObject
+  4:452) at that bone and attaches it there, counts one flare off and returns: the back is not
+  touched and no run-out rule runs. Max carried: Item `p44` = 8 [data]. Retail flare data:
+  `p37` slot 9 (throwables are 6), `p38` 11, `p45` −1 (never taken out at 0).
+- **Back** [verified 0x10039b10 -> 0x10039d12, 0x10038ca0]: a Missile Item given while bone 51
+  is empty is taken out onto it with no slot test, so a flare picked up onto an empty back is
+  carried and the Throw key throws it (and the next flare is taken out, as for any item). After
+  a throw runs an item out the `p45` rule never picks the flare: with only flares left the back
+  stays empty and the Throw key does nothing.
+- **Selecting** [verified 0x10049490, 0x10048ae0]: the hotkeys 0x434..0x43e and Next / Prev
+  Thrown walk Player `p248` (Quick Weapon Properties 2:945..2:955; the throwables 2:952..2:955:
+  Flash/Bang, Shrapnel, TNT, Molotov); no list names the flare. Next / Prev Thrown start from
+  the entry that holds the back's item; with a flare or nothing there, they do nothing
+  (0x10048c22).
+- **Refused** [verified: transition table 0x10175150, entry `[new x 35 + old]`; both keys
+  request state 21]: Throw cannot start during death 0, Controlled 11 (grapples, the Mainliner's
+  ride), Landing 12, Jump Melee 14, Roll 15, Hit Reacting 17, Morph 19, Insanity 20 (creature
+  form), Throw 21 (no second throw while one runs), Interact 22, View Monitor 23, Equip 25, Item
+  Pickup 26, LadderClimb 27, Insanity Attack 29 / 30, Document View 31, Play Anim 33, Freak Out
+  34. It ends Attack, MeleeAttack, Intermittent Idle, Reload, Camera Yaw, Look At and FP Melee,
+  and runs beside Move, Aim, Turn, Idle, Jump, Fall, Pitch, Jump Attack and First Person. While
+  it runs Attack, MeleeAttack, Roll, Reload, Throw, Interact, Equip, LadderClimb and FP Melee
+  cannot start.
+- **Thrown object and light** [verified]: 4:452 burns `p12` = 20 s, settles after 4 floor
+  bounces, has no Radius Damage. Launching a Missile / BouncingObject (0x100cf8b0) spawns its
+  `p36` Object Generators owned by it (0x100cfa88 -> 0x100cd100, kept at `+0x68`): the flare's
+  4:942 makes a flame (MorphingModel 4:938) and Point Light 4:941 (Follower Object 4:1190):
+  colour 0x835745, `p8` 1.8, omni, Lighting Effect 4:943 (looping strength curve 4:109 from
+  2.8125 to 45 m², 24..45 most of the time; no colour curve). No other retail throwable carries a
+  light (Flash/Bang and Shrapnel `p36` are sparks, the Rebirth grenade's particles and fire).
+- **The flame and how long it burns** [verified unless marked]. Generator 4:942 fires once at
+  its creation (`p24` on, `p6` 2: every entry, `p2` 1 each), so the flame and the light appear at
+  the launch, not in the hand. Its run is `p21` = 10 s with `p22` = 1 run and `p5` set: when the
+  run ends (0x100b4590) the run count reaches 0 and the generator is destroyed (0x100b463f), and
+  its destructor removes what it spawned (0x100b4dc0 -> 0x100b49e0, `+0xc` bit 2 from `p5`,
+  0x100b5199). So **the flame and the light go out 10 s after the throw**; the flare itself lies
+  on, unlit, until its `p12` = 20 s end. The generator is created through the object factory
+  with the flare as its parent (0x100cd1b9) and its Follower Object 4:1190 has zero offsets, so
+  both follow the flare's origin and turn with it [strong]. The flame, MorphingModel 4:938
+  (§14.2), blends four key models 4:172 / 4:170 / 4:171 / 4:169 (42 vertices each, the flame
+  0.16..0.6 m along the flare's +Z, its tip) over 0.075 / 0.11 / 0.1 / 0.085 s, looping, from
+  the first model at the launch; its material 4:939 is one additive layer (blend 2, tint
+  0xffcd9b) on texture 4:1711 [data].
+- **HUD** [verified 0x1002f780, 0x10031931]: the throwable panel (`+0x720`) belongs to what is
+  on the back (made when one is taken out, gone with it). A flare counter widget (`+0x724`,
+  set from the `p243` count) is made only from Player `p283`, which is empty in retail: the
+  original shows no flare count.
+- **Port**: the Flare action (bindings.ts, T by default; native action) calls
+  `services.weapons.throwFlare` through the same gate as the Throw button (pointer lock or a
+  pad); `throwFlare` refuses while stowed (Rebirth), with no flares, and with everything that
+  refuses a throw (weapons put away = creature form, a throw or other action under way, Hit
+  Reacting's lock, and any motion override: ladders, interactions, clambering, played clips).
+  At the 231 marker the flare's thrown model is built on the marker's bone
+  (`ThrowableCarry.spawnHand`), the gun there is hidden, one flare is counted off, and the back
+  is left as it is. `carriedThrowable` / `stepThrowable` (back-throwable.ts) carry the back and
+  cycle rules; the hotkeys select directly; old saves whose back would be empty with other
+  throwables carried take the `p45` pick on load [port]. The light: `thrown-light.ts` decodes
+  `p36` Point Lights and feeds them to the engine lighting rig while the object is in the world
+  (clock twice the wall clock, as a lit light's own Lighting Effect, world/lights.ts
+  [inferred]); `?lighting=legacy` keeps the old red three.js light. Lights and flames end at
+  their generator's run (`generatorSpawnsEnd`: 10 s for the flare; before, the port kept the
+  light for the full 20 s). The flame: `thrown-light.ts thrownGeneratorSpawns` decodes the
+  generators' MorphingModels and the weapons system draws each as a `MorphingModelRun`
+  (world/morphing-model.ts: a dynamic object of the first key model with its own materials,
+  blended on the GPU by morph targets, §14.2) on the thrown object's world matrix, built when first due (so a
+  loaded flare gets its flame at the burned time) and removed at the end or with the object.
+  Unspeakable.cfg (original-profile.ts): an import puts the file's 0x427
+  keyboard / mouse inputs on the port's Flare row; an export writes the port's Flare row into
+  the file's records (other actions keep the port's own keys). The HUD shows what is on the back
+  and no flare count.
+- Verified in headless Brave (1a, scratch frames): TNT on the back with three flares, the TNT
+  thrown: back and panel empty, Throw refused, flares 3. T in third person: the flare in the
+  right hand at the marker, launched, flares 2, landed and lit (the rig's candidates +1). T in
+  first person: launched, flares 1; the flare lights the bars and the shiv (same frame with the
+  light removed: dark). Molotovs then given: on the back; T throws a flare, the Molotov stays on
+  the back with its count; Next / Prev Thrown and selecting 4:455 leave the Molotov; T with no
+  flares is refused.
+- Tests: `tests/flare-key.test.ts`.
 
 ## 5. Placement, links, volumes [verified]
 
@@ -894,6 +1002,14 @@ door (409.5, 503.9) and the door guard sat at his desk for the rest of the level
 
 **Keys** start with `u16 tag`, `f32 time` (seconds from the start). Keys of a track are stored in
 time order; the sequence ends at its last key (the 1a intro "Goose", `12:284`, at 216.5 s).
+**Delivery order** [verified]: when a sequence first runs (0x44e9b0) the engine lists every key of
+every track (track, key index, time) and sorts the list with qsort by time, then by a rank per tag
+(comparator 0x44dbf0, table 0x5b9c70: control 1, transform 2, animation 3, sound / attach /
+visibility / message 5, camera 9, lower first); the frame loop (0x4510d6) walks it with one cursor.
+So at one time a take comes before a hide: 5b's Killjoys 13e3 ("Camera" 1296, take and hide at
+0 s, show at 9.88 s) and 13db (2942, show at 2.05 s) are taken, shown by the take and hidden again
+at once. The port sorts the same way (`stomp.ts KEY_RANK`); keys of equal rank keep track and tag
+order (the engine's order among them is qsort's).
 
 | Tag | Size | Body | Runtime meaning |
 |---|---|---|---|
@@ -2510,6 +2626,13 @@ the Character Morpher (class `0x1f4cc2c6`, vtable `0x1014c118`: init `0x100101c0
    p253, Insanity (20) is entered or left, the weapon set and camera are rebuilt, p13 idle plays,
    the clock rate goes back to 1 and the p274 light is destroyed (`0x10044280`).
 
+**The morph's light** (port: `insanity/morph-light.ts`, both modes). The p274 generator's Point
+Light is lit at the player's position from the lead-in to the leave, on the game clock (its
+Lighting Effect, 1.8 → 7.2 m² by curve 4:107, barely moves at 1 / 128; the generator's own 3.367 s
+run would end it only after the morph). It goes to the engine light rig as a provider's point
+light, as the flare's does, so the first morph rebuilds no lit material [port]. Tests:
+`tests/morph-light.test.ts`.
+
 **What the player can do meanwhile**: nothing moves (the clock is at 1 / 128); Morph cannot be
 entered again while it runs (the state transition table 0x10175150 holds 0 at [19][19]), so a
 morph cannot be turned round; the meter does not drain (the drain runs in state 20 without 19);
@@ -2789,13 +2912,12 @@ used by `weapons/system.ts` and `insanity/creature.ts`; the motor input `moveX /
   0 in every strike. The human strikes and recoveries cut in (header blend 0), so the motion is
   each clip's own root in turn; the creature's recoveries blend in over 0.2 s, and how a blend
   moves an extracted root was not traced (the port plays no creature recovery).
-- **Other player clips with root motion the port does not run through this path**: hit
-  reactions (Player p89 Hit Reaction 2:128 3.0 m back in 0.53 s, 2:130 / 2:131 0.55 m back; the
-  port plays no player hit reaction), the landing clips (PWP p160 / p161 2:89, 0.4 m forward in
-  0.1 s), the third-person jumps (p151..p153; the port keeps TP_JUMP_SPEED, docs/re/player.md
-  §5.1), LadderClimb. Already moved by their own root elsewhere: Roll (`hud/actions.ts`), use
-  animations (`world/use-anim.ts`), the clamber (`world/interact.ts`). The draw / holster clips
-  have no root motion [data].
+- **Other player clips with root motion**: hit reactions, the third-person jump and the landing
+  run through `actors/player-states.ts` (below, "Player hit reactions" and "Third-person jump
+  and landing"); the ladder's rungs through `world/interact.ts` ("Ladder climbing"). Already
+  moved by their own root elsewhere: Roll (`hud/actions.ts`), use animations
+  (`world/use-anim.ts`), the clamber (`world/interact.ts`). The draw / holster clips have no
+  root motion [data].
 
 **Port.** In third person, from the strike to the end of its recovery (the window the
 auto-face runs), `MeleeLunge` samples the playing clip's root track on the clip's own clock
@@ -2824,6 +2946,168 @@ distance along the body's start facing against root x scale:
 | creature 2:354, no target | 0.621 | 1.241 x 0.5 = 0.6205 |
 | creature alternate 2:366 | 4.838 forward, 0.102 sideways | 4.838, unscaled (class 3) |
 | creature 2:354, CartWheeler picked 4.2 m ahead (1b) | 1.241 | 1.241, unscaled (a target) |
+
+**Player hit reactions (Hit Reacting, state 17)** [verified unless marked; code
+`src/game/actors/player-states.ts`, wired in `actors/system.ts` (`playerBlow`, the combat
+service's `damagePlayer` source), tests `tests/player-states.test.ts`].
+
+- **Who asks.** Only the Player's damage override `0x1002e000` (Player vtable slot 38) requests
+  state 17. It runs the GameObject damage first (`0x100a31b0`, whatever the amount), then the
+  gate `0x1002ede0`, then the pick. A blow that kills ends in the death state 0, which refuses 17.
+- **The lists.** Player 2:5 **p89** (by force) and **p90** (special) hold *Hit Reaction*
+  templates (class 0x06163ac3), read by the characters' picker `0x1009e650` with the least force
+  at p2: p0 attacks, p1 Special Hit Reaction, p2 least force, p3 also in first person, p4 clips
+  (one at random), p5 the clip of a hit taken in the air, p6 the fall pose, p7 the floor clip,
+  p8 the death clip while down, p9 cooldown. A special entry wins whatever the force; otherwise
+  the last entry with p2 <= force. Retail:
+
+  | Entry | Picked by | Clip | Root | Then | First person | Cooldown |
+  |---|---|---|---|---|---|---|
+  | 2:332 | force 7..10 | 2:126, 0.5 s | none | – | no | 1.2 s |
+  | 2:333 | force 10..17 | 2:138, 1.87 s | none | – | no | 1.5 s |
+  | 2:334 | force >= 17 | 2:128, 0.53 s | **3.0 m back** | floor clip 2:130 (1.44 s at rate 1.5, 0.55 m back), fall pose 2:129, death 2:131 | yes | 0.5 s |
+  | 2:835 | special 2:736 (Radius Damage p4) | 2:672, 1.6 s | none | – | no | 1 s |
+
+  The same for every weapon held (the lists are the Player's, not the PWP's; the earlier label
+  "PWP p151..p167 hit reactions" was wrong: those are the jump, fall, landing and roll clips).
+  The creature form's template 2:240 has no lists: **no reactions in creature form**.
+- **The force** is the damage record's +0x1c (not the damage) times the matching Damage
+  Resistance's p2 (`0x1002e27f`; the Player's p7 is empty, so only the global types 14 / 6 zero
+  it), the resistance's p5 replacing the special. Sources: Melee Weapon **p69 x Attack p7**
+  (`0x100caa61..0x100caa89`, NPC and player blades alike: the CartWheeler's blades 6 x 1.3 / 2 /
+  3.5 / 4 = 7.8 / 12 / 21 / 24, Fester's charge 20 x 3 = 60), a Missile's p28 (near) to p29 (far)
+  over p30..p31 m (the guards' and the ranged Slayer 10:527's round 10:1741: 6, below every band;
+  the shotgun pellet 4:85 20 within 4 m; the tommy gun 4:1116 16; the Mainliner's needle 3),
+  Radius Damage p2 (centre) to p3 (edge) with its p4 special.
+- **Refusals.** The gate (raw force): no entry; within the cooldown (+0x620, counted down every
+  frame at `0x10043fea`) a force below the last reaction's p2 (+0x624); rolling (state 15) and
+  the clip has root motion; in first person an entry without p3. With 17 already on, only a force
+  **above** the running entry's p2 restarts it (`[17][17]` = 1: enter again). The state table
+  `0x10175150` refuses 17 during death, **Controlled** (the Mainliner's ride requests it,
+  `0x1007e354`; the Nooseman's grip `0x1008365b`), Landing, Jump Melee Attack, Morph, Interact,
+  View Monitor, Item Pickup, LadderClimb, Insanity Attack Acquisition, Document View and Freak Out.
+  **Grabs win over reactions**, and Controlled / Morph / Play Anim / Freak Out end a reaction.
+- **The input lock.** Entering 17 ends Move, Attack, MeleeAttack, Turn, Idle, Pitch, Roll,
+  **First Person**, Reload, Throw, Camera Yaw, Equip, Look At, FP Melee and Play Anim, and none of
+  Move, Aim, Attack, MeleeAttack, Turn, Idle, Jump, Pitch, Roll, First Person, Reload, Throw,
+  Equip or FP Melee can start while it runs: no walking, looking, shooting, striking, throwing,
+  jumping, rolling or weapon change. Aim, Jump, Fall, Jump Attack and Insanity run beside it.
+- **The camera.** First person ends for the reaction (only the knockdown plays there) and comes
+  back by itself: the wanted-first-person bit (+0x98 0x8000) stays set and the input handler
+  (`0x100499fb`) requests state 16 every frame until 17 is over. That bit is the player's view choice: what
+  else takes the view away and gives it back (the creature form, death, a save) gives back the bit,
+  not the reaction's third person. The port keeps it as `PlayerController.stateTp` /
+  `chosenMode()`; before, a reaction running when the player transformed, died or saved left him
+  in third person for good (docs/playthrough.md row 114) [the bit verified; its use by those
+  paths inferred]. The third-person camera follows
+  the player object: the knockback carries it, the view turns with the body (no Turn / Pitch).
+- **Enter** (`0x1002ef40`): in the air with no p7 the p5 clip plays on bone **Player p109 = 5**
+  (the spine) as an independent layer (+0x98 |= 0x10000) and 17 ends with that clip. Otherwise
+  the body turns **30 % of the way toward the attacker** (the pending matrix slerped with 0.3,
+  `0x1000d4c0`; the attacker is record +0x24, or +0x26 for an explosion) unless the clip under
+  way has root motion, the p4 clip plays on the whole body with **no blend** at speed 1, and root
+  extraction is on for x, y and z. **Per frame** (`0x1002f1d0`): the 30 % turn again while the
+  reaction clip has no root and neither Fall nor Landing runs (light hits turn him to the
+  attacker; the knockback goes straight back); extraction on; at the clip's end: p7 set ->
+  Landing (12), whose enter plays p7 with extraction (`0x1003bb33`) and whose leave ends 17;
+  else 17 ends. **Leave** (`0x1002ec60`): +0x620 = p9.
+- **Walls and ledges.** The root goes into the mover like walking, so walls stop the knockback.
+  Knocked off a ledge, Fall enter (`0x1003b81e`) plays p6 and zeroes the fall velocity, and
+  turns extraction off: he drops straight down, then the floor clip plays where he lands.
+- **Death while down** (death state 0 enter, `0x1002e7d8`): the killer-class clip (p330..p339)
+  first, else the reaction's p8, else the Player's p84 list.
+
+Port: `PlayerStates` (phases react / air / fallen / down) moves the feet by the clip root through
+`PlayerController.rootMove` (as the lunge), holds the stick (`stateHold`), the view (`viewLock`,
+the attacker turn applied to view and body together), the weapon actions (`actionsLocked`:
+attack, reload, throw, equip refused) and the body facing (`bodyYawHold`); a strike under way is
+dropped (`services.weapons.cancelMelee`). First person switches to third person and back. The
+port's 30 % turn is taken per frame at 30 fps [inferred]. Knocked off a ledge = off the ground
+for more than 0.05 s [port: the motor leaves the ground for single frames on steps]. Forces
+passed: NPC blades (`npc-melee.ts` p69 x the Attack's p7), NPC rounds and needles
+(`actor.ts missileForce`), the specials' blows that go through an Attack (Fester's charge, the
+CartWheeler's leap and ceiling slash: `specials/params.ts meleeBlow`), blasts (Radius Damage now
+reaches the player: `world/damage.ts`, which before skipped him, so neither NPC grenades nor
+barrels hurt him; the player's own blast through p7 with its force). Blows without a decoded
+force play no reaction [port]: the Rat's bite, Horace, Inferna, the Black One, the Nooseman, gas
+and fire (whose per-frame force stays below 7 anyway). Not modelled: the reload a reaction
+interrupts (Reload leave `0x10027a40` was not traced), the damage tint (+0x418..+0x430, Player
+p340..p351: a red screen fade scaled by damage between 0.1 and 50 [inferred role]).
+
+Measured (headless Brave, `tools/playthrough.mjs --keep`; 1a 395 / 507.5 facing -X, 1b arena),
+distance back along the start facing against the clip root x 1:
+
+| Blow | Reaction | Measured | Clip root |
+|---|---|---|---|
+| force 6.9 (direct) | none | 0 | |
+| force 7 / 12 (direct) | 2:126 / 2:138 | 0 / 0, turned to the attacker | in place |
+| force 17 / 30 (direct) | 2:128 then 2:130 | 3.545 / 3.545 | 3.0 + 0.545 |
+| force 12, first person | none | 0 | (p3 = 0) |
+| force 20, first person | third person, 2:128 + 2:130, first person again | 3.545 | 3.0 + 0.545 |
+| knockdown 1 m from a wall (unit test, real motor) | stopped at the wall | 0.65 = 1.0 - radius 0.35 | |
+| knocked off a 3 m ledge (unit test) | p6 pose, straight down, then 2:130 | 0.55 after landing | 0.55 |
+| CartWheeler blades (1b, real fight) | 7.8 -> 2:126; 24 -> 2:128 (+ the second blade 0.1 s later restarts it, 24 > 17); 7.8 in the 0.5 s cooldown -> none | 3.0 + 0.545 | |
+| ranged Slayer 10:527 (1b, 82 rounds) | force 6 each: none | 0 | |
+| Fester charge (1b, two strikes) | force 60 -> 2:128 + 2:130 | 3.0 + 0.545 | |
+| Mainliner leap / ride (1b) | leap force 0 (Attack 10:204 p7 = 0); the ride (Controlled) refuses 17 | 0 | |
+| blast with 2:736 (Radius Damage 4:282 values, 3 m) | 2:835: 2:672 | 0 | in place |
+| blast without a special (force 30 -> 10, 2 m) | 2:128 + 2:130 | 3.545 | |
+
+Frames: scratchpad `hitreact/shots/strip-kd-tp.jpg`, `strip-kd-fp.jpg`, `strip-blade.jpg`,
+`strip-medium.jpg`, `strip-blast.jpg`.
+
+**Third-person jump and landing** [verified unless marked; code `actors/player-states.ts`,
+`PlayerController.jumpOverride` / `rootFly`, `physics.ts MotorInput.moveY / fly`].
+
+- **Jump (state 8)**, enter `0x1003adf0`: the stick (camera-relative) against the body's
+  forward picks the clip: magnitude below 0.2 -> standing **PWP p151** (2:87); within p168 = 45°
+  -> forward **p152** (2:86); beyond p169 = 135° -> backward **p153** (2:85), the body turning
+  away from the stick; **between -> Roll** (state 15) toward the stick side (Roll enter
+  `0x1003aa3c` without the roll keys' bits). The forward and backward jumps turn the body to the
+  stick. Root scales: y = the jump power, z = (1 + power) / 2 x max(stick, 0.3), power always 1
+  (p211 = 100); speed 1; extraction on, lock off: **the clip's root is the trajectory** (no
+  gravity in Jump). Every human set: 2:87 apex 1.52 m, 0.9 s; 2:86 4.21 m forward, apex 1.90 m,
+  0.73 s, ends 1.35 m up; 2:85 5.22 m back, apex 1.91 m, 0.9 s.
+- **Per frame** (`0x1003b210`): air steering `0x1003a6e0` adds rate x the stick's world
+  direction: standing p207 = 3 m/s, a mostly sideways stick p208 = 3, along the jump p205 = 1,
+  against it p206 = 7. In the first 0.2 s of a standing jump a sideways stick turns it into a
+  Roll. At the clip's end: Fall with the root's last velocity (the animator's root delta / dt,
+  +0x15a), which Fall keeps (no air control without the first-person jump flag). Move cannot
+  start in Jump, Fall or Landing; Aim, Attack, Turn and Pitch can (turning turns the jump).
+- **Landing (state 12)**, enter `0x1003b990`: fall damage first (`0x1002db30`), then the held
+  PWP's clip by the fall's horizontal velocity against the body's forward: none **p158** (2:91,
+  0.2 s), forward **p160** (2:89, 0.1 s, **0.4 m forward** root), backward **p162** (2:88,
+  0.1 s); +1 (p159 / p161 / p163) when the fall did damage (the same clips in retail). **Fall
+  height picks only the damage, not the clip.** First person: no clip, the state ends at once.
+  It ends with its clip, then the stance idle p13.
+- The port's earlier third-person jump was a 6.05 m/s launch (`TP_JUMP_SPEED`, a 0.75 m apex)
+  with the motor's air control, and the body played the ladder's rung clip 2:234 as its jump.
+  First person keeps the decoded p215 = 10 m/s launch with p216 air control.
+
+Port: the clip plays in place on the body; its root moves the feet through the motor (`fly`:
+no gravity, the clip carries y; a ceiling or wall stops it); the fall after it keeps the
+velocity (`airAccel` 0); a landing clip plays after at least 0.12 s in the air in third person
+[port: the motor leaves the ground for single frames on steps]; the walk is held during jump,
+fall and landing. Measured (1b, 428 / 455, open floor):
+
+| Stick | Clip | Apex | Root | Ground covered at landing | Landing |
+|---|---|---|---|---|---|
+| none | 2:87 | 1.518 | 0 | 0 | p158 2:91 |
+| full forward | 2:86 | 1.906 | 4.212 forward | 6.09 (root + 1 m/s steering + the kept fall velocity) | p160 2:89, 0.401 |
+| half forward | 2:86 x 0.5 on z | 1.906 | 2.106 | 2.49 | p160 |
+| full back | 2:85 | 1.907 | 5.215 back | 6.13 | p162 2:88 |
+| full right | Roll (2:106) | | | | |
+
+Frames: `hitreact/shots/strip-jump.jpg`.
+
+**Ladder climbing (LadderClimb, state 27)** [verified; `world/interact.ts stepLadder`,
+`actors/interaction-clips.ts ladderRung`]. Enter `0x1011fa90` plays the Ladder Animation Set's
+hold p4 with extraction on; per frame `0x1011fb90` starts a new rung only when the last rung
+clip has ended (or from the hold): up p0 / p1, down p2 / p3 (alternating hands, +0x6a8), at
+**speed 1**, their root carrying the player: 0.5 m in 0.367 s = **1.36 m/s**. The port climbed
+a continuous 2 m/s and stopped mid-rung; it now climbs whole rungs at the rung clip's root (a
+started rung always finishes). Measured on 1b's ladder 82e2: 2.932 m in 2.15 s (1.364 m/s); let
+go mid-rung, it finished the rung (0.432 m more, 0.5 in all).
 
 Port: props are taken out of the static merge (`PROP_CLASSES` in `dynamic.ts`), get health,
 take `services.damage`, spawn their p18 generator, fire p21, and are hidden; the broken remains
@@ -3200,9 +3484,112 @@ save provider.
   start; inputs p15 On, p16 Off, p17 Destroy. Most are light shafts under skylights.
 - **Billboard** [inferred]: glow sprite (p0 texture), size p2..p3 growing with distance, fading
   past p9.
-- **DripMorphingModel / MorphingModel** [inferred]: p3 model frames (a frame naming no model is
-  empty: the drip has not formed), p4 frame times (s), p0 on at start, p16 On / p21 Off; a
-  Drip (p25) model falls from the tip at the end of each cycle.
+- **MorphingModel** (class 0xb51c3da1; Suffering.rfl vtable 0x10156110, `world/morphing-model.ts`)
+  [verified unless marked]:
+  - **Create** (0x100d2c10): p0 = 0 starts it off (+0xc bit 0), p1 loops (bit 1), p2 removes
+    the object at the end of a one-shot (bit 2), p10 rebuilds the drawn model at each segment
+    change (bit 3; 0 in retail). It refuses the object unless p3 holds at least two models and p4
+    one time per model when looping (the last time blends the last model back into the first),
+    one fewer otherwise, every time above 0. The total is the sum of p4. The clock starts at 0
+    and runs forward (constructor 0x100d3ba0 sets the direction bit 0x20): no random phase. A
+    one-shot is put on "think every frame" (engine vt +0xfc(8)).
+  - **Think** (0x100d2e20): nothing while off or paused (bit 0x100) unless forced (bit 0x80, set
+    by Reset and by the object being shown again: the shown bit is kept in bit 0x40). An object
+    that starts off is therefore drawn as placed until something starts it. Else the clock moves
+    by the frame time, forward or backward. Past the end a looping one wraps (fmod) and re-arms
+    its pause; a one-shot stops there: off, output **p15** (forward) or **p13** (backward), then
+    removed with p2 or posed at its end. The segment i is the first whose running sum of p4
+    reaches the clock, f = 1 - (sum_i - clock) / p4[i]. Reaching segment **p5** (-1 = none)
+    pauses it once per run (bits 0x100 / 0x200) and fires **p14**. A clock that passes **p11**
+    (0x100d31c4: o <= p11 < n, or on a wrap o <= p11 or p11 < n) calls vt +0x4c: p12 is spawned at
+    the object (0x100d25f0; null in retail). Segment **p9** (0 = none) starts a fade: opacity
+    (engine +0xd0) = 1 - (clock - start) / (total - start); a restart keeps the start, so the
+    opacity is above 1 (opaque) until that segment comes round again.
+  - **The blend**: every vertex v of the drawn model below the unique-vertex count becomes
+    A[v] + (B[v] - A[v]) x f (A = model p3[i], B = p3[i + 1], p3[0] after the last), then the
+    drawn model's duplicated vertices are copied from their sources (list +0xa8: u16 source,
+    u16 copy pairs, .mdu entry 17). The models must agree on the unique count (0x100d35c7;
+    otherwise the object is removed, engine vt +0x30). The unique count is the positive entries
+    of .mdu entry 22 (1-based own index; a copy holds -(source + 1)). The +0xb4 list the code
+    indexes is aligned across the models, and every retail key family agrees on that count while
+    the vertex counts differ: the drips' 3:160 / 3:148 / 3:149 have 49 / 41 / 49 vertices, 41
+    unique, the eight copies of 3:160 / 3:149 being their seam duplicates. A face-corner pairing
+    would scramble 3:160 (its corners are stored rotated) [strong: code shape + all 13 retail
+    families]. Only positions are written: normals stay. The object is then marked dirty (+8 bit
+    0x1000), so one lit at run time is lit again at its new positions, while one with .ldu colours
+    keeps them (docs/re/renderer.md §1.9) [verified renderer; port: the first pass's colours are
+    kept]. The blend runs only while the object or one of its +0x38 list is drawn (an
+    optimisation).
+  - **Inputs** (map 0x10178a18, in this order, every slot holding the message): **p16** On (on,
+    and an immediate think), **p21** Off (off, its sound stopped), **p17** backward / **p18**
+    forward / **p22** flip the direction (each also turns it on and thinks), **p23** Reset (clock
+    0, pause cleared, off, forced: the next think poses the start), **p19** skip the coming pause,
+    **p20** resume a pause (and think), **p24** remove the object (0x100cb870 -> engine vt +0x30).
+    The template defaults are On 1, Off 2, p19 / p20 Triggered 6, p22 Reverse 7, p23 / p24 Reset
+    10, so a default Reset rewinds and removes it; 3b's 22e6 (the only one sent Reset) has p24
+    cleared. A one-shot at its end stays there off: On only re-ends it; Reset (then On) replays it
+    and Reverse plays it back.
+  - **Not ported**: p7 / p8 (a random p7 sound every total time while none plays; p8 stops it
+    with Off / the end) and p6 (hold the clock while a key model is not loaded): every retail p7
+    is empty.
+  - **Census** (all 18 levels): 41 MorphingModels and 132 DripMorphingModels in 8 levels.
+    - **Drips**: 1a 19, 1b 30, 2 13, 3b 50, 4a 9, 8b 8, 10 3. The keys are 3:160 / 3:148 /
+      3:149 / 3:148 (additive 3:2535) or 3:513 / 3:512 / 3:511 / 3:512 (opaque 3:2539), looping,
+      over 0.53 to 9 s cycles.
+    - **One-shots on the floor**: the spreading pools 3:1841 / 3:1842 (1a 8922, 2 119e / 11a1 /
+      11a2: off, never sent anything, so drawn as placed: the full pool p3[2]).
+    - **Rising liquid sheets**: 3:1844 / 1845 / 1846 (3:380 <-> 3:376 over 7 s; 2 Cellblocks'
+      eleven are started by Message Relays and driven back and forth by Timers' Test (p17) and
+      relays' Toggle (p18); 3b's eight and 8b's three run once at the start).
+    - 3b's flood sheets 22e6 / 2459: 443 / 593 vertices, 2 s segments, paused at segment 4.
+      2459 is driven by a Count Down To Zero (Increment p18 / Decrement p17) and fires On at its
+      end.
+    - 3b's 2f09 / 2f0a / 2f0b (380-vertex keys and a 12-vertex card): a looping one that a Timer
+      removes (p24 Destroy) while the same Destroy starts the other two (their p16 = Destroy).
+    - 2 Cellblocks' 2e15 / 2f18: Timer-started one-shots of 20 and 89 vertices.
+    - **Looping blends** 23:131 (10 Docks four, 5a five): 2.9 m alpha sheets of 72 vertices,
+      drawn as 23:133 (not one of its keys), on from the start.
+  - **Port** (`morphing-model.ts` MorphMachine / MorphTargets, `props.ts`): every placed one runs
+    the decoded think and inputs on its own placed object (with its .ldu or load-time colours).
+    The blend is GPU morph targets: one target per distinct key model, positions resolved through
+    the unique / copy rule. Each frame only sets two influences, (1 - f) on A and f on B (three's
+    absolute targets give A + (B - A) x f), so no vertex buffer is rewritten (the prop batch
+    leaves morphing meshes alone). Outputs go to the links, p24 / p2 destroy the entity. The save
+    keeps clock, flags and fade (`morphRun`; old saves' `morph` on flag still loads). Before this
+    the port swapped whole frames from a random phase. That drew the off-at-start pools as their
+    first key, a 3 cm dot, and the sheets as their other end, and it ignored p5 / p9 / p11 /
+    p17..p24 and the outputs. The thrown flare's flame uses the same targets (`MorphingModelRun`).
+- **DripMorphingModel** (class 0x3c3d9695, vtable 0x10154c78) and **Drip** (0x63158a64, vtable
+  0x1014dfe0; `world/drip.ts`) [verified unless marked]:
+  - **The model**. A MorphingModel whose vt +0x4c (0x100a8b40) spawns its p25 Drip at its
+    transform when it has none (one per model) and releases it, each time the clock passes p11.
+    p11 is 1.1 of the 1.12 s cycle (scaled with it). For 3:1427 it is 0.55 of a 0.533 s cycle:
+    crossed at every wrap. So **a drop leaves at the end of each cycle**, from the third key, the
+    hanging drop. Its think wrapper (0x100a8a40) marks the frame; in a frame without that think
+    the drip is reset and its splash objects are removed (0x100a8bf0).
+  - **Prepare** (the Drip's first think, 0x100a8500): a ray 1000 m down from its position
+    (0x100c6630). No hit removes it. A hit on a Water Volume (class check 0x029e9104) makes it a
+    water drip. At the hit (the drip's x / z, no rotation) it spawns p4 / p5 (p6 / p7 on water),
+    dormant and hidden. Then it resets (0x100a8270: hidden, at its start, at rest). The release
+    that came with the spawn is undone, so drops fall from the second cycle on.
+  - **Fall**: released (0x100a8840) it is shown and falls. Each think: v -= p3 x dt x g (g the
+    world gravity), the position moves by v (a per-frame step, not v x dt), and the distance
+    fallen grows by |v|. At the prepared distance it resets and hits (0x100a8730): the p4 / p6
+    MorphingModel is shown and restarted (Reset + On, 0x100d3ad0) and the p5 / p7 Object
+    Generator gets input p32, On. When the splat is off again, both are put to sleep and the
+    splat is hidden.
+  - **Retail Drips**: 3:4110 (the additive drop 3:150, p3 0.04; floor: generator 3:2666 only;
+    water: ring 3:2667 + generator 3:1417) and 3:4111 (the opaque drop 3:185; floor: splat
+    3:1424 + generator 3:1423 with the drip sound 3:71; water: 3:2667 + 3:2666). The splats are
+    one-shots of ten 37-vertex keys over 1.0 s, fading from segment 5. p2 = 1 on both, so they
+    never drip by themselves (p0..p1 s, random, with p2 = 0); the inputs p8..p11 (prepare again /
+    sleep / release / remove) are never sent.
+  - **Port**: `Drip` (spawned by `props.ts` on the model's p11 crossing). The fall is stepped at
+    30 engine frames a second [inferred rate]: 3 m in 21 frames, 0.7 s. The water test reads the
+    water surfaces (levels/water.ts), since the collision world holds no Water Volumes. The splat
+    is a MorphMachine on GPU targets and the generator goes through `fx.spawn`. The not-drawn
+    reset is not ported: the model always thinks. Before this a drop of the template's model fell
+    at 9.8 m/s² from every cycle end, and nothing splashed.
 - **Instance Rendered Object** [inferred]: p2 copies of the object's model (grass, debris),
   seeded by p1, scale p5..p6, yaw p7..p8, scattered over the object's footprint and dropped
   onto the ground.
@@ -3628,6 +4015,32 @@ Port: `src/game/world/use-anim.ts` (UseAnimator), driven by `interact.ts`.
   the root motion), cell sink 5a4b, 1b locker 890b (open and close), a cinematic and a death
   during a use. Tests: `tests/use-anim.test.ts`.
 
+#### Brushing an Animating Static [verified unless marked; `actors/brush.ts`]
+
+- The touch handler (Animating Static vt +0x24, 0x10093d10) does nothing without p37 clips. The
+  contact must come from a Collider (class 0xfa5951fc) whose owner is the Player (0xc8bc44e1):
+  the player's movement proxy (Player p91, Collider 2:44: four r 0.6 spheres at 0, 0.9, 1.306
+  and 1.639 m, the foot sphere's centre at his origin), which collides with the Animating Static
+  class in its per-frame query (§14.2 "Who touches it", §14.10). NPCs, thrown objects and the
+  player's own body do not count.
+- Each such touch stores the game clock (+0x66). Only when the previous touch was 0.2 s ago or
+  more (0x10150dd0) does a clip play: a random p37 entry (0x1002d380) on channel 0 with the same
+  request as p40 (flags 4; 0x100935b0). So it plays once as the player walks into the object,
+  not again while he stays in contact, and again after 0.2 s apart.
+- When channel 0's clip has finished, the think (0x10093e70 -> 0x100938f0) plays the next idle
+  clip (p23, or p24 with p25; p26 random / shuffled / in order), so the object settles back.
+- The contact test is the two sphere trees' leaves, sphere against sphere (0x4d2a00): the proxy's
+  chain and the object's skeleton tree posed by its bones. 1a's 23:157 has one r 0.45 leaf 0.37 m
+  up; the shrubs 23:94 four (r 0.9 / 2.95).
+- Retail: 1 251 Animating Statics carry p37: the plants and trees of the outdoor levels (23:94,
+  23:98, 23:99 ...), the plants of 1b, 2, 3b and 5b (7:1950, 7:1953), four in 1a and two in the
+  Prelude (23:157). Level 7 has none [data].
+- Port: `BrushAnimations` (actors/system.ts, after the actors' update) tests the proxy at the
+  player's feet against each such decoration's posed leaves when he is near, keeps the touch
+  stamp, plays the clip once (`playClip`) and the kind's idle loop again when it is done.
+  [port: the engine's contacts come from the mover's sweep; the port tests where the frame
+  leaves the spheres.] Debug: `__actors.brush.log`. Test: `tests/brush-animation.test.ts`.
+
 ### 14.6 Chapter 1 coverage (1a / 1b / 1c instances)
 
 | Class | Count | Port |
@@ -3640,7 +4053,7 @@ Port: `src/game/world/use-anim.ts` (UseAnimator), driven by `interact.ts`.
 | Ladder, Clamber Point, Mountable | 1, 0, 0 / 2, 5, 1 / 3, 0, 0 | climb, clamber, mounted gun |
 | Particle Fountain, Object Generator | 54, 98 / 7, 17 / 0, 8 | particles, spawns |
 | Volumetric Fog, Billboard | 13, 6 / 7, 0 / 1, 2 | fog puffs, glows |
-| DripMorphingModel, MorphingModel | 19, 1 / 30, 0 / 0, 0 | frame cycling, drops |
+| DripMorphingModel, MorphingModel | 19, 1 / 30, 0 / 0, 0 | vertex blends, drops and splats (§14.2) |
 | Instance Rendered Object | 20 / 0 / 76 | scattered instances |
 | Sky / Sun, Fog / Sky Switcher | 5, 1 / 3, 0 / 10, 2 | camera-centred sky, fog blend |
 | Lighting Effect | 3 / 3 / 0 | colour / strength curves (templates on lights too) |
@@ -4266,6 +4679,29 @@ Besides the slots of 15.1, chapter-1 logic sends **On** to sleeping characters (
 STOMP Players, Object Cloner p15): the port wakes them. A woken character takes its p69
 behaviour unless a Behavior Changer gave it one.
 
+**Speech priorities** [verified unless marked; `actors/speech.ts`]. A character has one speech
+channel (the Character's at +0x40e, the Player's at +0x248). Speak (0x1012d190) starts a line
+when the channel is silent (no handle, or its sound has ended) or when the new line's priority is
+above 1 and at least the priority of the line being said (+0xb4); the old line is then stopped.
+Otherwise the new line is **dropped**: nothing queues it. Character Say (0x100e1b40) says nothing
+for a dead character. The callers' priorities:
+- 1: conversation lines (PlayDialog 0x100ffbc2), Speech Player lines (0x1012dab4), the Action
+  Dialog's spotting barks (p6, 0x1008d7fa), the behaviours' other lines, the Player's own (0x10041320);
+- 2: the Action Dialog's answers to the player's hits: the warning (p16, 0x1008d5ec), p13
+  (0x1008df56) and the turn (p20, 0x1008e065);
+- 9: a sound a STOMP key hands the character: key flag 0x20 sends message 0x1011 with the sound
+  handle (SUFFERING.EXE 0x450b10 -> 0x450120), the Character queues it (0x100e3f53 ->
+  0x1012d370) and its speech update (0x1012d3b0) takes it as the current line at priority 9 once
+  it plays [strong for "once it plays": the engine's handle states are not all traced]. 243 of the
+  1 839 retail sound keys carry the flag.
+So a line never cuts a line, a hit answer cuts a line or another answer, and a sequence's line
+cuts everything; a conversation's PlayDialog waits on the channel (its done test 0x1012cf40 asks
+the channel's handle), so a dropped line costs the talk nothing but its sound. Port: the actors
+system's `speak` takes the priority and drops or cuts (`speechAdmits`); `Actor.speechPriority`;
+`Actor.adoptSpeech` for flagged STOMP keys (sequence/system.ts); a conversation line that was
+dropped waits for the line still playing. Before, every line played over the last (two voices
+from one mouth) and a talk did not wait for a bark. Test: `tests/speech-priority.test.ts`.
+
 ### 15.5 Movement, doors, attacks (port)
 
 - Gameplay clips carry the clip's hips offset like scripted ones (§7; seated / crouched /
@@ -4289,6 +4725,59 @@ behaviour unless a Behavior Changer gave it one.
   line reached them). Before, the goal went to 254a, no path led there, the walk ended at the
   ladder and the room's scene for a missing Jimmy ("Camera" 1ed5) played; now Detector 26b5 sees
   him on the walkway and his "Camera" 1eb1 plays (session, 2026-10-23).
+- **The edge area and the fallback, in detail** (decoded 2026-10-26 for 6b's Clem; `nav.ts
+  edgeHolds / locateEdge / navEdgePasses`, tests `tests/nav-locate.test.ts`):
+  - Node record (0x100db756): a square of full side = the instance's scale x (m) turned by the
+    node's yaw [strong]; the square test (0x100d3da0) turns the offset by -yaw and takes
+    |x|, |z| <= side / 2 less a caller margin, with no height test [verified]. FindPath's target
+    and FollowPath's relocate pass margin 0 (0x101102d3, 0x1010f288), and the mover's margin
+    (+0xde) is zeroed at init with no other writer found: **no walker radius is taken off**
+    [strong]; the "less the walker's radius" above was not supported by the code.
+  - Prefilter (0x100d6a10 with skip = 0): within 2 m ([0x10178b30], 4096 units) of the plane
+    through node A that holds the edge and its horizontal perpendicular (0x100d5c90 / 0x100d5da0),
+    and within 1.415 x side (3D) of either node or over the segment within the smaller of the two
+    horizontally (0x100d4eb0) [verified]. Then either square, or the strip: up to 8 of both
+    squares' corners, built at load into edge +0xc / +0xf (the convex hull of both squares
+    [strong]), point in polygon on x / z (0x100d6040) [verified].
+  - The global locate (0x100d87e0, FindPath's hint edge is always -1, 0x1010ea7c) walks the grid
+    cells outward from the point's own and returns the first edge that passes the walker filter
+    and holds the point. **When none does, it returns the edge whose area outline is nearest
+    horizontally (0x100d5940) among the edges that failed, the walker's type filter included**;
+    it comes back empty only when the graph has no edge at all [verified]. The port takes the
+    nearest outline over all edges (the original stops at the first productive cell) [inferred to
+    agree].
+  - An edge's types follow from its nodes (`navEdgePasses`, the rule above). The A*'s neighbour
+    filter (0x100d5c30 -> 0x100dbf30) drops edges barred to the walker, so a target the fallback
+    puts on a barred edge has no path: FindPath fails, MoveTo code 2 [strong].
+  - **MoveTo, decoded** [verified unless marked; MoveTo vtable 0x10157460, start / child-done /
+    update 0x10111720 / 0x10111a40 / 0x101118d0; FollowPath 0x10157580; SimpleMoveTo 0x101574b8;
+    ArriveSteer 0x10157088]: it **arrives** when the target point (the object plus its offset,
+    refreshed every update) lies within the request's distance (+0x1c: Waypoint p2 x 2048)
+    horizontally (ArriveSteer 0x10112a80, squared), and on a path also when within it in 3D at
+    FollowPath's 0.4..0.6 s check (0x10110cbb). It **fails** (code 2) only when FindPath finds no
+    path (0x10110589; a Waypoint request does not retry, 0x10111a76). FollowPath never fails: a
+    leg child ending badly, the target leaving the path's end or the body leaving its edge's
+    corridor make MoveTo search again from where the body is. **There is no progress or time
+    check**: a body that cannot advance keeps pushing. Port: the 0.45 m Waypoint arrival
+    (`actor.ts WAYPOINT_REACH`; Waypoint p2 is 1 m on 526 of the retail Waypoints) and the port's
+    no-progress failures (flee, follow, Killjoy, Inferna: 3..4 s) are the port's own (open).
+  - **WaypointBehavior p7** [verified code path, meaning strong]: p7 = 0 sets the character's
+    straight-walk bit (+0x6c bit 0x800) for the behaviour's life (0x100e9fc8 / 0x100e9ff0), and
+    MoveTo then walks one SimpleMoveTo straight at the target, with no graph and no failure
+    (0x1010ffa3); Character p43 = 0 sets the same bit (retail: only 1a's 71ec). All 16 templates
+    have p7 = 1; 50 instances set 0. The port still reads p7 = 0 as "a hostile walker leaves the
+    path for an enemy" [guess] (open), and applies the FindPath failure below only with p7 = 1.
+  - Port: `waypointLegFails` fails a path-mode leg whose Waypoint `locateEdge` puts on an edge
+    the walker may not use (unless the body stands in that edge's area). Census (all 18 levels,
+    517 Waypoint legs of path-mode WaypointBehaviors handed out by Behavior Changers): one such
+    leg, 6b's Waypoint 208d. Clem's walk 208c (Behavior Changer a45, after the second Fester
+    wave) goes there, off every edge beside the pier door; the nearest outline is the edge
+    17f5-1872 (2.3 m), kept from his type 10:674. In the original the walk fails at once and
+    a45's chain goes on (his line a46, then Relay a55: the Fester wave a54 and his follow;
+    then a4a, the wave 1fe1, whose end enables the pier door's Detectors 203a / 2059 through
+    Count Down 1d89 -> Relay 20a6 -> 205c). The port walked him into the sand slope under
+    208d (a 0.9 m step at z 244.3, the Waypoint 1.4 m inside the ground) for good, so with Clem
+    alive the waves never ran out and the door stayed shut (playthrough bug log row 117).
 - **Straight walks keep to the ground** [port; `nav.ts groundAlong`]. The original walks a MoveTo
   along the graph's edge areas; the port's shortcuts off it (a straight walk on a clear line, a
   skip to a later path node, the walk to the start node) also need ground under the body's
@@ -6335,9 +6824,9 @@ the knockdown bleed-out), `player-body.ts` (killer death clips); tests `tests/di
 
 ### 15.17 Port option: enemies ignore the player (not in the original)
 
-**What the original has** [verified]: the cheats are one object, Game Cheats (class 0x2b195280,
-template 2:935). Its p0..p24 are the 25 typed cheat phrases (string refs), p25..p32 sound lists and
-p33..p36 sounds. The dispatcher (Suffering.rfl `0x100013c0`, a 25-entry jump table at
+**What the original has** [verified]: the cheats (§15.18) are key sequences typed while a chord is
+held, dispatched with the Game Cheats object (class 0x2b195280, template 2:935): its p0..p24 are
+the names shown after a cheat (string refs), p25..p32 item lists and p33..p36 sounds. The dispatcher (Suffering.rfl `0x100013c0`, a 25-entry jump table at
 `0x1000187c`) acts on the Player only: reputation -50 / +50 (`0x10041460`) or set to p70 / p71,
 blood full (`0x1002b2d0`) and blood clear, health, suicide (a 100000 blow), weapons and items
 (`0x100421c0` with 0..8), ammo for the weapon in hand (`0x10037f20`), grenades refilled to 8
@@ -6371,6 +6860,118 @@ there is nothing to mirror: the option is the port's own and is labelled so in t
   stray damage still applies. The HUD shows "ENEMIES IGNORE PLAYER (port option)" at the top
   while it is on. `?ignorePlayer=1` / `=0` overrides the saved value for a page load;
   `tools/playthrough.mjs --ignore-player` passes it (testing only).
+
+### 15.18 The original's cheats [verified unless marked]
+
+Read in Suffering.rfl: the input poll `0x100018e0` (state object `0x1017bae8`), its caller in the
+game frame `0x100b1960`, the dispatcher `0x100013c0` (jump table `0x1000187c`) and the routines it
+calls; in SUFFERING.EXE the engine interface the RFL holds at `[0x1017bf40]` (vtable `0x58ca50`),
+the HDR glow state `0x5ba0a4` and the renderer `[0x6dd650]` (vtable `0x593bf8`).
+Port: `src/game/cheats` (rules.ts, system.ts), `tests/cheats.test.ts`.
+
+**Input.** There is no console and no typed text: a cheat is a sequence of keys typed while a
+chord is held.
+- The poll runs from the game frame whenever the game state `0x1017ac2c` is 2 (a level running).
+  It runs whether the game is paused or not: the call sits after the paused test at
+  `0x100b19a0`.
+- The keyboard comes as a set of DirectInput key codes (`[0x1017bf90]` vt+8). The chord is the
+  -1-terminated key list at `0x1014b0b8`. All of its keys must be
+  down; their bits are taken out of the set. When any chord key is up, the buffer empties.
+- While the chord is held, each key that went down since the last poll is appended to a
+  32-entry buffer (`+0x10`), lowest code first. When the buffer is full, nothing more is taken
+  until the chord is released.
+- After the appends, the buffer is compared with the 25 sequences (pointer table `0x1014b480`,
+  each list -1-terminated, built from the arrow keys and Enter). A sequence matches when the
+  buffer starts with it; the lowest index wins. The comparison always starts at the first key,
+  so one wrong key spoils the attempt until the chord is released. Case and spacing do not
+  apply.
+- A match calls the dispatcher with (case, announce = 1) and blocks the input (`+4`) until the
+  chord is released. No key is consumed: the arrows still move Torque, Enter still uses, and the
+  chord keys keep their game bindings, as in the original.
+- The only other reader of the state is the inventory key: it does not open the inventory while
+  the chord is held (`0x1004944e`).
+- Port: the chord and the sequences are code data of the user's Suffering.rfl. They are read at
+  runtime (`readCheatInput`) and none of them is in the repository. The keys are tracked from the
+  window's key events (capture phase, not consumed) and polled on every change; the original
+  polls once per frame. All 25 sequences can be reached by typing (test).
+
+**Where and what is recorded.** There is no mode gate (difficulty, chapter, cutscene or pause);
+only a Player must exist. The dispatcher writes the Player's state and the two toggle flags. There
+is no "cheated" flag: saves, checkpoints, the reputation and the ending, and the unlocks work as
+after any other change. The toggles live in the RFL's static state object. They are not saved,
+and they survive level loads [strong]. In the port they last for the page session and are applied
+again at each level start. Whether the engine keeps its clock across a level load was not traced
+[inferred].
+
+**Announcement.** After a case, when announce is set and the Game Cheats template (Player p314)
+exists, the confirmation sound plays (p33; p34 for case 19, `0x1000180e`). The name, Game Cheats
+p[name], then goes to the pickup text widget (`0x100bc260`). The name index is the case index,
+except that cases 22 / 23 / 24 show p24 / p22 / p23.
+
+**The 25 cases** (the case is the index of the sequence; "p" without a class is Game Cheats):
+
+| Case | Name | Effect |
+|---|---|---|
+| 0 / 1 | p0 / p1 | reputation −50 / +50 (`0x10041460`, no clamp, then the skin update) |
+| 2 | p2 | blood: the blood component's add (vt[0]) with its maximum (`0x1002b2d0`). The held weapon gets the same add; while transformed, only the "fill on change back" flag is set (§13.2) |
+| 3 | p3 | blood level = 0 (Player +0x42; the body only, the weapon keeps its blood) |
+| 4 | p4 | a 100000 blow to the player (damage record `0x10001190`, Player vt+0x58): death |
+| 5..8 | p5..p8 | item lists p25..p28 |
+| 9 / 10 | p9 / p10 | reputation = Player p70 (−150) / p71 (+150) (`0x100414b0` / `0x10041480`) |
+| 11 | p11 | without a flashlight (+0x134), the Flashlight class's template (4:72); then 10 of its p69 (batteries 4:203), capped at their p44 = 9 (`0x10042120`) |
+| 12 | p12 | the Ranged Weapon in hand: + 1000000 of its p68 ammo, capped at the ammo's p44 (`0x10037f20`) |
+| 13 | p13 | the throwable on the throw bone (the selected one) topped up to 8 (`0x1003a3a0`) |
+| 14 | p14 | only while transformed (state 20); otherwise the dispatcher returns silently, with no sound and no name. While index + 1 < 5, state 30: the next insanity attack is acquired at once, as when its p0 threshold is reached (`0x10042100`, §13.2) |
+| 15 | p15 | insanity meter = Player p258 (`0x10033270`): full |
+| 16 | p16 | health = its maximum (+0x1a) through the health setter (vt+0x50, `0x1002daa0`). This is not the god flag `0x1002d590`, which no case sets |
+| 17 / 18 | p17 / p18 | item list p29 / the Player's own p315 (every weapon, its ammo and the throwables). While transformed, the creature template is read, and its p315 is empty |
+| 19 | p19 | cases 16, 15, 2, 9 and 18, unannounced: full health, full meter, blood, the evil reputation end, everything in p315; then the p34 sound |
+| 20 | p20 | toggle: grey film (state +0xd4), see below |
+| 21 | p21 | toggle: whole-frame glow (state +0xdc), see below |
+| 22 / 23 / 24 | p24 / p22 / p23 | item lists p32 / p30 / p31 |
+
+After every announced case except the early exit of case 14, `0x1002ff40` refreshes the Player
+(HUD meters).
+
+**Item lists** (`0x100421c0` n → `0x10041130`): n 0..4 read p25..p29, n 6..8 read p30..p32, and
+n 5 reads Player p315. Each template of the list is created at the player and handed over at
+once (its vt+0xa0 → Player `0x1003a410`). This skips the touch handler, so there is no CanPickUp
+test, no pickup text and no pickup sound [verified]. A carried supply at its cap stays there (the
+add clamps to Item p44) [strong]. The retail lists hold Ammo Boxes (weapons with their rounds,
+ammo, grenades), Health Bonus Items (Xombium) and Map Packs (the maps). Port:
+`WorldService.giveItem`.
+
+**The screen-effect toggles** (engine interface `0x58ca50`):
+- **Grey film** (case 20):
+  - slot +0x28 → renderer vt+0x6c → +0x134 (`0x49a160`). With the flag set, the end-of-frame
+    blit `0x49d5d0` draws through pixel shader 0. That shader is `xvsh\xpsBW_PC.psh`, one dot
+    product of the frame colour with (0.3, 0.55, 0.15), so the whole frame turns grey;
+  - slot +0x44 (`0x40b8a0`, the game clock) at 1.3: a sped-up silent film;
+  - the looping sound p35 starts and its handle is kept (+0xd8).
+- **Whole-frame glow** (case 21):
+  - slot +0x24 → glow state +0xc (`0x48cde0`). The HDR scene glow (renderer.md §3.2) then skips
+    its mask (`0x48d232..0x48d2e9`: no stencil or alpha test), so the whole frame, not only the
+    flagged surfaces, comes back blurred and added: a frame-wide bloom;
+  - the clock at 0.7;
+  - sound p36 (51 s, +0xe0).
+- **Off**: the flag goes to 0, the clock to 1, and the sound stops (sound manager vt+0xc8 with 1.0,
+  read as a 1 s fade [inferred]).
+- Both toggles share the one engine clock, so the last call wins. A Time Scale run (which ends
+  "back to 1") or a morph (1 / p272, then 1) also sets it back to 1 while the toggle stays on.
+- Port:
+  - the clock is `EffectDirector.baseRate` (insanity/screen.ts), reset by Time Scale runs and
+    the morph.
+  - Grey film: an SVG colour matrix with the shader's weights on the canvas. It works on the shown
+    (gamma) values, as ps.1.0 did on the back buffer, so it holds in both Original and Enhanced.
+    In Original it needs the Pixel Shaders option, as the engine needs its front-buffer path
+    [strong]. The HUD canvas stays in colour [inferred].
+  - Whole-frame glow: in Original, `SceneGlow.state.flag` (scene-glow.ts drops the mask). In
+    Enhanced (no engine glow), the bloom threshold goes to 0 [port analogue].
+
+**Port convenience (not in the original):** the pause menu's "Cheats (port)" page
+(`src/app/menu/screens/cheats.ts`). It lists the 25 cases by their names from the user's data and
+applies one per press, exactly as typing its sequence would (with sound and name). The toggles
+show On / Off.
 
 ## 16. Materials and surface rendering [verified unless marked]
 
@@ -6686,6 +7287,30 @@ port's third-person gait cycles fire the markers of the clip they stand for, re-
 cycle. It also plays Land after a fall of more than 4 m/s when the landing clip did not [port].
 Verified headless: the player's run clip (328:28) fires Heavy at 0.168 / 0.527 s; guards walking
 in the 1a intro play the NPC lists.
+
+**The surface under the feet** [verified unless marked]. The Player's handler (0x10042cd0) asks
+its ground contact: on a floor layer (`+0x7a`) it calls 0x100b0c10, which asks the layer
+interface (`[0x1017bf44]`, SUFFERING.EXE vtable 0x593dfc: its +0x28 is the cell-diagonal test
+0x49db80 the RFL's hole checks use) for the texture at the feet (+0x10, 0x49f790): the cell's
+texture index (cell word +2) picks the layer's texture list, and an index below 0 gives the null
+handle; on an object (`+0x76`) it takes the material of its model's first material group
+(0x100b0ba0 -> 0x100b05b0). Either handle goes through 0x100b6310, which returns the handle's Game
+Material Properties or, when there is none or word 0 names a Material Type (the engine warns and
+refuses it), **Level Properties p17**; that GMP's p0 Material Type picks the list entry
+(0x100c7790, the untyped entry as default). Every retail level names 2:7 in p17, which has no
+Material Type (p2 hardness 0.5, p4 0).
+- **Hidden floor-layer cells** (flag 0x30: the loader sets it when the cell's texture does not
+  resolve, 0x4a05df, and stores index -1) therefore give the null handle and the level default:
+  no Material Type, the lists' default entry. Neither the layer's material nor the drawn model
+  above (5b's node-less room models collide with nothing, §14.10) is asked [strong: the lookup of
+  the null handle in 0x1017bf84's vt+0 is not traced]. The port's default footstep there was the
+  right one.
+- What changed in the port (fx/surfaces.ts `setLevelDefault`, from Level Properties p17 in
+  fx/system.ts): a material without GMP, or with a Material Type in word 0 (15 Advanced
+  Materials, 7:260 ...; before, the port used that type), and a part with neither material nor
+  splat take the level's GMP: type none, and the impact / bounce properties of 2:7 (hardness 0.5:
+  a BouncingObject's hard-surface bounce sounds, the casings', now apply there).
+- Tests: `tests/footstep-surface.test.ts`.
 
 ### 17.7 Directional and Ambient Light
 

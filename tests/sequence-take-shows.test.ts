@@ -145,3 +145,50 @@ test('a saved game keeps a Character\'s fade (Hermes at 85 %, not his creation 0
   assert.ok(Math.abs(b.opacityOf(0x7eb4)! - 0.85) < 1e-6);
   assert.ok(Math.abs((c2.ch.mesh.material as THREE.Material).opacity - 0.85) < 1e-6, 'drawn at 85 %');
 });
+
+test('keys at one time: the take comes before a hide (engine tag rank, 0x44dbf0 / 0x5b9c70)', () => {
+  const t = track(0x200, [{ time: 0, release: false }]);
+  t.visibility.push({ time: 0, visible: false }, { time: 2, visible: true });
+  t.messages.push({ time: 0, message: 1, param: 0, flags: 0 });
+  const seq: StompSequence = { id: 2, flags: 0x46, length: 20, duration: 2, byteLength: 0, tracks: [t] };
+  const got: string[] = [];
+  const sink: StompSink = {
+    send: (_u, m) => got.push(`msg ${m}`),
+    setVisible: (_u, v) => got.push(v ? 'show' : 'hide'),
+    pose: () => {},
+    control: (_u, release) => got.push(release ? 'release' : 'take'),
+  };
+  const run = new StompRun(0x51, seq);
+  run.advance(0.01, sink);
+  assert.deepEqual(got, ['take', 'msg 1', 'hide'], 'control (rank 1) first, then messages / visibility (rank 5)');
+  run.advance(5, sink);
+  assert.deepEqual(got.slice(3), ['show']);
+});
+
+test('retail 5b "Camera" 1296: Killjoy 13e3 is taken and hidden at 0 s, shown at 9.88 s', { skip }, async () => {
+  const path = 'LEVELS/5 Asylum/5b Asylum.lvl';
+  const lvl = readSrsc(path);
+  const warn = console.warn;
+  console.warn = () => {};
+  let packages: EntityPackageSet;
+  try {
+    packages = (await loadPackages(nodeFS(), dirname(path), readLevelHeader(lvl).dependencies, () => {})) as EntityPackageSet;
+  } finally {
+    console.warn = warn;
+  }
+  const hooks = new Proxy({ player: () => ({ feet: [0, -1000, 0], eye: [0, -998, 0], forward: [0, 0, 1] }) } as Record<string | symbol, unknown>, {
+    get: (o, k) => o[k] ?? (() => undefined),
+  }) as unknown as WorldHooks;
+  const world = new World(parseEntities(lvl, packages, { resolveStrings: false }), packages, hooks, { levelPath: path });
+  world.start();
+  world.update(0);
+  const kj = world.get(0x13e3)!;
+  assert.equal(kj.cls, 'Killjoy');
+  assert.equal(kj.visible, false, 'placed hidden');
+  world.send(0x1296, 1);
+  for (let i = 0; i < 30; i++) world.update(1 / 30);
+  assert.ok(world.activeCutscenes().some((c) => c.uid === 0x1296), 'scene running');
+  assert.equal(kj.visible, false, 'hidden by the 0 s hide key after the take');
+  for (let i = 0; i < 300; i++) world.update(1 / 30);
+  assert.equal(kj.visible, true, 'shown by the 9.88 s key');
+});

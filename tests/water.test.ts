@@ -66,7 +66,8 @@ test('water rules: ripples every (1 + rand) p20, the running wake every p19, non
 
 const plane = (y: number, s = 20): MeshPart => ({ positions: new Float32Array([0, y, 0, s, y, 0, 0, y, s, s, y, s]), indices: new Uint32Array([0, 2, 1, 1, 2, 3]) }) as unknown as MeshPart;
 
-function rig() {
+/** `rand`: the ripple interval's random factor (deterministic: Math.random made this test flaky). */
+function rig(rand: () => number = () => 0.5) {
   const surfaces = new CollisionWorld({ parts: [plane(84)] });
   const body = { position: new THREE.Vector3(10, 85, 10), pitch: 0, canRun: true, eyePosition: () => body.position.clone().add(new THREE.Vector3(0, 1.6, 0)) };
   const log: string[] = [];
@@ -85,6 +86,7 @@ function rig() {
       log.push(`drown ${clip}`);
       alive = false;
     },
+    random: rand,
   };
   const w = new WaterRuntime(surfaces, body, () => true, R, env);
   return { w, body, log, set: (o: { alive?: boolean; running?: boolean }) => ((alive = o.alive ?? alive), (running = o.running ?? running)) };
@@ -102,11 +104,13 @@ test('water runtime: entry splash p19, ripples, the run limit and drowning with 
   assert.ok(Math.abs(w.player.depth - 1) < 1e-3);
   assert.deepEqual(log.slice(0, 2), ['4:1305', '4:1294']);
   assert.equal(body.canRun, true);
-  // Running: once the ripple timer (0.5..1 s) runs out, the wake p16 every p19 (0.03 s).
+  // Running: once the ripple timer ((1 + 0.5) x 0.5 = 0.75 s) runs out, the wake p16 every p19
+  // (0.03 s: every second 16 ms update). The timer expires in update 47; wakes in 47, 49 .. 79.
   set({ running: true });
   log.length = 0;
   for (let i = 0; i < 80; i++) w.update(0.016);
-  assert.ok(log.length >= 10 && log.every((k) => k === '4:1288'), log.join(' '));
+  assert.equal(log.length, 17, log.join(' '));
+  assert.ok(log.every((k) => k === '4:1288'), log.join(' '));
   // 1.8 m: no running; 2.1 m: drowned, the view eased toward p31.
   body.position.y = 82.2;
   w.update(0.016);
@@ -127,6 +131,28 @@ test('water runtime: entry splash p19, ripples, the run limit and drowning with 
   assert.equal(w.player.drowned, false);
   w.dispose();
   assert.equal(waterSurfaces.wade, undefined);
+});
+
+test('water runtime: the ripple interval uses the random factor it is given (no Math.random)', () => {
+  const real = Math.random;
+  Math.random = () => {
+    throw new Error('Math.random');
+  };
+  try {
+    // The longest interval (rand -> 1: 1 s): the wake starts in update 63, then 63, 65 .. 79.
+    const { w, body, log, set } = rig(() => 0.999);
+    w.update(0.016);
+    body.position.y = 83;
+    w.update(0.016);
+    assert.deepEqual(log, ['4:1305', '4:1294']);
+    set({ running: true });
+    log.length = 0;
+    for (let i = 0; i < 80; i++) w.update(0.016);
+    assert.equal(log.length, 9, log.join(' '));
+    w.dispose();
+  } finally {
+    Math.random = real;
+  }
 });
 
 test('retail: the Player template 2:5 carries the water rules', { skip }, async () => {

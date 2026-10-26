@@ -74,6 +74,8 @@ import type { Entity, PropValue } from '../../../formats/entities';
 import type { Actor, ActorEnv } from '../actor';
 import { num, nums, ref, type SpecialMove, type SpecialRuntime } from './runtime';
 import { registerSave } from '../../save/providers';
+import { ENHANCED } from '../../../app/enhanced/config';
+import { PROJECTOR_BEAM, ProjectorBeamFx, warmProjectorMotes } from '../../../app/enhanced/projector-beam';
 
 /** The decoded properties of a Projector Effect. */
 export interface ProjectorParams {
@@ -397,6 +399,8 @@ function projector(rt: SpecialRuntime, e: Entity): ProjectorHandle {
   const p = projectorParams(e.values);
   if (!p.target) return { dispose: () => {}, save: () => ({ counter: 0, disabled: false, updating: false, found: -1 }), load: () => {}, guess: () => undefined };
   const st = new ProjectorState(p);
+  // Enhanced: the soft fan's motes pipeline built with the level (enhanced/projector-beam.ts).
+  if (ENHANCED) warmProjectorMotes();
   const dbg: ProjectorDebug = { uid: e.uid, target: p.target, state: st, share: 1, tips: [] };
   ((rt as unknown as { projectors?: ProjectorDebug[] }).projectors ??= []).push(dbg);
   const breakable = breakableSet(rt);
@@ -417,6 +421,10 @@ function projector(rt: SpecialRuntime, e: Entity): ProjectorHandle {
         index: Uint32Array | Uint16Array | undefined;
         beams: number[][];
         hidden: boolean[];
+        /** Enhanced: the soft fan (enhanced/projector-beam.ts), each beam's outline vertices, the rays' materials. */
+        fx?: ProjectorBeamFx;
+        far: number[][];
+        rayMats: Set<number>;
       }
     | undefined;
   /** Projectors found when the effect started (the engine's count, +0x10). */
@@ -461,7 +469,21 @@ function projector(rt: SpecialRuntime, e: Entity): ProjectorHandle {
     const index = idx ? ((idx.array as Uint32Array | Uint16Array).slice() as Uint32Array | Uint16Array) : undefined;
     const beams = index ? beamTriangles(index, source, p.vertices) : p.vertices.map(() => []);
     const base = mats.map((x) => ({ transparent: x.transparent, depthWrite: x.depthWrite, alphaTest: x.alphaTest }));
-    owned = { ch, geometry, mats, base, bind: (pos.array as Float32Array).slice(), tips, index, beams, hidden: p.vertices.map(() => false) };
+    // Enhanced: each beam's outline (the vertices its rays end on, up to 24) and the rays' materials.
+    const far: number[][] = [];
+    const rayMats = new Set<number>();
+    let fx: ProjectorBeamFx | undefined;
+    if (ENHANCED && index) {
+      beams.forEach((tris, i) => {
+        const tip = new Set(tips[i]), ends = new Set<number>();
+        for (const t of tris) for (let k = 0; k < 3; k++) if (!tip.has(index[3 * t + k])) ends.add(index[3 * t + k]);
+        const all = [...ends], stride = Math.max(1, Math.ceil(all.length / 24));
+        far.push(all.filter((_, j) => j % stride === 0));
+        for (const g of geometry.groups) if (tris.some((t) => 3 * t >= g.start && 3 * t < g.start + g.count)) rayMats.add(g.materialIndex ?? 0);
+      });
+      fx = new ProjectorBeamFx(rt.ctx.view.scene, p.vertices.length);
+    }
+    owned = { ch, geometry, mats, base, bind: (pos.array as Float32Array).slice(), tips, index, beams, hidden: p.vertices.map(() => false), fx, far, rayMats };
     return owned;
   };
   const applyOpacity = (o: NonNullable<typeof owned>, op: number) => {
@@ -476,8 +498,10 @@ function projector(rt: SpecialRuntime, e: Entity): ProjectorHandle {
         m.alphaTest = s.alphaTest;
         m.needsUpdate = true;
       }
-      m.opacity = op;
+      // (Enhanced: the rays at a share of their light under the soft fan.)
+      m.opacity = o.fx && o.rayMats.has(k) ? op * PROJECTOR_BEAM.rayKeep : op;
     });
+    o.fx?.setOpacity(op);
   };
   /** Hide (degenerate triangles) or show beam i. */
   const setBeam = (o: NonNullable<typeof owned>, i: number, hide: boolean) => {
@@ -538,7 +562,21 @@ function projector(rt: SpecialRuntime, e: Entity): ProjectorHandle {
     pos.needsUpdate = true;
   };
 
-  rt.tickers.push((_dt: number, _env: ActorEnv) => {
+  /** Enhanced: the world points beam i's rays end on (its outline, skinned). */
+  const farPts: THREE.Vector3[] = [];
+  const farOf = (o: NonNullable<typeof owned>, i: number): THREE.Vector3[] => {
+    const list = o.far[i] ?? [];
+    o.ch.mesh.updateMatrixWorld();
+    list.forEach((c, j) => o.ch.mesh.getVertexPosition(c, (farPts[j] ??= new THREE.Vector3())).applyMatrix4(o.ch.mesh.matrixWorld));
+    return farPts.slice(0, list.length);
+  };
+  const shown = (obj: THREE.Object3D): boolean => {
+    for (let x: THREE.Object3D | null = obj; x; x = x.parent) if (!x.visible) return false;
+    return true;
+  };
+
+  rt.tickers.push((dt: number, _env: ActorEnv) => {
+    owned?.fx?.clear();
     // The world system starts after the actors: listen once it is up.
     if (!hooked && rt.world?.subscribe) {
       hooked = true;
@@ -565,11 +603,13 @@ function projector(rt: SpecialRuntime, e: Entity): ProjectorHandle {
       const standing = !missing && lensOf(u, i, lens);
       if (standing) placeTip(o, i, lens);
       setBeam(o, i, beamHidden(o.hidden[i], standing, p.beamFlicker, Math.random() * 100));
+      if (o.fx) o.fx.set(i, standing && !o.hidden[i] && shown(t.ch.mesh) ? lens : null, farOf(o, i));
     });
     dbg.share = f = Math.min(1, Math.max(0, f));
     const op = projectorOpacity(p, f, Math.random() * 2 - 1);
     dbg.opacity = op;
     applyOpacity(o, op);
+    o.fx?.step(dt);
     if (f <= 0 && t.alive) {
       killed = true;
       if (t.actor) {
@@ -589,6 +629,7 @@ function projector(rt: SpecialRuntime, e: Entity): ProjectorHandle {
     dispose: () => {
       unsub?.();
       if (owned) {
+        owned.fx?.dispose();
         owned.geometry.dispose();
         for (const m of owned.mats) m.dispose();
       }

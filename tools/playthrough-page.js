@@ -819,6 +819,23 @@
     const h = __view.collision.raycast(e.x, e.y, e.z, dx / d, dy / d, dz / d, d);
     return !h || h.distance > d - 0.6;
   }
+  // The weapon a `break` step uses on a prop (door, lock, barricade): the first carried one whose
+  // damage type the prop takes (GameObject damage: the first p7 Damage Resistance of the type,
+  // else x0 for the global list's types 14 / 6, else x0 with p5 set, else x1; props.ts damage),
+  // guns with rounds first (shotgun, Tommy Gun, revolver, any other), then the blades (the Fire
+  // Axe over the shiv). Null when nothing carried hurts it. 1b's locked door 64e1 (2:539
+  // bullets x0, 2:631 type 12 x0) took nothing from the revolver left in hand in run r7v.
+  function breakWeapon(uid) {
+    const wp = window.__weapons, rec = __world.props?.recs?.get(uid);
+    if (!wp || !rec) return null;
+    const mult = (t) => (rec.resist.has(t) ? rec.resist.get(t) : t === 14 || t === 6 ? 0 : rec.values[5] ? 0 : 1);
+    const typeOf = (x) => { const d = wp.service.def(x.id); return x.kind === 'ranged' ? d?.projectile?.damageType : d?.damageType; };
+    const carried = wp.service.weapons;
+    const guns = ['4:84', '4:260', '4:5', ...carried.map((x) => x.id)].map((k) => carried.find((x) => x.id === k && x.kind === 'ranged' && x.clip + x.reserve > 0)).filter(Boolean);
+    const blades = ['4:240', '4:79', ...carried.map((x) => x.id)].map((k) => carried.find((x) => x.id === k && x.kind === 'melee')).filter(Boolean);
+    const pick = [...guns, ...blades].find((x) => { const t = typeOf(x); return typeof t === 'number' && mult(t) > 0; });
+    return pick ? { id: pick.id, kind: pick.kind, type: typeOf(pick) } : null;
+  }
   function attack(id) {
     const ins = window.__insanity;
     if (ins?.model && ins.model.form !== 'human') return ins.model.form === 'creature' && !!ins.body?.attack(__player.onGround ? 'combo' : 'jump');
@@ -833,10 +850,14 @@
     // number keys need pointer lock): the last one in the list (the run picks guns up in order).
     const guns = wp.service.weapons.filter((x) => x.kind === 'ranged' && x.clip + x.reserve > 0);
     const cur = wp.persist.current;
-    if (id !== undefined && bladeOnly(__actors.manager.actors.find((x) => x.id === id))) {
+    // (`__pt.tac.bladeFor`: a gunman crowded inside its kick reach takes the blade, which kills
+    // faster there than the revolver; tools/playthrough-tactics.js.)
+    if (id !== undefined && (bladeOnly(__actors.manager.actors.find((x) => x.id === id)) || window.__pt?.tac?.bladeFor === id)) {
       // Saving rounds: the heaviest blade carried (the Fire Axe over the shiv).
-      const blade = window.__ptSaveRounds && wp.service.weapons.some((x) => x.id === '4:240') ? '4:240' : '4:79';
-      if (wp.service.def(cur)?.kind === 'ranged' || (window.__ptSaveRounds && cur !== blade)) wp.service.equip(blade);
+      // (A crowded gunman likewise.)
+      const heavy = !!window.__ptSaveRounds || window.__pt?.tac?.bladeFor === id;
+      const blade = heavy && wp.service.weapons.some((x) => x.id === '4:240') ? '4:240' : '4:79';
+      if (wp.service.def(cur)?.kind === 'ranged' || (heavy && cur !== blade)) wp.service.equip(blade);
       return wp.service.fire();
     }
     // The gun for the distance, as a player switches (the number keys need pointer lock): the
@@ -851,6 +872,11 @@
       const has = (k) => guns.some((x) => x.id === k);
       const pref = (dist < 4 || (cur === '4:84' && dist < 7) ? ['4:84', '4:260'] : ['4:260', '4:84']).concat(['4:5', ...guns.map((x) => x.id)]).find(has);
       if (pref && cur !== pref) wp.service.equip(pref);
+    } else if (window.__ptBreakWeapon && wp.service.weapons.some((x) => x.id === window.__ptBreakWeapon && (x.kind !== 'ranged' || x.clip + x.reserve > 0))) {
+      // A `break` step's weapon (its own `weapon`, or breakWeapon's pick: a blade when no gun
+      // with rounds hurts the object) stays in hand.
+      if (cur !== window.__ptBreakWeapon) wp.service.equip(window.__ptBreakWeapon);
+      return wp.service.fire();
     } else if (guns.length && wp.service.def(cur)?.kind !== 'ranged') wp.service.equip(guns.at(-1).id);
     // An object (a door, a lock, a barricade) with the Tommy Gun in hand from a fight: the shotgun,
     // as before the distance choice (pellets are damage type 13; 1b's locked door 64e1 has Damage
@@ -955,6 +981,6 @@
     const front = c.clone().applyMatrix4(cam.matrixWorldInverse).z < 0;
     return { built: true, inScene: o === __view.scene, shown, baked, lit: +lit.toFixed(3), onScreen: front && Math.abs(ndc.x) <= 1 && Math.abs(ndc.y) <= 1, prompt: __world.pickTarget()?.w?.uid === uid };
   }
-  window.__pt = { inFire, edgeAhead, gunmen, exposed, coverSpot, evadeKeys, infMode, lineTo, lineStand, isCompanion, canShoot, allyDmg, allyInFront, watchScene, sceneWatch, itemView, onScreen, trace, attack, world: w0, frames, seen, played, checkpoints, track, metrics, sanity, msgs: (n = 30) => seen.slice(-n).map((x) => x.join(' ')).join('; '), blockingDoor, openableDoors, withDoorsOpen, reach, dmg, engage, standFor, center, useAim, plan, go, ap, aimAt, state, hostiles, floorAt, free, walkable };
+  window.__pt = { inFire, edgeAhead, gunmen, exposed, coverSpot, evadeKeys, infMode, lineTo, lineStand, isCompanion, canShoot, allyDmg, allyInFront, watchScene, sceneWatch, itemView, onScreen, trace, attack, breakWeapon, world: w0, frames, seen, played, checkpoints, track, metrics, sanity, msgs: (n = 30) => seen.slice(-n).map((x) => x.join(' ')).join('; '), blockingDoor, openableDoors, withDoorsOpen, reach, dmg, engage, standFor, center, useAim, plan, go, ap, aimAt, state, hostiles, floorAt, free, walkable };
   return true;
 })();

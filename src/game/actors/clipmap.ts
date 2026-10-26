@@ -55,6 +55,8 @@ export interface AttackSpec {
   scaled?: boolean;
   /** Attack p6: the Melee Weapon's p68 x this on the attack's target (actors/npc-melee.ts) [verified]. */
   scale?: number;
+  /** Attack p7: the Melee Weapon's p69 impact force x this (0x100caa7d) [verified]. */
+  forceScale?: number;
   /** From a MeleeAttackBehavior: hurts only through a Melee Weapon armed by the clip [verified]. */
   weaponOnly?: boolean;
 }
@@ -197,7 +199,7 @@ export function resolveCreatureClips(pkgs: PackageSet, template: ResRef, modelPk
           const damage = Math.max(5, Math.min(30, num(av[18], 40) / 4));
           // Can-attack test (RFL 0x10080180 / 0x10080010): Attack p15 <= horizontal distance
           // minus the target's radius <= p16, |dy| <= p17 when p17 > 0 [verified].
-          map.attacks.push({ clip: clip!, reach, damage, minReach: Math.max(0, num(av[15], 0)), maxDy: Math.max(0, num(av[17], 0)), scaled: num(av[14], 0) !== 0, scale: num(av[6], 1), weaponOnly: true });
+          map.attacks.push({ clip: clip!, reach, damage, minReach: Math.max(0, num(av[15], 0)), maxDy: Math.max(0, num(av[17], 0)), scaled: num(av[14], 0) !== 0, scale: num(av[6], 1), forceScale: num(av[7], 1), weaponOnly: true });
         }
         if (map.attacks.length) map.source.attack = 'behavior';
         break;

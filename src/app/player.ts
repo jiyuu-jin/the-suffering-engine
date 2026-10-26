@@ -61,6 +61,12 @@ export class PlayerController {
   readonly root = new THREE.Group();
 
   mode: ViewMode = 'fp';
+  /**
+   * First person suspended by a player state while it runs (Hit Reacting 17 ends First Person
+   * and gives it back when it is over: game/actors/player-states.ts). What remembers a view to
+   * give back later (the creature form, death, a save) takes `chosenMode()`, not this third person.
+   */
+  stateTp = false;
   /** When false the controller ignores input and doesn't touch the camera. */
   enabled = false;
   /** Camera yaw/pitch (radians). yaw 0 looks down -Z (same convention as FlyControls). */
@@ -148,7 +154,33 @@ export class PlayerController {
    * clip's extracted root to the same pending move as the gait: weapons/melee-lunge.ts). Spent
    * (zeroed) by every update.
    */
-  readonly rootMove = { x: 0, z: 0 };
+  readonly rootMove = { x: 0, y: 0, z: 0 };
+  /**
+   * While true a clip's root carries the feet vertically too (`rootMove.y`, no gravity): the
+   * third-person jump (actors/player-states.ts).
+   */
+  rootFly = false;
+  /**
+   * Player states that end Move and keep it from starting besides the strike (`holdMove`): Hit
+   * Reacting, Jump and Landing (actors/player-states.ts). The stick is still read (`moveInput`).
+   */
+  stateHold = false;
+  /** This frame's movement input before any hold (forward / strafe in [-1, 1]). */
+  readonly moveInput = { forward: 0, strafe: 0 };
+  /**
+   * While set the view is held there: mouse, pad and turn keys do not look (Hit Reacting refuses
+   * the Turn and Pitch states; actors/player-states.ts turns it toward the attacker).
+   */
+  viewLock: { yaw: number; pitch: number } | null = null;
+  /** No shooting, striking, throwing, reloading or weapon change (Hit Reacting refuses them). */
+  actionsLocked = false;
+  /** While set the body keeps this facing (radians) whatever the view does (player-states.ts). */
+  bodyYawHold: number | null = null;
+  /**
+   * The third-person jump (actors/player-states.ts): called on the jump press with this frame's
+   * movement input; true when it took the press (the motor does not jump then).
+   */
+  jumpOverride: ((input: { forward: number; strafe: number }) => boolean) | null = null;
   /**
    * While true the movement input is ignored and the feet move only by `rootMove` and the fall
    * (Player states that end Move and keep it from starting: the third-person strike, state 4).
@@ -262,7 +294,9 @@ export class PlayerController {
     this.motor.teleport(feet.x, feet.y, feet.z);
     this.fallTracker.reset();
     this.fpJump = false;
-    this.rootMove.x = this.rootMove.z = 0;
+    this.rootMove.x = this.rootMove.y = this.rootMove.z = 0;
+    // A placed view (checkpoint, cinematic hand-back) is not held back by a state's view lock.
+    this.viewLock = null;
     this.yaw = this.bodyYaw = yaw;
     this.pitch = pitch;
     this.stepSmooth = 0;
@@ -280,6 +314,11 @@ export class PlayerController {
     return this.mode === 'fp'
       ? THREE.MathUtils.clamp(pitch, -65 * D, 75 * D)
       : THREE.MathUtils.clamp(pitch, -50 * D, 50 * D);
+  }
+
+  /** The view the player is in apart from a player state's third person (`stateTp`). */
+  chosenMode(): ViewMode {
+    return this.stateTp ? 'fp' : this.mode;
   }
 
   setMode(mode: ViewMode) {
@@ -401,9 +440,13 @@ export class PlayerController {
       crouch = !!this.virtual.crouch;
     }
     if (!this.canRun) run = false;
-    if (this.holdMove) fwd = strafe = 0;
-    const rmx = this.rootMove.x, rmz = this.rootMove.z;
-    this.rootMove.x = this.rootMove.z = 0;
+    this.moveInput.forward = fwd;
+    this.moveInput.strafe = strafe;
+    if (this.viewLock) (this.yaw = this.viewLock.yaw), (this.pitch = this.viewLock.pitch);
+    if (this.jumpQueued && !this.motionOverride && this.jumpOverride?.({ forward: fwd, strafe })) this.jumpQueued = false;
+    if (this.holdMove || this.stateHold) fwd = strafe = 0;
+    const rmx = this.rootMove.x, rmy = this.rootMove.y, rmz = this.rootMove.z;
+    this.rootMove.x = this.rootMove.y = this.rootMove.z = 0;
     if (this.motionOverride) {
       const keep = this.motionOverride(dt, { forward: fwd, strafe, jump: this.jumpQueued, crouch });
       this.jumpQueued = false;
@@ -442,7 +485,7 @@ export class PlayerController {
     let jumped = false;
     for (let i = 0; i < steps; i++) {
       const vy0 = this.motor.velocity.y;
-      this.motor.step(h, { wishX: wx, wishZ: wz, run, crouch, jump: this.jumpQueued, moveX: rmx / steps, moveZ: rmz / steps });
+      this.motor.step(h, { wishX: wx, wishZ: wz, run, crouch, jump: this.jumpQueued, moveX: rmx / steps, moveZ: rmz / steps, moveY: rmy / steps, fly: this.rootFly });
       if (this.jumpQueued && this.motor.velocity.y > vy0 + 1) (jumped = true), (this.fpJump = this.mode === 'fp');
       this.jumpQueued = false;
       // Hide step pops: offset the camera by the snap and decay it.
@@ -475,6 +518,7 @@ export class PlayerController {
       }
       this.bodyYaw = wrapAngle(this.yaw + o);
     }
+    if (this.bodyYawHold !== null) this.bodyYaw = this.bodyYawHold;
 
     this.sync();
 

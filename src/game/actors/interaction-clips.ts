@@ -16,7 +16,9 @@
 
 import type { PropValue, EntityPackageSet } from '../../formats/entities';
 import { classByHash, decodeTemplateProps, readObjectTemplate } from '../../formats/entities';
-import type { ResRef } from '../../formats/model';
+import type { PackageSet, ResRef } from '../../formats/model';
+import { rootMotion } from '../../formats/animation';
+import { loadClip } from './clipmap';
 
 /** The parts of services.actors.playerBody used here (player-body.ts). */
 export interface PlayerBodyClips {
@@ -53,6 +55,20 @@ export class InteractionClips {
       this.cache.set(k, t && c ? decodeTemplateProps(c, t) : null);
     }
     return this.cache.get(k) ?? undefined;
+  }
+
+  /**
+   * One rung of the ladder climbing now: the Ladder Animation Set's p0 clip's root rise (m) and
+   * its length (s) at rate 1 (LadderClimb per frame 0x1011fb90 plays each rung at speed 1 and its
+   * root carries the player: 0.5 m in 0.367 s, 1.36 m/s) [verified speed; data].
+   */
+  ladderRung(): { height: number; length: number } | undefined {
+    const r = this.ladder && ref(this.ladder.set[0]);
+    const data = r && loadClip(this.pkgs as unknown as PackageSet, r);
+    if (!data) return undefined;
+    const h = Math.abs(rootMotion(data)[1]);
+    const len = data.duration / (data.rate || 1);
+    return h > 0.05 && len > 0.05 ? { height: h, length: len } : undefined;
   }
 
   /** Stop whatever interaction clip runs (back to locomotion). */

@@ -17,6 +17,7 @@ import { uploadDynamicOnChange } from './dynamic-uploads';
 import { NO_GLOW, SceneGlow } from './scene-glow';
 import { warmObjects, warmTargets, warmHooks, warmViewmodelObjects, warmPasses, type WarmPass } from './prewarm';
 import { ENHANCED } from './enhanced/config';
+import { LIGHT_VOLUME_SHEETS, lightVolumeScene, takeLightShafts } from './enhanced/light-volume';
 import type { EnhancedRenderer } from './enhanced';
 import { FramePacer, RenderScaler, type ScaleSetting } from './render-scale';
 import { HELD_AXIS, heldLampPose, LAMP_AIM, LAMP_OFFSET } from './held-lamp';
@@ -906,7 +907,14 @@ export class LevelRenderer {
     const bySig = new Map<string, Map<number, MeshPart[]>>();
     const chunkIndex = new Map<string, number>();
     const chunks: VisChunk[] = [];
-    for (const part of level.parts) {
+    // Enhanced: the light shafts leave the sheet geometry and are drawn as volumes (enhanced/light-volume.ts).
+    let levelParts = level.parts;
+    if (ENHANCED && !LIGHT_VOLUME_SHEETS) {
+      const shafts = takeLightShafts(level.parts, (k) => texMap.get(k));
+      levelParts = shafts.parts;
+      lightVolumeScene.setLevel(shafts.volumes);
+    }
+    for (const part of levelParts) {
       if (!part.positions.length || !part.indices.length) continue;
       const sig = [
         part.textureKey ?? '-',

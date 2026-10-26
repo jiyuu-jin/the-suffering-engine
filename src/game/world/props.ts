@@ -9,7 +9,8 @@
 //   * Pushable: crates the player grabs (Use) and pushes along their axes
 //   * Light Housing: lamp fixtures, off / on / broken (housing.ts): material tables, glow
 //     decorations, broken remains and the linked lights
-//   * DripMorphingModel / MorphingModel: keyframed model swaps (forming drips, swirls)
+//   * DripMorphingModel / MorphingModel: vertex blends between key models (morphing-model.ts),
+//     the drops a DripMorphingModel lets fall (drip.ts)
 //   * Instance Rendered Object: scattered model instances
 //
 // Renderer-light: meshes come from DynamicObjects (dynamic.ts), effects from Fx (fx.ts).
@@ -27,6 +28,10 @@ import type { DamageEvent, DamageService, DamageablePropSet } from './damage';
 import type { EntityPackageSet } from '../../formats/entities';
 import type { PropTargetInfo } from '../actors/actor';
 import { resistanceMultiplier } from '../fx/gas';
+import { MORPH_INPUTS, MorphMachine, MorphTargets, morphEvents, morphingModelDef, type MorphEvents, type MorphingModelDef } from './morphing-model';
+import { Drip } from './drip';
+import { waterSurfaces } from '../fx/surfaces';
+import type { PackageSet } from '../../formats/model';
 
 const num = (v: unknown, d = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
 const ref = (v: unknown): ResRef | null => (v && typeof v === 'object' && !Array.isArray(v) ? (v as ResRef) : null);
@@ -161,17 +166,17 @@ interface Push {
   handled?: boolean;
 }
 
-// Morphing models [inferred]: p3 model frames, p4 frame durations (s), p0 starts on, inputs
-// p16 On / p21 Off; DripMorphingModel p25 Drip template (its model falls when a cycle ends).
+// Placed MorphingModels / DripMorphingModels (morphing-model.ts, drip.ts; docs §14.2): the
+// object's own drawn model blended on the GPU between its p3 key models by the decoded think.
 interface Morph {
   rec: PropRec;
-  frames: THREE.Group[];
-  times: number[];
-  t: number;
-  on: boolean;
-  drip?: ResRef;
-  frame: number;
-  root: THREE.Object3D;
+  def: MorphingModelDef;
+  m: MorphMachine;
+  /** Morph targets on the drawn meshes (undefined: nothing to blend). */
+  targets?: MorphTargets;
+  /** DripMorphingModel p25 and its live Drip. */
+  dripTpl?: ResRef;
+  drip?: Drip;
 }
 
 /** A lamp (Light Housing, housing.ts). */
@@ -196,6 +201,8 @@ export interface PropsSaveState {
   /** Lamps not in their start state (Light Housing p31): 0 off, 1 on. */
   housing: Record<string, number>;
   morph: Record<string, number>;
+  /** MorphingModels not in their start state: MorphMachine.save() (clock, flags, fade). */
+  morphRun?: Record<string, number[]>;
   /** Invulnerability changed from the start state (GameObject p3; messages p13 / p14). */
   inv?: Record<string, number>;
   /** Phones whose receiver (p30) was broken off. */
@@ -408,7 +415,9 @@ export class Props implements DamageablePropSet {
       const p = new THREE.Vector3().setFromMatrixPosition(M);
       const v = t.values;
       // Defer one frame so the source prop is gone before the blast is applied.
-      setTimeout(() => this.env.damage()?.apply({ point: p, amount: num(v[0]), minAmount: num(v[1]), innerRadius: 0, radius: num(v[5]), kind: num(v[10]), force: num(v[2]), minForce: num(v[3]) }), 0);
+      // p4: the Special Hit Reaction (2:736) the blast carries (the player's 2:835 reaction).
+      const special = v[4] && typeof v[4] === 'object' && !Array.isArray(v[4]) && 'pkg' in (v[4] as object) ? (v[4] as { pkg: number; id: number }) : undefined;
+      setTimeout(() => this.env.damage()?.apply({ point: p, amount: num(v[0]), minAmount: num(v[1]), innerRadius: 0, radius: num(v[5]), kind: num(v[10]), force: num(v[2]), minForce: num(v[3]), special }), 0);
       return true;
     }
     void ctx;
@@ -438,10 +447,12 @@ export class Props implements DamageablePropSet {
         }
       }
     }
-    for (const m of this.morphs) {
-      if (m.rec.uid !== w.uid) continue;
-      if (num(m.rec.values[16], 1) === msg) (m.on = true), (handled = true);
-      else if (num(m.rec.values[21], 2) === msg) (m.on = false), (handled = true);
+    const m = this.morphOf.get(w.uid);
+    if (m) {
+      // Every slot holding the message runs, in the class map's order (0x10178a18).
+      const ev = morphEvents();
+      for (const slot of MORPH_INPUTS) if (num(m.rec.values[slot]) === msg) (m.m.input(slot, ev), (handled = true));
+      if (handled) this.morphResult(m, ev);
     }
     return handled;
   }
@@ -912,91 +923,72 @@ export class Props implements DamageablePropSet {
 
   private initMorph(w: WorldEntity) {
     const v = w.e.values;
-    const models = refList(v[3]);
-    const times = (Array.isArray(v[4]) ? (v[4] as number[]) : []).map((x) => Math.max(0.02, num(x, 0.5)));
-    if (models.length < 2) return;
-    // Frames that name no existing model are empty (the drip has not formed yet).
+    const def = morphingModelDef(v);
+    // A template the create refuses (0x100d2c10) stays as placed.
+    if (!def) return;
     let d = this.env.dyn.objects.get(w.uid);
-    let root: THREE.Object3D;
-    if (d) {
-      root = d.pivot;
-      for (const c of d.pivot.children) c.visible = false;
-    } else {
-      const g = new THREE.Group();
-      g.matrixAutoUpdate = false;
-      g.matrix.copy(instanceMatrix(w.e.position, w.e.rotation));
-      g.name = `${w.cls}#${w.uid.toString(16)}`;
-      this.scatter.add(g);
-      root = g;
+    // No model of its own: the engine makes one from the current key model (0x100d2990).
+    if (!d) {
+      d = this.env.dyn.buildModel(w.uid, `${w.cls}#${w.uid.toString(16)}`, def.frames[0], instanceMatrix(w.e.position, w.e.rotation), { scale: w.e.scale, collides: false, lightAtLoad: true });
+      if (d) this.env.dyn.objects.set(w.uid, d);
     }
-    const frames: THREE.Group[] = [];
-    let any = false;
-    for (const m of models) {
-      const f = m ? this.env.dyn.buildModel(0, `${w.cls}#${w.uid.toString(16)}:${keyOf(m)}`, m, new THREE.Matrix4(), { scale: w.e.scale, collides: false }) : undefined;
-      const g = f ? f.root : new THREE.Group();
-      if (f) any = true;
-      g.removeFromParent();
-      g.visible = false;
-      root.add(g);
-      frames.push(g);
-    }
-    if (!any) return;
-    frames[0].visible = true;
+    if (!d) return;
     const rec = this.recs.get(w.uid) ?? { uid: w.uid, cls: w.cls, values: v, w, d, health: 1, invulnerable: true, broken: false, resist: new Map<number, number>() };
-    const drip = w.cls === 'DripMorphingModel' ? ref(v[25]) : null;
-    this.morphs.push({ rec, frames, times, t: Math.random() * times.reduce((a, b) => a + b, 0), on: num(v[0], 1) !== 0, drip: drip ?? undefined, frame: 0, root });
-    d = undefined;
+    const targets = MorphTargets.attach(d, this.env.packages as unknown as PackageSet, def, w.e.scale);
+    const m: Morph = { rec, def, m: new MorphMachine(def, w.visible), targets, dripTpl: w.cls === 'DripMorphingModel' ? (ref(v[25]) ?? undefined) : undefined };
+    this.morphs.push(m);
+    this.morphOf.set(w.uid, m);
   }
+
+  private readonly morphOf = new Map<number, Morph>();
 
   private updateMorph(m: Morph, dt: number) {
-    if (!m.on || m.rec.broken || (m.rec.d && !m.rec.d.visible) || (m.rec.w && (!m.rec.w.visible || m.rec.w.destroyed))) return;
-    const total = m.times.reduce((a, b) => a + b, 0);
-    const before = m.t;
-    m.t += dt;
-    if (m.t >= total) {
-      m.t %= total;
-      if (m.drip) this.spawnDrip(m);
-    }
-    let acc = 0, f = 0;
-    for (; f < m.frames.length - 1; f++) {
-      acc += m.times[f] ?? 0.5;
-      if (m.t < acc) break;
-    }
-    if (f !== m.frame) {
-      m.frames[m.frame].visible = false;
-      m.frames[f].visible = true;
-      m.frame = f;
-    }
-    void before;
+    if (m.m.removed) return;
+    const w = m.rec.w;
+    const shown = !!w && w.visible && !w.destroyed && (!m.rec.d || m.rec.d.visible);
+    const ev = m.m.think(dt, shown);
+    this.morphResult(m, ev);
+    m.drip?.update(dt);
+    if (m.drip?.removed) m.drip = undefined;
   }
 
-  private spawnDrip(m: Morph) {
-    const t = readTemplate(this.env.packages, m.drip!);
-    if (!t?.model) return;
-    m.root.updateMatrixWorld(true);
-    const M = m.root.matrixWorld.clone();
-    const d = this.env.dyn.spawnModel(t.model, M, { collides: false, name: 'drip' });
+  /** Pose, outputs, spawns and removal after a think or an input. */
+  private morphResult(m: Morph, ev: MorphEvents) {
+    const w = m.rec.w;
+    if (!m.m.removed) m.targets?.apply(m.m.pose, m.m.opacity);
+    if (w) for (const slot of ev.fire) this.env.world.fire(w, slot);
+    for (let i = 0; i < ev.spawn; i++) this.morphSpawn(m);
+    if (ev.remove) {
+      m.m.removed = true;
+      m.drip?.remove();
+      m.drip = undefined;
+      if (w) this.env.world.destroy(w);
+      else if (m.rec.d) this.env.dyn.setVisible(m.rec.d.uid, false);
+    }
+  }
+
+  /** vt +0x4c: p12 at the object (0x100d25f0); a DripMorphingModel's drip (0x100a8b40). */
+  private morphSpawn(m: Morph) {
+    const d = m.rec.d;
     if (!d) return;
-    const p = new THREE.Vector3().setFromMatrixPosition(M);
-    const floor = this.env.collision?.raycast(p.x, p.y - 0.05, p.z, 0, -1, 0, 20);
-    this.drops.push({ d, y: p.y, v: 0, floor: floor ? floor.point[1] : p.y - 20 });
-  }
-
-  private drops: { d: DynamicObject; y: number; v: number; floor: number }[] = [];
-
-  private updateDrops(dt: number) {
-    for (let i = this.drops.length - 1; i >= 0; i--) {
-      const x = this.drops[i];
-      x.v += 9.8 * dt;
-      x.y -= x.v * dt;
-      if (x.y <= x.floor) {
-        this.env.dyn.remove(x.d.uid);
-        this.drops.splice(i, 1);
-        continue;
-      }
-      x.d.root.matrix.elements[13] = x.y;
-      x.d.root.matrixWorldNeedsUpdate = true;
+    d.root.updateMatrixWorld(true);
+    if (m.def.spawn) this.env.fx.spawn(m.def.spawn, d.root.matrixWorld.clone());
+    if (!m.dripTpl) return;
+    if (!m.drip) {
+      m.drip = Drip.spawn(
+        {
+          dyn: this.env.dyn,
+          packages: this.env.packages,
+          collision: this.env.collision,
+          gravity: () => this.env.fx.gravity,
+          waterAt: waterSurfaces.at ? (x, y, z) => waterSurfaces.at?.(x, y, z) : undefined,
+          spawn: (r, M) => void this.env.fx.spawn(r, M),
+        },
+        m.dripTpl,
+        d.root.matrixWorld,
+      );
     }
+    m.drip?.release();
   }
 
   // -------------------------------------------------------------------------
@@ -1050,7 +1042,6 @@ export class Props implements DamageablePropSet {
     for (const m of this.mechs.values()) this.updateMech(m, dt);
     for (const p of this.pushes.values()) if (!p.rec.broken) this.updatePush(p, dt);
     for (const m of this.morphs) this.updateMorph(m, dt);
-    this.updateDrops(dt);
   }
 
   // -------------------------------------------------------------------------
@@ -1077,7 +1068,11 @@ export class Props implements DamageablePropSet {
       if (m.angle || m.running !== (num(m.rec.values[37]) !== 0) || slid) s.mech[m.rec.uid] = sl ? [m.angle, m.dir, m.running ? 1 : 0, sl.angle, sl.dir, sl.running ? 1 : 0] : [m.angle, m.dir, m.running ? 1 : 0];
     }
     for (const [uid, h] of this.housings) if (!h.rec.broken && h.state !== housingStartState(h.rec.values)) s.housing[uid] = h.state;
-    for (const m of this.morphs) if (m.on !== (num(m.rec.values[0], 1) !== 0)) s.morph[m.rec.uid] = m.on ? 1 : 0;
+    for (const m of this.morphs) {
+      if (m.m.pristine) continue;
+      s.morph[m.rec.uid] = m.m.off ? 0 : 1;
+      (s.morphRun ??= {})[m.rec.uid] = m.m.save();
+    }
     const gone = [...this.receivers].filter(([, r]) => r.broken).map(([uid]) => uid);
     if (gone.length) s.receivers = gone;
     return s;
@@ -1123,7 +1118,18 @@ export class Props implements DamageablePropSet {
       const want = v === HOUSING_ON ? HOUSING_ON : v === HOUSING_OFF ? HOUSING_OFF : housingStartState(h.rec.values);
       if (h.state !== want) this.applyHousing(uid, want, false);
     }
-    for (const [k, on] of Object.entries(s.morph ?? {})) for (const m of this.morphs) if (m.rec.uid === Number(k)) m.on = !!on;
+    // Morphs: the saved state, else the start one (older saves hold only the on flag).
+    for (const m of this.morphs) {
+      if (m.m.removed) continue;
+      m.drip?.remove();
+      m.drip = undefined;
+      m.m = new MorphMachine(m.def, m.m.shown);
+      const run = s.morphRun?.[m.rec.uid];
+      const on = s.morph?.[m.rec.uid];
+      if (run) m.m.load(run);
+      else if (on !== undefined) m.m.off = !on;
+      m.targets?.apply(m.m.pose, m.m.opacity);
+    }
     for (const uid of s.receivers ?? []) {
       const r = this.receivers.get(uid);
       if (r && !r.broken) this.breakProp(r, undefined, true);

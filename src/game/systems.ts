@@ -15,6 +15,7 @@ import { createGasSystem } from './fx/gas-system';
 import { createCampaignSystem } from './campaign/system';
 import { createLevelsSystem } from './levels/system';
 import { createReputationSkinSystem } from './actors/reputation-skin-system';
+import { createCheatsSystem } from './cheats/system';
 
 export const systemFactories: GameSystemFactory[] = [
   // First: publishes ctx.services.save so the systems below can register save providers.
@@ -51,5 +52,7 @@ export const systemFactories: GameSystemFactory[] = [
   // Torque's / his weapons' skins by reputation and blood level (actors/reputation-skin*.ts):
   // after the systems that create the meshes it retextures (player body, puppet, held weapons).
   createReputationSkinSystem,
+  // The original's cheats (src/game/cheats): typed key sequences and the pause menu's port page.
+  createCheatsSystem,
   createHudSystem,
 ];

@@ -63,9 +63,9 @@
 // docs/game-logic.md §4.4): left mouse Fire, right mouse Throw, R Reload, H Health, mouse wheel
 // or ] / [ next / previous weapon, 1..5 weapon slots (Item p37: 1 Shiv / Fire
 // Axe, 2 Pistol / Dual Pistols, 3 Shotgun, 4 Tommy Gun, 5 Flamethrower; a second press cycles
-// within the slot), 6..0 throwables (Flash/Bang, Shrapnel, TNT, Molotov, Flare), G / T next /
-// previous throwable. Q stays the Insanity key (hud/controls.ts). Published in
-// services.input.bindings.
+// within the slot), 6..9 throwables (Flash/Bang, Shrapnel, TNT, Molotov), G next throwable, T the
+// Flare key (throws a flare; never on the back). Q stays the Insanity key (hud/controls.ts).
+// Published in services.input.bindings.
 //
 // Gamepad (src/game/hud/bindings.ts): pad buttons arrive as the same (synthetic) mouse / key
 // events, and are accepted without pointer lock while a pad is in use (padPlaying()). Aim
@@ -75,7 +75,7 @@
 // ---------------------------------------------------------------------------------------------
 
 import * as THREE from 'three/webgpu';
-import { engineLightMaterial } from '../../app/engine-light';
+import { LEGACY_LIGHTING, engineLightMaterial, engineLights, type EnginePointLight } from '../../app/engine-light';
 import { warmObjects, warmViewmodelObjects } from '../../app/prewarm';
 import { COLLISION_LAYER } from '../../app/physics';
 import type { GameContext, GameSystem } from '../runtime';
@@ -96,12 +96,15 @@ import { THROWN_GRAVITY, ammoDef, ammoLabel, bounceHit, bounceSound, explosionDa
 import { hudBus } from '../hud/bus';
 import { migrateItemKey, registerSave } from '../save/providers';
 import { byNameOnce } from '../world/inventory';
-import { padPlaying } from '../hud/bindings';
+import { input as bindings, padPlaying } from '../hud/bindings';
 import { aimAssist, shotTarget, withinWeaponCone, type AimProvider } from './aim-assist';
 import { bladePropContacts, bladeWallClear, sweptQuadSegments, type BladePose, type Vec3 as SweepVec3 } from './melee-sweep';
 import { MeleeAutoFace, readMeleeFaceParams, type FaceCandidate } from './melee-face';
 import { MeleeLunge, lungeToWorld, meleeRootScale, readLungeScale } from './melee-lunge';
-import { THROWABLE_BONE, ThrowableCarry, throwableAfterEmpty } from './back-throwable';
+import { THROWABLE_BONE, ThrowableCarry, carriedThrowable, stepThrowable, throwableAfterEmpty } from './back-throwable';
+import { thrownGeneratorSpawns, thrownLightAt, type ThrownGeneratorSpawns, type ThrownLightDef } from './thrown-light';
+import { morphClock, MorphingModelRun } from '../world/morphing-model';
+import type { DynamicObjects } from '../world/dynamic';
 import { readModelSphereNodes, weaponShape, type WeaponShape } from '../../formats/model-spheres';
 import { HEALTH_HINT_EVENT, canDrinkHealth, healAmount, healthHintDue } from '../../app/player-rules';
 
@@ -149,6 +152,8 @@ interface DamageLike {
     /** Impact force (centre / edge for a radius): world/damage.ts. */
     force?: number;
     minForce?: number;
+    /** Special Hit Reaction the blast carries (Radius Damage p4). */
+    special?: ResRef;
   }): { hits: { uid: number; kind: string; damage: number; killed: boolean }[] };
 }
 interface InventoryLike {
@@ -197,8 +202,11 @@ const PLAYER_TEMPLATE: ResRef = { pkg: 2, id: 5 };
  * cycles within the slot: Shiv / Fire Axe, Revolver / Dual Revolvers) and the throwables 6..0.
  */
 const WEAPON_KEYS: Record<string, number> = { '1': 1, '2': 2, '3': 3, '4': 4, '5': 5 };
-/** Throwable templates per digit: Flash/Bang 4:284, Shrapnel 4:655, TNT 4:236, Molotov 4:249, Flare 4:455. */
-const THROWN_KEYS: Record<string, string> = { '6': '4:284', '7': '4:655', '8': '4:236', '9': '4:249', '0': '4:455' };
+/**
+ * Throwable templates per digit: Flash/Bang 4:284, Shrapnel 4:655, TNT 4:236, Molotov 4:249. The
+ * flare is not selectable: it has its own key (the Flare action, `throwFlare`).
+ */
+const THROWN_KEYS: Record<string, string> = { '6': '4:284', '7': '4:655', '8': '4:236', '9': '4:249' };
 
 const refOf = (k: string): ResRef => {
   const [pkg, id] = k.split(':').map(Number);
@@ -247,6 +255,10 @@ interface Thrown {
   bounces?: number;
   /** Gravity (m/s², positive down) of its decoded launch (casings: bouncingLaunch). */
   grav?: number;
+  /** The Point Lights its p36 generators carry (the flare's; thrown-light.ts); their clock is the time burned (p12 - fuse). */
+  lights?: ThrownLightDef[];
+  /** The MorphingModels its p36 generators spawn (the flare's flame 4:938), drawn while burned < end. */
+  flames?: { def: ThrownGeneratorSpawns['morphs'][number]['def']; end: number; run?: MorphingModelRun; done?: boolean }[];
 }
 interface Effect {
   obj: THREE.Object3D;
@@ -337,7 +349,9 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
       if (def && def.kind === 'throwable') {
         const room = Math.max(0, (def.maxCarry || 99) - countOf(template));
         if (room > 0) raw(def.name, Math.min(count, room), template, className ?? def.className);
-        if (!persist.throwable) persist.throwable = def.key;
+        // Given while the back is empty: taken out onto it (0x10039b10 -> 0x10038ca0), the flare
+        // too (no slot test on that path).
+        if (!carriedThrowable(ownedThrowables(), persist.throwable)) persist.throwable = def.key;
         return;
       }
       if (template && ammoDef(epk, template)) return addAmmo(template, count, name);
@@ -488,6 +502,8 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     if (key && (!def || !owned(def))) return false;
     if ((def ?? null) === current) return true;
     if (busy() && !opts.instant) return false;
+    // Hit Reacting refuses Equip ([25][17] = 0; actors/player-states.ts).
+    if (view.player.actionsLocked && !opts.instant) return false;
     if (current) persist.last = current.key;
     current = def ?? null;
     persist.current = current?.key ?? null;
@@ -934,7 +950,8 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     // Root motion (melee-lunge.ts): the strike clip's root carries the player (third person).
     startMeleeLunge(st, idx >= 0 ? atk?.clip : undefined);
     play(st.swing, undefined, 0.8);
-    after(Math.max(0.05, arm), () => meleeHit(st, mult, atk?.forceMult ?? 1, Math.max(0, disarm - arm)));
+    const gen = meleeGen;
+    after(Math.max(0.05, arm), () => gen === meleeGen && meleeHit(st, mult, atk?.forceMult ?? 1, Math.max(0, disarm - arm)));
     const rec = atk?.recovery;
     const myCombo = combo;
     if (rec && b) after(dur, () => {
@@ -949,6 +966,18 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     return true;
   };
   let lastStrike: { at: number; unarmed: boolean } | null = null;
+  /**
+   * Entering Hit Reacting ends MeleeAttack ([17][4] = 2): the whole-body reaction replaces the
+   * strike clip, whose Arm never comes (actors/player-states.ts). Bumped to drop the pending blow.
+   */
+  let meleeGen = 0;
+  const cancelMelee = () => {
+    meleeGen++;
+    combo++;
+    meleeFace.face.stop();
+    meleeFace.st = null;
+    stopMeleeLunge();
+  };
 
   // Melee auto-face (docs/game-logic.md §14.1 "Player melee: facing and auto-face"): Player 2:5
   // p219 / p223..p225 / p173 / p167 and the swung Player Weapon Properties' p10 (the pick's range).
@@ -1163,7 +1192,7 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
 
   const reload = () => {
     const def = current;
-    if (!def || !enabled || def.kind !== 'ranged' || busy() || !def.ammo) return false;
+    if (!def || !enabled || def.kind !== 'ranged' || busy() || !def.ammo || view.player.actionsLocked) return false;
     if (def.clipSize - clipOf(def) <= 0 || reserveOf(def) <= 0) return false;
     const b = body();
     // Reload: PWP p96..p102 by view / heading on bone p3 (PlayerBody.weaponAction).
@@ -1186,7 +1215,8 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     // Held by a creature (Mainliner ride, Nooseman grip): the press is a struggle, no attack.
     if (view.player.attackOverride?.()) return false;
     const def = current;
-    if (!enabled || busy() || cooldown > 0 || !combatLink.combat?.alive) return false;
+    // Hit Reacting refuses Attack / MeleeAttack ([3][17] = [4][17] = 0; actors/player-states.ts).
+    if (!enabled || busy() || cooldown > 0 || !combatLink.combat?.alive || view.player.actionsLocked) return false;
     if (!def) return unarmed.pwp ? fireMelee(unarmed) : false;
     return def.kind === 'melee' ? fireMelee(strikeOf(def)) : fireRanged(def);
   };
@@ -1196,24 +1226,46 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
   // Throwables
 
   const thrown: Thrown[] = [];
+  // Next / Previous Thrown and the throwable hotkeys reach only the throwables the Player's p248
+  // Quick Weapon Properties lists name (Flash/Bang, Shrapnel, TNT, Molotov): never the flare,
+  // which has its own key (docs/game-logic.md §4.5 "Flare key").
+  const cycleKeys = new Set<string>();
+  {
+    const lists = tpl(epk, PLAYER_TEMPLATE)?.v[248];
+    for (const q of Array.isArray(lists) ? lists : []) {
+      const items = q && typeof q === 'object' ? tpl(epk, q as ResRef)?.v[0] : undefined;
+      for (const it of Array.isArray(items) ? items : []) if (it && typeof it === 'object') cycleKeys.add(keyOf(it as ResRef));
+    }
+  }
+  /** Player p243: the item the Flare key throws (4:455). */
+  const flareDef = (() => {
+    const r = tpl(epk, PLAYER_TEMPLATE)?.v[243];
+    return r && typeof r === 'object' && !Array.isArray(r) ? weaponDef(epk, r as ResRef) : undefined;
+  })();
+  if (!cycleKeys.size) for (const k of Object.values(THROWN_KEYS)) cycleKeys.add(k);
+  /** What rides the back (the HUD's throwable): the selected one while carried, else none. */
+  const backDef = () => carriedThrowable(ownedThrowables(), persist.throwable);
   const nextThrowable = (dir: 1 | -1 = 1) => {
-    const list = ownedThrowables();
-    if (!list.length) return;
-    const i = list.findIndex((d) => d.key === persist.throwable);
-    persist.throwable = list[(i + dir + list.length) % list.length].key;
+    const next = stepThrowable(ownedThrowables(), persist.throwable, dir, cycleKeys);
+    if (next) persist.throwable = next.key;
   };
   const selectThrowable = (key: string) => {
-    if (ownedThrowables().some((d) => d.key === key)) persist.throwable = key;
+    if (cycleKeys.has(key) && ownedThrowables().some((d) => d.key === key)) persist.throwable = key;
   };
-  const throwSelected = (): boolean => {
+  /**
+   * The throw (player state 21; the Throw and Flare keys request the same state, so the same
+   * transitions refuse both: docs/game-logic.md §4.5 "Flare key"). `flare`: the Flare key's,
+   * which throws a fresh Player p243 item and leaves the back alone.
+   */
+  const startThrow = (def: WeaponDef, flare: boolean): boolean => {
     if (view.player.attackOverride?.()) return false;
-    const list = ownedThrowables();
-    const def = list.find((d) => d.key === persist.throwable) ?? list[0];
-    if (!def?.thrown || !enabled || busy() || cooldown > 0 || !combatLink.combat?.alive) return false;
-    persist.throwable = def.key;
+    // Ladders, interactions and played clips (LadderClimb 27, Interact 22, Play Anim 33...)
+    // refuse Throw; the port runs them all through the motion override.
+    if (!def.thrown || !enabled || busy() || cooldown > 0 || !combatLink.combat?.alive || view.player.actionsLocked || view.player.motionOverride) return false;
     const b = body();
     // Throw: PWP p108 / p115 / p122 + 7k by view / heading on bone p4 (PlayerBody.weaponAction).
-    // Empty-handed the original's set is Player p143 (0x1003db3b), as for the strikes.
+    // Empty-handed the original's set is Player p143 (0x1003db3b), as for the strikes. The
+    // Flare key plays the same clip (one path after the item test in the enter, 0x10027b80).
     const dur = (b ? b.weaponAction('throw', current?.pwp?.ref ?? unarmed.pwp?.ref ?? DEFAULT_PWP) : 0) || 1;
     const clip = (b?.lastActionClip ?? current?.pwp?.throw ?? readPlayerWeaponProps(epk, DEFAULT_PWP)?.throw) || undefined;
     const marks = clip ? clipMarks(pkgs, clip) : [];
@@ -1223,13 +1275,27 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     const grab = marks.find((m) => m.param === 231 && m.time <= at);
     const grabBone = grab && b ? b.body.skinned.skeleton.byHash.get(grab.boneHash) : undefined;
     action = { kind: 'throw', until: clock + dur * 0.9, then: showHandHeld };
-    if (grab) after(grab.time, () => attachThrown(def, grabBone));
-    else attachThrown(def, undefined);
+    if (grab) after(grab.time, () => attachThrown(def, grabBone, flare));
+    else attachThrown(def, undefined, flare);
     after(at, () => {
       carry.releaseHand();
       launch(def);
     });
     return true;
+  };
+  /** Throw: what is on the back (nothing there: no throw, whatever else is carried). */
+  const throwSelected = (): boolean => {
+    const def = backDef();
+    return !!def && startThrow(def, false);
+  };
+  /**
+   * The Flare key (action 0x427, input handler 0x10049c67): with a Player p243 item carried, the
+   * throw starts with +0x9c bit 0x40000 set. Not in creature form (the weapons are put away) and
+   * not while a Killjoy Rebirth effect holds the player (the handler returns: 0x10049b12).
+   */
+  const throwFlare = (): boolean => {
+    if (!flareDef || stowed || countOf(flareDef.template) <= 0) return false;
+    return startThrow(flareDef, true);
   };
 
   // The carried throwable (back-throwable.ts; docs/game-logic.md §4.5 "Carried throwable"): the
@@ -1246,11 +1312,13 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     for (const m of handHidden) m.root.visible = enabled;
     handHidden = [];
   };
-  const attachThrown = (def: WeaponDef, bone: number | undefined) => {
+  const attachThrown = (def: WeaponDef, bone: number | undefined, flare = false) => {
     syncCarry();
     consume(def.template, 1);
     const b = body();
-    if (bone !== undefined && b && carry.backKey === def.key) {
+    // The Flare key: a fresh flare (its p55 object) in the hand; the back is left alone.
+    const model = flare ? (def.thrown?.model ?? def.model) : undefined;
+    if (bone !== undefined && b && (flare ? !!model : carry.backKey === def.key)) {
       const handBones = [b.body.skeleton.bones[bone], b.arms?.skeleton.bones[bone]];
       for (const m of held ? [...held.tp, ...held.fp] : []) {
         const on = attach.attacher.boneOf(m.root);
@@ -1259,23 +1327,24 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
           handHidden.push(m);
         }
       }
-      carry.toHand(bone);
+      if (flare) carry.spawnHand({ body: b.body, arms: b.arms, armsParent: b.armsPivot }, def.key, model!, bone);
+      else carry.toHand(bone);
     }
+    if (flare) return;
     // Run out: the carried throwable with the highest p45 is taken out next (none: nothing on
     // the back); not while the Killjoy Rebirth effect holds the throwables (stow()).
-    if (countOf(def.template) <= 0 && !stowed) {
-      const next = throwableAfterEmpty(ownedThrowables(), (d) => {
-        const p = tpl(epk, d.template)?.v[45];
-        return typeof p === 'number' ? p : -1;
-      });
-      persist.throwable = next?.key ?? null;
-    }
+    if (countOf(def.template) <= 0 && !stowed) persist.throwable = takenOutAfterEmpty();
   };
+  /** The run-out rule: the carried Missile Item with the highest p45 (> -1: never the flare). */
+  const takenOutAfterEmpty = () =>
+    throwableAfterEmpty(ownedThrowables(), (d) => {
+      const p = tpl(epk, d.template)?.v[45];
+      return typeof p === 'number' ? p : -1;
+    })?.key ?? null;
   /** What rides the back now: the selected throwable while the weapons are out. */
   const syncCarry = () => {
     const b = body();
-    const list = enabled && b ? ownedThrowables() : [];
-    const def = list.find((d) => d.key === persist.throwable) ?? list[0];
+    const def = enabled && b ? backDef() : null;
     const model = def && (def.thrown?.model ?? def.model);
     carry.syncBack(b ? { body: b.body, arms: b.arms, armsParent: b.armsPivot } : null, def && model ? { key: def.key, model } : null, throwableBone);
   };
@@ -1288,10 +1357,95 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     mesh.position.copy(o).addScaledVector(d, 0.6).add(new THREE.Vector3(0, -0.15, 0));
     const vel = d.clone().add(new THREE.Vector3(0, 0.25, 0)).normalize().multiplyScalar(t.speed).add(view.player.velocity);
     fxGroup.add(mesh);
-    // Flares (no Radius Damage) burn for their fuse time with a red light.
-    if (!t.explosion) mesh.add(new THREE.PointLight(0xff3020, 25, 14, 1.5));
-    thrown.push({ def, td: t, mesh, vel, fuse: t.fuse, rest: false });
+    thrown.push(withThrownLight({ def, td: t, mesh, vel, fuse: t.fuse, rest: false }));
   };
+  /**
+   * The light a thrown object carries from its launch (BouncingObject p36 Point Lights:
+   * thrown-light.ts; the flare's 4:941), fed to the lighting rig while it is in the world.
+   * Legacy lighting, or a throwable without Radius Damage and no decoded light: the port's old
+   * red three.js light.
+   */
+  const thrownSpawnCache = new Map<string, ThrownGeneratorSpawns>();
+  const withThrownLight = (t: Thrown): Thrown => {
+    if (!t.def || t.casing) return t;
+    const k = keyOf(t.td.template);
+    let spawns = thrownSpawnCache.get(k);
+    if (!spawns) thrownSpawnCache.set(k, (spawns = thrownGeneratorSpawns(pkgs, t.td.template)));
+    const defs = spawns.lights;
+    if (defs.length && !LEGACY_LIGHTING) t.lights = defs;
+    else if (defs.length || !t.td.explosion) t.mesh.add(new THREE.PointLight(0xff3020, 25, 14, 1.5));
+    if (spawns.morphs.length) t.flames = spawns.morphs.map((m) => ({ def: m.def, end: m.end }));
+    return t;
+  };
+  /**
+   * The flames its generators spawned at the launch (world/morphing-model.ts), drawn by the world's
+   * dynamic objects on the thrown object's matrix until their generator removes them (end) or
+   * the object goes. Built when first due, so a loaded flare gets its flame at the burned time.
+   */
+  const liveFlames = new Set<{ t: Thrown; f: NonNullable<Thrown['flames']>[number] }>();
+  const updateFlames = (dt: number) => {
+    const dyn = (ctx.services.world as { fx?: { env?: { dyn?: DynamicObjects } } } | undefined)?.fx?.env?.dyn;
+    for (const t of thrown) {
+      if (!t.flames) continue;
+      const burned = Math.max(0, t.td.fuse - t.fuse);
+      for (const f of t.flames) {
+        if (f.run || f.done || !dyn) continue;
+        if (burned >= f.end) {
+          f.done = true;
+          continue;
+        }
+        t.mesh.updateMatrixWorld(true);
+        f.run = MorphingModelRun.spawn(dyn, pkgs, f.def, t.mesh.matrixWorld, `flame:${keyOf(t.td.template)}`);
+        if (!f.run) f.done = true;
+        else {
+          f.run.t = morphClock(f.def, 0, burned);
+          f.run.step(0);
+          liveFlames.add({ t, f });
+          continue;
+        }
+      }
+    }
+    for (const x of liveFlames) {
+      const { t, f } = x;
+      if (!f.run) continue;
+      if (!thrown.includes(t) || !t.mesh.parent || Math.max(0, t.td.fuse - t.fuse) >= f.end) {
+        f.run.remove();
+        f.run = undefined;
+        f.done = true;
+        liveFlames.delete(x);
+        continue;
+      }
+      t.mesh.updateMatrixWorld(true);
+      f.run.follow(t.mesh.matrixWorld);
+      f.run.step(dt);
+    }
+  };
+  const removeFlames = () => {
+    for (const { f } of liveFlames) f.run?.remove();
+    liveFlames.clear();
+  };
+  const thrownLightPool: EnginePointLight[] = [];
+  const offThrownLights = LEGACY_LIGHTING
+    ? () => {}
+    : engineLights.addProvider((out) => {
+        let n = 0;
+        for (const t of thrown) {
+          if (!t.lights || !t.mesh.parent) continue;
+          const p = t.mesh.getWorldPosition(tmpLightPos);
+          const burned = Math.max(0, t.td.fuse - t.fuse);
+          for (const d of t.lights) {
+            // Gone with its generator (4:942: 10 s after the launch; thrown-light.ts generatorSpawnsEnd).
+            if (burned >= (d.end ?? Infinity)) continue;
+            const l = (thrownLightPool[n++] ??= { x: 0, y: 0, z: 0, intensity: 0, r: 0, g: 0, b: 0, hemi: 0 });
+            thrownLightAt(d, burned, l);
+            l.x = p.x;
+            l.y = p.y;
+            l.z = p.z;
+            out.push(l);
+          }
+        }
+      });
+  const tmpLightPos = new THREE.Vector3();
 
   type Explosion = NonNullable<NonNullable<WeaponDef['thrown']>['explosion']>;
   // Radius Damage (RFL 0x10125c70 [code]): p0 at the centre down to p1 at the radius p5.
@@ -1327,7 +1481,7 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     for (const x of t.explosions.length ? t.explosions : [e]) {
       if (x.maxDamage <= 0 && x.minDamage <= 0) continue;
       if (dmg) {
-        const r = dmg.apply({ point: at, amount: x.maxDamage, minAmount: x.minDamage, innerRadius: 0, radius: x.outerRadius, kind: x.damageType, force: x.maxForce, minForce: x.minForce, source: thrownSource(by) });
+        const r = dmg.apply({ point: at, amount: x.maxDamage, minAmount: x.minDamage, innerRadius: 0, radius: x.outerRadius, kind: x.damageType, force: x.maxForce, minForce: x.minForce, special: x.special, source: thrownSource(by) });
         if (r.hits.length) hitMarker(r.hits.some((h) => h.killed));
       } else {
         for (const a of actors()?.list() ?? []) {
@@ -1340,8 +1494,15 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
       // p7: the thrower is hurt by its own explosion (set on every retail throwable). An NPC's
       // throw reaches the player as any blast (through the damage service above).
       const pp = view.player.position;
-      const self = x.hurtsOwner && !by ? falloff(x, Math.hypot(pp.x - at.x, pp.y + 1 - at.y, pp.z - at.z)) : 0;
-      if (self > 0) combatLink.combat?.damage(self);
+      const sd = Math.hypot(pp.x - at.x, pp.y + 1 - at.y, pp.z - at.z);
+      const self = x.hurtsOwner && !by ? falloff(x, sd) : 0;
+      // With the blast's force and special: his own blast knocks him like any (player-states.ts).
+      const combatSvc = ctx.services.combat as { damagePlayer?(n: number, s?: unknown): void } | undefined;
+      const selfForce = sd < x.outerRadius ? x.maxForce + (x.minForce - x.maxForce) * (sd / Math.max(1e-3, x.outerRadius)) : 0;
+      if (self > 0) {
+        if (combatSvc?.damagePlayer) combatSvc.damagePlayer(self, { kind: x.damageType, force: selfForce, special: x.special, from: at });
+        else combatLink.combat?.damage(self);
+      }
     }
   };
 
@@ -1447,7 +1608,8 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     stowed = null;
     const has = (k: string | null) => !!k && ownedThrowables().some((d) => d.key === k);
     if (has(s.throwable)) persist.throwable = s.throwable;
-    else if (!has(persist.throwable)) persist.throwable = ownedThrowables()[0]?.key ?? null;
+    // (Port: what was remembered is gone: the run-out rule picks, never the flare.)
+    else if (!has(persist.throwable)) persist.throwable = takenOutAfterEmpty();
     if (s.weapon) equip(s.weapon, { instant: true });
   };
 
@@ -1668,9 +1830,13 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     else if (e.code === 'BracketRight') cycle(1);
     else if (e.code === 'BracketLeft') cycle(-1);
     else if (e.code === 'KeyG') nextThrowable(1);
-    else if (e.code === 'KeyT') nextThrowable(-1);
   };
   const onCtx = (e: Event) => e.preventDefault();
+  // The Flare key (a native action of the bindings layer: T and the pad cell; RFL table
+  // 0x10167520 record {0x427, keyboard, DIK_T}), accepted as the Throw button is.
+  const offFlare = bindings.onPress('flare', () => {
+    if (canAct()) throwFlare();
+  });
   document.addEventListener('mousedown', onDown);
   document.addEventListener('mouseup', onUp);
   document.addEventListener('wheel', onWheel, { passive: true, capture: true });
@@ -1689,7 +1855,7 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     NextWeapon: 'Mouse Wheel Down / ]',
     PrevWeapon: 'Mouse Wheel Up / [',
     NextThrown: 'G',
-    PrevThrown: 'T',
+    Flare: 'T',
     Shiv: '1',
     FireAxe: '1',
     Pistol: '2',
@@ -1701,7 +1867,6 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     ShrapnelGrenade: '7',
     TNT: '8',
     MolotovCocktail: '9',
-    Flare: '0',
   };
 
   // -------------------------------------------------------------------------
@@ -1721,17 +1886,24 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
   });
 
   const service = {
+    /** Hit Reacting starts: the strike under way ends (actors/player-states.ts). */
+    cancelMelee: () => cancelMelee(),
     // Put away (creature form): no weapon / throwable panels.
     get current() {
       const d = current;
       if (!d || !enabled) return null;
       return { ...weaponInfo(d), ammoMeter: d.ammoMeter ?? null, crosshair: d.pwp?.crosshair ?? null, ranged: d.kind === 'ranged' };
     },
+    // What is on the back (0x10037ce0; nothing there: no panel). The flare count has no HUD
+    // widget of its own (Player p283 empty).
     get throwable() {
       if (!enabled) return null;
-      const list = ownedThrowables();
-      const d = list.find((x) => x.key === persist.throwable) ?? list[0];
+      const d = backDef();
       return d ? { id: d.key, name: d.name, meter: d.meter ?? null, count: countOf(d.template) } : null;
+    },
+    /** The Flare key's item (Player p243), its count and carry cap (Item p44). */
+    get flares() {
+      return flareDef ? { id: flareDef.key, count: countOf(flareDef.template), max: flareDef.maxCarry } : null;
     },
     get weapons() {
       return ownedWeapons().map(weaponInfo);
@@ -1780,6 +1952,8 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
     fire: () => attack(),
     reload: () => reload(),
     throw: () => throwSelected(),
+    /** The Flare key (action 0x427): throw a flare from the inventory; the back is left alone. */
+    throwFlare: () => throwFlare(),
     nextThrowable,
     selectThrowable,
     /** Killjoy Rebirth Effect: weapons away / back (see stow()). */
@@ -1833,6 +2007,9 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
         }
         persist.last = key(d.last);
         persist.throwable = key(d.throwable);
+        // Saves from before the back had no fallback (docs/game-logic.md §4.5 "Flare key"): a
+        // back left empty while other throwables are carried takes the run-out rule's pick.
+        if (!backDef()) persist.throwable = takenOutAfterEmpty();
         persist.battery = typeof d.battery === 'number' ? d.battery : 1;
         // On a load only: a transition keeps the lamp as the player left the level.
         if (typeof d.light === 'boolean' && info.reason === 'load') lamp.visible = d.light;
@@ -1897,9 +2074,8 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
           const mesh: THREE.Object3D = (model && buildStaticModel(pkgs, model)) || new THREE.Mesh(sphere, matDust);
           mesh.position.set(r.p[0], r.p[1], r.p[2]);
           fxGroup.add(mesh);
-          if (def && !td.explosion) mesh.add(new THREE.PointLight(0xff3020, 25, 14, 1.5));
           const by = r.by !== undefined ? (actors()?.list().find((a) => (a as { uid?: number }).uid === r.by) as ActorLike | undefined) : undefined;
-          const t: Thrown = { def, td, mesh, vel: new THREE.Vector3(r.v[0], r.v[1], r.v[2]), fuse: r.f, rest: !!r.r };
+          const t: Thrown = withThrownLight({ def, td, mesh, vel: new THREE.Vector3(r.v[0], r.v[1], r.v[2]), fuse: r.f, rest: !!r.r });
           if (by) t.by = by;
           if (r.b !== undefined) t.bounces = r.b;
           if (r.a !== undefined) t.age = r.a;
@@ -1969,6 +2145,7 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
       }
       updateShots(dt);
       updateThrown(dt);
+      updateFlames(dt);
       for (let i = effects.length - 1; i >= 0; i--) {
         const f = effects[i];
         f.life += dt;
@@ -2000,6 +2177,9 @@ export async function createWeaponsSystem(ctx: GameContext): Promise<GameSystem>
       stopMeleeLunge();
       if (aimAssist.provider === aimProvider) aimAssist.provider = null;
       aimAssist.lock = null;
+      offFlare();
+      offThrownLights();
+      removeFlames();
       document.removeEventListener('mousedown', onDown);
       document.removeEventListener('mouseup', onUp);
       document.removeEventListener('wheel', onWheel, { capture: true });

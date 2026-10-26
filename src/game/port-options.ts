@@ -1,11 +1,12 @@
 // Port options that change the game's rules. None of them is in the original game; each is
 // labelled as a port option in the menu and documented in docs/game-logic.md §15.17.
 //
-// The original's cheats are the Game Cheats object (class 0x2b195280, template 2:935): 25 typed
-// sequences dispatched by Suffering.rfl 0x100013c0 (jump table 0x1000187c), all on the Player:
-// reputation (+-50, to p70 / p71), blood full / clear, health, suicide, weapons and items
-// (0x100421c0), ammo, grenades, two more Player state changes (insanity [inferred]), a
-// combination of five, and two screen-effect toggles.
+// The original's cheats (ported in src/game/cheats, docs/game-logic.md §15.18) are 25 key
+// sequences typed while a chord is held, dispatched by Suffering.rfl 0x100013c0 (jump table
+// 0x1000187c) with the Game Cheats object (class 0x2b195280, template 2:935), all on the Player:
+// reputation (+-50, to p70 / p71), blood full / clear, health, suicide, item lists (0x100421c0),
+// ammo, throwables, the insanity meter and the next insanity attack, a combination of five, and
+// two screen-effect toggles.
 // None of them touches the creatures or their target choice [verified: all 25 cases], and the
 // engine has no debug variable for it [verified: no such strings in SUFFERING.EXE /
 // Suffering.rfl]. "Enemies ignore the player" is therefore the port's own.

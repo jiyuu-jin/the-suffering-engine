@@ -55,6 +55,9 @@ import { readXduString } from '../../formats/entities';
 import { hudBus } from '../hud/bus';
 import { weaponFx } from '../weapons/fx';
 import { clipMarks } from '../weapons/system';
+import { LEGACY_LIGHTING, engineLights } from '../../app/engine-light';
+import type { PackageSet } from '../../formats/model';
+import { MorphLight, morphLightDefs } from './morph-light';
 import { loadClip } from '../actors/clipmap';
 import type { InsanityAttackDef } from './params';
 
@@ -73,6 +76,14 @@ export interface InsanityService {
   addReputation(points: number, fromUid?: number): void;
   /** Advance running Screen Faders / Blurs by `seconds` (skipped cinematics end in their end state). */
   fastForwardScreen(seconds: number): void;
+  /** The current form's reputation range p70 / p71 (evil, good). */
+  readonly reputationRange?: readonly [number, number];
+  /** Reputation set outright (Game Cheats cases 9 / 10: Player 0x100414b0 / 0x10041480). */
+  setReputation?(points: number): void;
+  /** Game Cheats case 14: the next insanity attack while transformed (rules.ts acquireNext). */
+  acquireNextAttack?(): boolean;
+  /** The engine clock outside Time Scale runs (Game Cheats 20 / 21: 1.3 / 0.7 / 1; screen.ts baseRate). */
+  setClockRate?(rate: number): void;
   /**
    * Player event n (0x10041740): the current form's Help Popup p292 + n, once per game (+0xa0
    * bit n). Event 6 (p298) is the Xombium hint (a <Health> control placeholder).
@@ -107,8 +118,18 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
   const model = params ? new InsanityModel(params, carried) : null;
   const fx = new ScreenEffects(view);
   // The clock: the Time Scale runs' rate times the morph's slow-down (1 / p272 while morphing).
-  const director = new EffectDirector(fx, (rate) => (view.timeScale = rate * (model?.clockRate ?? 1)));
+  // The morph sets the engine clock and then 1, so a cheat's clock (director.baseRate) ends there.
+  const director: EffectDirector = new EffectDirector(fx, (rate) => {
+    const morph = model?.clockRate ?? 1;
+    if (morph !== 1) director.baseRate = 1;
+    view.timeScale = rate * morph;
+  });
   const textures = new TextureCache(pkgs);
+  // The morph's light (the form's Player p274 at the player, morph-light.ts): a point light of
+  // the engine light rig, so the first morph rebuilds no lit material.
+  const morphLight = new MorphLight();
+  const offMorphLight = LEGACY_LIGHTING ? () => {} : engineLights.addProvider((out) => morphLight.write(out));
+  const startMorphLight = (gen: ResRef | undefined) => morphLight.start(morphLightDefs(pkgs as unknown as PackageSet, gen), view.player.position);
   const world = () => ctx.services.world as WorldLike | undefined;
   const actors = () => ctx.services.actors as ActorsLike | undefined;
   const combat = () => ctx.services.combat as CombatLike | undefined;
@@ -203,7 +224,8 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
 
   const enterCreature = () => {
     const p = view.player;
-    if (!savedMode) savedMode = p.mode;
+    // The view to give back: the chosen one, not a hit reaction's third person (stateTp).
+    if (!savedMode) savedMode = p.chosenMode();
     p.setMode('tp');
     if (!savedSpeeds && body) {
       savedSpeeds = { walk: p.motor.cfg.walkSpeed, run: p.motor.cfg.runSpeed };
@@ -240,6 +262,7 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
         if (restoringForm) body.showCreature();
         else body.startMorph('in', human.morph);
       }
+      if (!restoringForm) startMorphLight(human.morphEffect);
       // The morph-in's Screen Blur (p273, 0x100441f5..0x1004426f; on the game clock, so it
       // mostly runs once the morph has given the clock back).
       const mb = restoringForm ? undefined : templateBlur(pkgs, human.morphBlur);
@@ -261,6 +284,7 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
       if (tint && classes) formRuns.tint = classes.spawnFader({ ...tint, destroyAtEnd: true });
     } else if (form === 'creature') {
       body?.endMorph();
+      morphLight.stop();
       view.player.viewOrbit = 0;
       view.player.setVirtualInput(null);
     } else if (form === 'morphOut') {
@@ -269,6 +293,7 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
         showModel(body.group);
         body.startMorph('out', params!.creature?.morph);
       }
+      startMorphLight(params!.creature?.morphEffect ?? human.morphEffect);
       formRuns.blur?.stop();
       formRuns.tint?.stop();
     } else if (form === 'human') {
@@ -276,6 +301,7 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
       // sent by the morpher's end; the instant change back of a cinematic runs it too, 0x10033346).
       (ctx.services.repskin as { changedBack?(): void } | undefined)?.changedBack?.();
       body?.endMorph();
+      morphLight.stop();
       body?.hide();
       view.player.viewOrbit = 0;
       showModel(null);
@@ -596,6 +622,18 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
       return model?.s.adrenaline ?? 0;
     },
     setMeter: (fraction) => model?.setMeter(fraction * model.max),
+    get reputationRange() {
+      return model ? model.current.reputationRange : undefined;
+    },
+    setReputation: (n) => {
+      if (!model) return;
+      model.s.reputation = n;
+      log(`reputation set to ${n}`);
+    },
+    acquireNextAttack: () => !!model?.acquireNext(),
+    setClockRate: (rate) => {
+      director.baseRate = rate;
+    },
     transform: () => !!model && (model.form === 'human' ? model.pressInsanity() : false),
     revert: () => model?.revert(),
     addReputation: (n, fromUid) => {
@@ -634,6 +672,7 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
   };
 
   const debug = {
+    morphLight,
     service,
     model,
     director,
@@ -695,6 +734,7 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
       hookActors();
       const realDt = view.timeScale > 0 ? dt / view.timeScale : dt;
       clock += dt;
+      morphLight.step(dt);
       if (model) {
         // Cutscenes and death end the transformation at once [inferred from the cinematic
         // entry points that call the revert routine].
@@ -736,6 +776,8 @@ export async function createInsanitySystem(ctx: GameContext): Promise<GameSystem
       window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('mousedown', onMouse, true);
       unsubFrame();
+      offMorphLight();
+      morphLight.stop();
       unhookActors?.();
       offSave();
       offVeto();

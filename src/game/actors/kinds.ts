@@ -27,6 +27,8 @@ export interface KindAttack {
   windows?: ArmWindow[];
   /** Attack p6: damage multiplier on the attack's target. */
   scale?: number;
+  /** Attack p7: impact force multiplier (x the Melee Weapon's p69). */
+  forceScale?: number;
   /** A MeleeAttackBehavior Attack: damage only through a Melee Weapon its clip arms. */
   weaponOnly?: boolean;
 }
@@ -196,7 +198,7 @@ export class KindLibrary {
     const idle = add(map.idle);
     const walk = add(map.walk);
     const run = map.run && (map.run.id !== map.walk?.id || map.run.pkg !== map.walk?.pkg) ? add(map.run) : -1;
-    const attacks = map.attacks.slice(0, 6).map((a) => ({ clip: add(a.clip), reach: a.reach, minReach: a.minReach ?? 0, maxDy: a.maxDy ?? 0, scaled: !!a.scaled, damage: a.damage, scale: a.scale ?? 1, weaponOnly: !!a.weaponOnly, hitTimes: [] as number[] }));
+    const attacks = map.attacks.slice(0, 6).map((a) => ({ clip: add(a.clip), reach: a.reach, minReach: a.minReach ?? 0, maxDy: a.maxDy ?? 0, scaled: !!a.scaled, damage: a.damage, scale: a.scale ?? 1, forceScale: a.forceScale ?? 1, weaponOnly: !!a.weaponOnly, hitTimes: [] as number[] }));
     const hits = map.hits.slice(0, 4).map(add);
     const deaths = map.deaths.slice(0, 3).map(add);
     const fall = add(map.fall);

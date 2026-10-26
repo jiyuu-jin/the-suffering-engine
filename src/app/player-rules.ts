@@ -7,9 +7,9 @@ export const PLAYER_GRAVITY = 24.4;
 /** First-person jump: straight into Fall with vy = p215 (input handler 0x1004982a) [verified]. */
 export const FP_JUMP_SPEED = 10;
 /**
- * Third-person jump launch speed. The original's third-person jump is the PWP p151..p153 clip's
- * root motion (Jump enter 0x1003adf0), not a velocity; this keeps the port's earlier 0.75 m
- * apex under the retail gravity [port value].
+ * Motor launch speed of a third-person jump the clip states do not take (the creature form,
+ * crouched, no PWP clip) [port value: a 0.75 m apex]. The original's third-person jump is the
+ * PWP p151..p153 clip's root motion (Jump enter 0x1003adf0): actors/player-states.ts.
  */
 export const TP_JUMP_SPEED = 6.05;
 /** First-person jump air control: stick x p216 per second (0x1003a6e0) [verified]. */

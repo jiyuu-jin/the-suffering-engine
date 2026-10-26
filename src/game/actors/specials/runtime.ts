@@ -151,9 +151,10 @@ export class SpecialRuntime {
   }
 
   /** Damage the player (services.combat; the attacking actor for hit sounds / reactions). */
-  hurtPlayer(amount: number, by: Actor, env: ActorEnv) {
+  hurtPlayer(amount: number, by: Actor, env: ActorEnv, force?: number) {
     if (amount <= 0 || !env.playerAlive) return;
-    env.damagePlayer(amount, by);
+    // `force`: the blow's impact force, the player's hit reaction (actors/player-states.ts).
+    env.damagePlayer(amount, by, force !== undefined ? { force } : undefined);
   }
 
   /** Damage an actor (services.actors.damage path: events, outputs, reputation). */

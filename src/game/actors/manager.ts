@@ -10,6 +10,7 @@ import type { PackageSet, ResRef } from '../../formats/model';
 import { hasSkeleton } from '../../formats/skeleton';
 import { Actor, sourceId, type ActorEnv, type ActorProfile, type AiNoise, type DamageSource, type RangedAttack, type RangedProfile } from './actor';
 import { KindLibrary } from './kinds';
+import { DecorBatches } from './decor-batch';
 import { CHARACTER_CLASSES } from './classes';
 import { NavGraph, NO_NAV_TYPE } from './nav';
 import { CHARACTER_MELEE_SLOT, readDormancy, type ClipRef } from './clipmap';
@@ -146,6 +147,9 @@ export class ActorManager {
   private nextCloneUid = 0x7f000000;
   private unknown = new Set<string>();
 
+  /** Merged draws of the skinned decorations (decor-batch.ts; QA: `__actors.manager.decor.stats`). */
+  decor: DecorBatches | null = null;
+
   /** Create actors for every placed creature / NPC / skinned decoration. */
   populate(entities: Entity[], pkgs: PackageSet) {
     this.pkgs = pkgs;
@@ -205,6 +209,8 @@ export class ActorManager {
         }
       }
     }
+    // Skinned decorations of one model drawn as one mesh per material (decor-batch.ts).
+    this.decor = new DecorBatches(this.actors, this.group);
   }
 
   /**
@@ -344,8 +350,10 @@ export class ActorManager {
       return t && c ? { cls: c.name, v: decodeTemplateProps(c, t) } : undefined;
     };
     // Missile p16: the InvestigateSound of the shot (27 m, level 2 for the guards' bullets) [data].
-    const missile = (m: { v: PropValue[] }, count = 1) => ({ damage: n(m.v[26], 6) * count, speed: n(m.v[1], 200000) / 2048, noise: this.behaviors.noise(list(m.v[16])[0]), type: n(m.v[32], 1) });
-    let shot: { damage: number; speed: number; spread?: number; flash?: ResRef; noise?: NoiseSpec; type?: number } | undefined;
+    // p28..p29 the impact force near / far over p30..p31 m (one record per projectile: a shot's
+    // force is one round's, not the sum) [verified: the damage record's +0x1c, docs/game-logic.md §15.13].
+    const missile = (m: { v: PropValue[] }, count = 1) => ({ damage: n(m.v[26], 6) * count, speed: n(m.v[1], 200000) / 2048, noise: this.behaviors.noise(list(m.v[16])[0]), type: n(m.v[32], 1), force: { near: n(m.v[28], 0), far: n(m.v[29], 0), nearDist: n(m.v[30], 1000), farDist: n(m.v[31], 1000) } });
+    let shot: { damage: number; speed: number; spread?: number; flash?: ResRef; noise?: NoiseSpec; type?: number; force?: RangedProfile['force'] } | undefined;
     let thrown: RangedProfile['thrown'];
     for (const r of [...list(values[CHAR.weapons]), ...list(values[55])]) {
       const w = decode(r);
@@ -440,7 +448,7 @@ export class ActorManager {
     // ProjectileAttackBehavior p5 != 0: a throw keeps the aim point taken when the firing clip
     // started (0x100fd069..0x100fd0b9) [verified]; 18 of 20 retail behaviours set it.
     const keepAim = n(b.v[5], 0) !== 0;
-    return { keepAim, attacks, cooldownMin: n(b.v[19], 2), cooldownMax: Math.max(n(b.v[19], 2), n(b.v[20], 4)), range, damage: shot.damage, type: shot.type, speed: shot.speed, spread: shot.spread ?? 0, flash: shot.flash, noise: shot.noise, thrown, track, aim };
+    return { keepAim, attacks, cooldownMin: n(b.v[19], 2), cooldownMax: Math.max(n(b.v[19], 2), n(b.v[20], 4)), range, damage: shot.damage, type: shot.type, force: shot.force, speed: shot.speed, spread: shot.spread ?? 0, flash: shot.flash, noise: shot.noise, thrown, track, aim };
   }
 
   /**
@@ -773,7 +781,7 @@ export class ActorManager {
     // above the lower corridor: 4.5 m up). Cull around the hips.
     const hips = bodyHips(a);
     if (hips) {
-      p = hips.getWorldPosition(this.hipsPos);
+      p = hipsWorldPosition(hips, this.hipsPos);
       bottom = this.hipsPos.y - h * 0.5;
       dist = this.hipsPos.distanceTo(cam);
     }
@@ -849,6 +857,7 @@ export class ActorManager {
       const p = a.position;
       this.cull(a, 0, cam, Math.hypot(p.x - cam.x, a.bottom + a.height * 0.5 - cam.y, p.z - cam.z), cut, cinematic);
     }
+    this.decor?.update();
   }
 
   /**
@@ -975,6 +984,8 @@ export class ActorManager {
   }
 
   dispose() {
+    this.decor?.dispose();
+    this.decor = null;
     for (const a of this.actors) a.dispose();
     this.actors.length = 0;
     this.byUid.clear();
@@ -1039,6 +1050,26 @@ function rayCapsule(o: THREE.Vector3Like, d: THREE.Vector3Like, base: THREE.Vect
   // Origin inside.
   if (ox * ox + oz * oz <= r * r && o.y >= base.y && o.y <= base.y + h) consider(0);
   return best;
+}
+
+/**
+ * World position of `bone` from the local transforms of it and its ancestors, as
+ * `getWorldPosition` would compute it, without writing any matrix (docs/perf.md Perf D: that
+ * call recomposed and multiplied the five matrices above the hips, twice per actor and frame,
+ * most of the actor time of 9 and 10). Where three.js would keep a node's world matrix (no
+ * matrixWorldAutoUpdate: the scene; or no matrixAutoUpdate and no matrixWorldNeedsUpdate) that
+ * matrix is used, as it would be; a node without matrixAutoUpdate otherwise contributes its matrix.
+ */
+export function hipsWorldPosition(bone: THREE.Object3D, out: THREE.Vector3): THREE.Vector3 {
+  let o: THREE.Object3D | null = bone;
+  out.set(0, 0, 0);
+  while (o) {
+    if (!o.matrixWorldAutoUpdate || (!o.matrixAutoUpdate && !o.matrixWorldNeedsUpdate)) return out.applyMatrix4(o.matrixWorld);
+    if (o.matrixAutoUpdate) out.multiply(o.scale).applyQuaternion(o.quaternion).add(o.position);
+    else out.applyMatrix4(o.matrix);
+    o = o.parent;
+  }
+  return out;
 }
 
 /** Hips bone of an actor's rig (first bone under the root bone), cached. */

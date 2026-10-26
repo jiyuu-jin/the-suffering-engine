@@ -22,6 +22,7 @@ import { EnhancedPipeline, grade, type EnhancedStage, type EnhancedStageHook } f
 import { sharpenFor } from './sharpen';
 import { TierGovernor, probeAdapter, type AdapterProbe } from './auto-tier';
 import { engineLights } from '../engine-light';
+import { updateLightVolumes } from './light-volume-pass';
 
 /** The page was given `?tier=` (QA): the menu's saved tier does not override it. */
 const URL_TIER = typeof location !== 'undefined' && new URLSearchParams(location.search).has('tier');
@@ -71,6 +72,7 @@ export class EnhancedRenderer {
   /** Blood and gore (gore/index.ts, docs/enhanced.md "Gore"). */
   readonly gore: EnhancedGore;
   private lastDraw = -1;
+  private frames = 0;
   private readonly clock = performance.now();
   stats = { drawMs: 0, tierChanges: 0 };
   /** Shared uniforms (QA / tuning from the console: `__enhanced.uniforms.grade.exposure.value`). */
@@ -156,6 +158,7 @@ export class EnhancedRenderer {
     const h = this.host;
     const time = (t0 - this.clock) / 1000;
     enhancedLights.update(h.camera, h.flashlight, this.features, time);
+    updateLightVolumes(h.camera, time, this.frames++);
     this.shadows.render(h.renderer, h.scene, h.camera, this.features);
     grade.time.value = time;
     // Insanity: the screen effects' hallucination blur / vignette / flashes bend the lens.

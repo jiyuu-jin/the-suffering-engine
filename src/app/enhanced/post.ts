@@ -48,6 +48,7 @@ import { fxaa } from 'three/addons/tsl/display/FXAANode.js';
 import type { TierFeatures } from './config';
 import { warmPasses, type WarmPass } from '../prewarm';
 import { VolumetricNode } from './volumetric';
+import { LightVolumeNode } from './light-volume-pass';
 import { HalfDepthNode } from './half-depth';
 import { TONE } from './tone';
 import { rcas } from './sharpen';
@@ -204,6 +205,12 @@ export class EnhancedPipeline {
       // (Half strength: the baked light already carries its contact darkening.)
       c = vec4(c.rgb.mul(mix(float(1), occl, grade.ao)), c.a);
     }
+    // The level's light shafts and the projector beams as lit volumes (light-volume-pass.ts).
+    // (Its own pass at half the render scale, skipped in frames without a volume in view.)
+    const lv = new LightVolumeNode(depth, camera, useTraa);
+    lv.resolutionScale = 0.5 * f.renderScale;
+    this.disposables.push(lv);
+    c = vec4(c.rgb.add(lv.getTextureNode().rgb.mul(lv.on)), c.a);
     this.volumetric = null;
     if (f.volumetricSteps > 0) {
       const vol = new VolumetricNode(depth, camera);
